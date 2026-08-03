@@ -1,50 +1,50 @@
 import pytest
 
+from hilrig import FrozenTestError
 from hilrig import Test as HilRigTest
-from hilrig.exceptions import TimingError, ValidationError
-from hilrig.models.instructions import DigitalLevel
+from hilrig.models.instructions import DigitalOutputAction
 
 
-def test_compile_orders_and_groups_instructions_stably() -> None:
-    test = HilRigTest("Out-of-order definition")
-    output = test.digital_out(0)
-    output.high(at=200)
-    output.low(at=100)
-    output.high(at=100)
+def test_preliminary_compile_preserves_test_id_and_groups_stably() -> None:
+    test = HilRigTest(name="Out-of-order definition")
+    output = test.digital_output(channel=0)
+    output.high(at_tick=200)
+    output.low(at_tick=100)
+    output.toggle(at_tick=100)
 
     plan = test.compile()
 
+    assert plan.test_id == test.test_id
     assert [slot.timestamp for slot in plan.time_slots] == [100, 200]
-    assert [instruction.level for instruction in plan.time_slots[0].instructions] == [
-        DigitalLevel.LOW,
-        DigitalLevel.HIGH,
+    assert [instruction.action for instruction in plan.time_slots[0].instructions] == [
+        DigitalOutputAction.LOW,
+        DigitalOutputAction.TOGGLE,
+    ]
+    assert [instruction.instruction_id for instruction in plan.time_slots[0].instructions] == [
+        1,
+        2,
     ]
 
 
-def test_compile_is_idempotent() -> None:
-    test = HilRigTest("Compile once")
-    test.digital_out(0).high(at=0)
+def test_empty_internal_model_can_be_compiled() -> None:
+    test = HilRigTest(name="Observation-only test")
 
-    first_plan = test.compile()
-    second_plan = test.compile()
+    plan = test.compile()
 
-    assert second_plan is first_plan
+    assert plan.time_slots == ()
 
 
-def test_empty_test_cannot_be_compiled() -> None:
-    test = HilRigTest("Empty")
+def test_successful_preliminary_compilation_freezes_all_model_changes() -> None:
+    test = HilRigTest(name="Frozen test")
+    output = test.digital_output(channel=0)
+    digital_input = test.digital_input(channel=0)
+    test.compile()
 
-    with pytest.raises(ValidationError, match="at least one instruction"):
-        test.compile()
+    with pytest.raises(FrozenTestError):
+        output.high(at_tick=1)
 
-    assert not test.is_compiled
+    with pytest.raises(FrozenTestError):
+        test.expect(digital_input).high(at_tick=1)
 
-
-def test_negative_timestamp_is_rejected_during_compilation() -> None:
-    test = HilRigTest("Invalid timing")
-    test.digital_out(0).high(at=-1)
-
-    with pytest.raises(TimingError, match="non-negative"):
-        test.compile()
-
-    assert not test.is_compiled
+    with pytest.raises(FrozenTestError):
+        test.digital_output(channel=1)

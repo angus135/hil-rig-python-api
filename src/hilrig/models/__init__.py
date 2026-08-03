@@ -1,24 +1,77 @@
-"""Protocol-neutral data models used by the API and compiler."""
+"""Protocol-neutral data models used by the host-side API."""
 
+from hilrig.models.assertions import (
+    Assertion,
+    AssertionList,
+    DigitalInputPointAssertion,
+    DigitalInputRemainHighAssertion,
+    DigitalInputTransitionAssertion,
+)
 from hilrig.models.channels import Channel, ChannelKind
-from hilrig.models.configuration import Configuration, FrequencyMode
+from hilrig.models.configuration import (
+    Configuration,
+    DigitalInputConfiguration,
+    DigitalOutputConfiguration,
+    DigitalState,
+    FrequencyMode,
+    I2CConfiguration,
+    I2CRole,
+    I2CSpeed,
+    LogicVoltage,
+    Pullup,
+    PwmInputConfiguration,
+    PwmOutputConfiguration,
+    StartMode,
+)
 from hilrig.models.execution import ExecutionPlan, TimeSlot
 from hilrig.models.instructions import (
-    DigitalLevel,
+    AnalogueOutputInstruction,
+    DigitalOutputAction,
     DigitalOutputInstruction,
+    I2CPreloadResponseInstruction,
+    I2CReadInstruction,
+    I2CWriteInstruction,
     Instruction,
     InstructionList,
+    PwmEnableInstruction,
+    PwmSetDutyCycleInstruction,
+    PwmSetFrequencyInstruction,
+    PwmSetInstruction,
 )
 
 __all__ = [
+    "AnalogueOutputInstruction",
+    "Assertion",
+    "AssertionList",
     "Channel",
     "ChannelKind",
     "Configuration",
-    "DigitalLevel",
+    "DigitalInputConfiguration",
+    "DigitalInputPointAssertion",
+    "DigitalInputRemainHighAssertion",
+    "DigitalInputTransitionAssertion",
+    "DigitalOutputAction",
+    "DigitalOutputConfiguration",
     "DigitalOutputInstruction",
+    "DigitalState",
     "ExecutionPlan",
     "FrequencyMode",
+    "I2CConfiguration",
+    "I2CPreloadResponseInstruction",
+    "I2CReadInstruction",
+    "I2CRole",
+    "I2CSpeed",
+    "I2CWriteInstruction",
     "Instruction",
     "InstructionList",
+    "LogicVoltage",
+    "Pullup",
+    "PwmEnableInstruction",
+    "PwmInputConfiguration",
+    "PwmOutputConfiguration",
+    "PwmSetDutyCycleInstruction",
+    "PwmSetFrequencyInstruction",
+    "PwmSetInstruction",
+    "StartMode",
     "TimeSlot",
 ]

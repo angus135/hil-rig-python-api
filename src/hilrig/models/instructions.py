@@ -1,36 +1,97 @@
-"""Timed actions in a user-defined HIL-RIG test."""
+"""Protocol-neutral stimulus instructions in a user-defined HIL-RIG test."""
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import Enum
 
 from hilrig.models.channels import Channel
 
 
 @dataclass(frozen=True, slots=True)
 class Instruction:
-    """Information shared by every timed instruction."""
+    """Information shared by every timed stimulus instruction."""
 
+    instruction_id: int
     timestamp: int
     channel: Channel
 
 
-class DigitalLevel(IntEnum):
-    """Logical level driven by a digital output."""
+class DigitalOutputAction(str, Enum):
+    """Supported digital output stimulus operations."""
 
-    LOW = 0
-    HIGH = 1
+    HIGH = "high"
+    LOW = "low"
+    TOGGLE = "toggle"
 
 
 @dataclass(frozen=True, slots=True)
 class DigitalOutputInstruction(Instruction):
-    """Set a digital output to a logical level."""
+    """Drive or toggle a digital output."""
 
-    level: DigitalLevel
+    action: DigitalOutputAction
+
+
+@dataclass(frozen=True, slots=True)
+class PwmEnableInstruction(Instruction):
+    """Enable or disable a PWM output."""
+
+    enabled: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PwmSetInstruction(Instruction):
+    """Atomically set both PWM frequency and duty cycle."""
+
+    frequency_hz: float
+    duty_cycle: float
+
+
+@dataclass(frozen=True, slots=True)
+class PwmSetFrequencyInstruction(Instruction):
+    """Change only a PWM output's frequency."""
+
+    frequency_hz: float
+
+
+@dataclass(frozen=True, slots=True)
+class PwmSetDutyCycleInstruction(Instruction):
+    """Change only a PWM output's duty cycle."""
+
+    duty_cycle: float
+
+
+@dataclass(frozen=True, slots=True)
+class AnalogueOutputInstruction(Instruction):
+    """Set an analogue output voltage."""
+
+    voltage: float
+
+
+@dataclass(frozen=True, slots=True)
+class I2CWriteInstruction(Instruction):
+    """Perform an I2C master write."""
+
+    address: int
+    data: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class I2CReadInstruction(Instruction):
+    """Perform an I2C master read."""
+
+    address: int
+    length: int
+
+
+@dataclass(frozen=True, slots=True)
+class I2CPreloadResponseInstruction(Instruction):
+    """Preload the response returned by an I2C slave channel."""
+
+    data: bytes
 
 
 class InstructionList:
-    """Insertion-ordered collection of instructions under construction."""
+    """Insertion-ordered collection of stimulus instructions under construction."""
 
     def __init__(self) -> None:
         self._items: list[Instruction] = []

@@ -1,106 +1,126 @@
-# Host software architecture
+# Host software internal model
 
-## Responsibility
+## Current responsibility
 
-The library defines and compiles complete tests before execution. It does not perform
-live hardware I/O. The rig remains responsible for deterministic execution and data
-collection.
+The implemented library constructs an in-memory description of a test. It does not
+currently define how that description becomes an IDC application message, how bytes
+are transported to the rig, or how returned time-series data is parsed and evaluated.
 
 ```text
 User script
     |
     v
-Public API
+Public Test and channel-handle API
     |
     v
-Internal test model
-    |
-    v
-Validation and compilation
-    |
-    v
-Execution plan
-    |
-    v
-IDC serialization and transport (future)
-    |
-    v
-HIL-RIG firmware
-    |
-    v
-Result parsing, assertions, and reports (future)
+Internal model
+    |-- test ID and test-level configuration
+    |-- shared channel identities and peripheral configurations
+    |-- sequentially identified stimulus instructions
+    `-- host-side digital-input assertions
+
+Future, intentionally undecided:
+    compilation/lowering -> IDC serialization -> transport -> result/assertion engine
 ```
 
-## Current package boundaries
+## Test ownership
 
-### `api.py`
+One `Test` owns:
 
-Owns the interface test authors use. Channel handles such as `DigitalOutput` translate
-readable calls like `led.high(at=100)` into internal instruction objects.
+- a random 128-bit test identifier;
+- a human-readable name;
+- one test-level and peripheral `Configuration` model;
+- one insertion-ordered `InstructionList`;
+- one insertion-ordered `AssertionList`;
+- stable handles for every referenced channel.
 
-### `models/`
+The same immutable `Channel` identity is referenced by its peripheral configuration,
+stimulus instructions, and assertions. These objects do not create independent copies
+of a channel.
 
-Contains data, not workflow:
+## Public handles and internal data
 
-- immutable configuration values;
-- channel identities;
-- individual instructions;
-- the mutable instruction collection used while defining a test;
-- immutable `ExecutionPlan` and `TimeSlot` compiler output.
+User-facing handles translate readable operations into data objects. For example:
 
-An `InstructionList` wraps a normal Python list. This keeps insertion straightforward
-while giving ordering and grouping operations a clear home.
+```python
+led = test.digital_output(channel=0)
+led.high(at_ms=100)
+```
 
-### `compiler.py`
+creates a `DigitalOutputInstruction` containing a sequential ID, converted tick,
+shared channel identity, and `HIGH` action. It does not communicate with hardware.
 
-Validates the internal model and transforms it into a chronological execution plan.
-Instructions with the same timestamp remain in insertion order because Python sorting
-is stable.
+All channel accessors require the explicit keyword `channel=`. Handles are cached, so
+asking for the same peripheral kind and channel index returns the same object.
 
-### `exceptions.py`
+## Configuration model
 
-Defines errors callers can catch without depending on low-level implementation
-exceptions.
+The root configuration stores `FrequencyMode` and `StartMode`. Channel configurations
+are stored in a read-only mapping keyed by shared `Channel` identities. A channel may
+only be configured once.
+
+No recording-enable setting exists. Recording is treated as rig-wide behaviour rather
+than user-selected channel configuration.
+
+## Time model
+
+`timing.py` converts ticks, milliseconds, or seconds into integer ticks using the
+configured `FrequencyMode`. Exactly one unit must be supplied and the requested time
+must align with a whole tick. Range assertions use the same conversion rules for both
+bounds.
+
+Changing the test frequency after timed instructions or assertions exist is rejected,
+because doing so would invalidate their already-converted timestamps.
+
+## Instruction model
+
+Every stimulus inherits from `Instruction`, which stores:
+
+- `instruction_id`;
+- integer `timestamp` in ticks;
+- shared `Channel` identity.
+
+IDs are assigned in creation order from zero and remain attached to their instructions
+when a chronological view is produced. `InstructionList` retains insertion order and
+also provides stable sorting and grouping helpers.
+
+## Assertion model
+
+Assertions remain separate from stimulus instructions and are intended to be evaluated
+on the host against returned time-series data. The current internal model only defines
+digital-input point, remain-high, and transition assertions. It does not yet define
+results or evaluation algorithms.
+
+## Preliminary compiler boundary
+
+The existing `compile()` method is retained only as a preliminary stable ordering and
+freezing mechanism. Its `ExecutionPlan` and `TimeSlot` objects do not define a package,
+wire format, instruction lowering strategy, or IDC contract. Those decisions remain
+open and can be replaced without changing the internal test-definition model.
+
+An observation-only test may contain assertions without stimulus instructions, because
+the rig is expected to record all channels.
 
 ## Planned boundaries
 
-Add these only when their requirements are stable:
+Add these only after their designs are agreed:
 
 ```text
 src/hilrig/
-|-- assertions/   Host-side assertion evaluation
 |-- idc/          Application-message serialization and parsing
 |-- transport/    USB CDC connection and byte transfer
-|-- results/      Measurements and firmware result parsing
+|-- results/      Typed channel time series and firmware result parsing
+|-- assertions/   Evaluation of stored assertions against result series
 `-- reporting/    Human- and machine-readable reports
 ```
 
-IDC encoding belongs below the compiler. It should consume an `ExecutionPlan` (or a
-later protocol-neutral intermediate representation), not inspect the public API's
-channel handles. This allows protocol changes without redesigning how users write
-tests.
-
-## Compilation lifecycle
-
-1. The user creates a `Test`.
-2. Configuration and instruction calls populate the internal model.
-3. `compile()` validates the complete model.
-4. Instructions are stably sorted and grouped into `TimeSlot` objects.
-5. Successful compilation freezes the test definition.
-6. A future IDC serializer converts the immutable plan into application messages.
-
-A failed compilation leaves the test editable so the author can correct it. Repeated
-successful calls to `compile()` return the same immutable plan.
-
 ## Testing approach
 
-Unit tests should cover each layer independently:
+- API tests verify handles, configuration, automatic IDs, and removed behaviour.
+- Timing tests verify exact conversion and alignment errors.
+- Instruction tests verify each specified stimulus payload and I2C role rules.
+- Assertion tests verify only the currently specified digital-input definitions.
+- Future IDC tests should use agreed known byte vectors.
+- Future hardware tests should be a separate, explicitly selected test category.
 
-- API tests verify readable calls create the expected model;
-- compiler tests verify validation, ordering, grouping, and immutability;
-- future IDC tests should use known byte vectors;
-- future transport tests should use a fake serial connection;
-- integration tests can exercise multiple layers without physical hardware;
-- hardware tests should be a separate, explicitly selected test category.
-
-The default CI workflow runs only deterministic tests that require no connected rig.
+The default CI workflow runs deterministic tests that require no connected rig.

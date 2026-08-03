@@ -8,6 +8,7 @@ from hilrig.models.instructions import Instruction, InstructionList
 
 def compile_test(
     *,
+    test_id: int,
     name: str,
     configuration: Configuration,
     instructions: InstructionList,
@@ -19,14 +20,18 @@ def compile_test(
         TimeSlot(timestamp=timestamp, instructions=group)
         for timestamp, group in instructions.group_by_timestamp().items()
     )
-    return ExecutionPlan(name=name, configuration=configuration, time_slots=time_slots)
+    return ExecutionPlan(
+        test_id=test_id,
+        name=name,
+        configuration=configuration,
+        time_slots=time_slots,
+    )
 
 
 def _validate_instructions(instructions: InstructionList) -> None:
-    if not instructions:
-        raise ValidationError("A test must contain at least one instruction")
-
-    for instruction in instructions:
+    for expected_id, instruction in enumerate(instructions):
+        if instruction.instruction_id != expected_id:
+            raise ValidationError("Instruction IDs must be sequential from zero")
         _validate_timestamp(instruction)
 
 

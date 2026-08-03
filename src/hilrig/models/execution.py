@@ -16,8 +16,9 @@ class TimeSlot:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionPlan:
-    """A validated plan ready for future IDC serialization."""
+    """Preliminary ordered view of a test; no IDC representation is implied."""
 
+    test_id: int
     name: str
     configuration: Configuration
     time_slots: tuple[TimeSlot, ...]
