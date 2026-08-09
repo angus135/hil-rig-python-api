@@ -4,9 +4,9 @@ Host-side Python library for constructing an internal model of a hardware-in-the
 test for the HIL-RIG.
 
 The current implementation covers test and peripheral configuration, stimulus
-instructions, exact user-time-to-tick conversion, and digital-input assertion
-definitions. It does not define an IDC representation, serialize a test, communicate
-over USB, execute assertions, or parse result data.
+instructions, exact user-time-to-tick conversion, digital-input assertion definitions,
+and protocol-neutral JSON and Excel intermediate representations. It does not define an
+IDC representation, communicate over USB, execute assertions, or parse result data.
 
 ## Requirements
 
@@ -58,6 +58,10 @@ enable_command.low(at_s=0.5)
 
 test.expect(enable_feedback).high(at_tick=100)
 test.expect(enable_feedback).remain_high(from_ms=100, until_ms=400)
+
+compiled = test.compile()
+compiled.write_json("motor-controller-startup.json")
+compiled.write_excel("motor-controller-startup.xlsx")
 ```
 
 Every `Test` receives a random 128-bit integer `test_id`. Every stimulus instruction
@@ -178,6 +182,37 @@ Only digital-input assertion definitions are implemented:
 The assertion objects are only stored in the internal model. Result data and assertion
 evaluation are deliberately not implemented yet.
 
+## Compile and export
+
+`test.compile()` runs the current validation checks, chronologically orders stimulus
+instructions by tick and instruction ID, freezes the `Test`, and returns an immutable
+`CompiledTestIR` snapshot. Compilation itself does not create files, so the same
+validated snapshot can be inspected, tested, or exported more than once:
+
+```python
+compiled = test.compile()
+
+json_text = compiled.to_json()  # JSON string, no file created
+compiled.write_json("build/my-test.json")  # machine-readable RIG input
+compiled.write_excel("build/my-test.xlsx")  # human-readable review workbook
+```
+
+The versioned JSON document contains the test summary, peripheral configurations, and
+chronological stimulus instructions. Test IDs are written as 32 hexadecimal digits,
+enum members use their stable symbolic names, and byte strings use `0x`-prefixed hex.
+Assertions are deliberately excluded because they are evaluated on the host rather
+than sent to the RIG.
+
+The Excel workbook contains four sheets:
+
+- `Test Summary`
+- `Configurations`
+- `Instructions`
+- `Assertions`
+
+The workbook is a review/reporting view, not an IDC packet definition. Neither exporter
+performs USB communication.
+
 ## Run the development checks
 
 ```powershell
@@ -203,7 +238,8 @@ python -m ruff format .
 |-- src/hilrig/                    Installable Python package
 |   |-- api.py                     Public Test and channel-handle API
 |   |-- timing.py                  Exact conversion into ticks
-|   |-- compiler.py                Preliminary ordering only; not final packaging
+|   |-- compiler.py                Validation and immutable IR snapshot construction
+|   |-- exporters/                 JSON machine IR and human-readable Excel export
 |   |-- exceptions.py              Library-specific exception hierarchy
 |   `-- models/                    Internal configuration/instruction/assertion data
 |-- tests/                         Unit tests

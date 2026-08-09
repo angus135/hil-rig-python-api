@@ -43,7 +43,7 @@ from hilrig.models.configuration import (
     UARTParity,
     UARTStopBits,
 )
-from hilrig.models.execution import ExecutionPlan
+from hilrig.models.execution import CompiledTestIR
 from hilrig.models.instructions import (
     AnalogueOutputInstruction,
     DigitalOutputAction,
@@ -728,7 +728,7 @@ class Test:
         self._assertions = AssertionList()
         self._next_instruction_id = 0
         self._handles: dict[tuple[ChannelKind, int], _ChannelHandle] = {}
-        self._compiled_plan: ExecutionPlan | None = None
+        self._compiled_plan: CompiledTestIR | None = None
 
     @property
     def test_id(self) -> int:
@@ -824,14 +824,15 @@ class Test:
             raise TypeError("expect() currently supports a digital input from this Test")
         return DigitalInputExpectation(self, channel)
 
-    def compile(self) -> ExecutionPlan:
-        """Run the existing preliminary ordering compiler and freeze the model."""
+    def compile(self) -> CompiledTestIR:
+        """Validate, snapshot, and freeze this test definition."""
         if self._compiled_plan is None:
             self._compiled_plan = compile_test(
                 test_id=self._test_id,
                 name=self._name,
                 configuration=self._configuration,
                 instructions=self._instructions,
+                assertions=self._assertions,
             )
         return self._compiled_plan
 

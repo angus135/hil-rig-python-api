@@ -38,10 +38,12 @@ from hilrig.models.configuration import (
     UARTParity,
     UARTStopBits,
 )
+from hilrig.models.execution import CompiledTestIR
 
 __all__ = [
     "AnalogueOutput",
     "ConfigurationError",
+    "CompiledTestIR",
     "DigitalInput",
     "DigitalInputExpectation",
     "DigitalOutput",

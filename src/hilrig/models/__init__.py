@@ -34,7 +34,14 @@ from hilrig.models.configuration import (
     UARTParity,
     UARTStopBits,
 )
-from hilrig.models.execution import ExecutionPlan, TimeSlot
+from hilrig.models.execution import (
+    CompiledAssertion,
+    CompiledConfiguration,
+    CompiledInstruction,
+    CompiledTestIR,
+    ExecutionPlan,
+    TimeSlot,
+)
 from hilrig.models.instructions import (
     AnalogueOutputInstruction,
     DigitalOutputAction,
@@ -58,6 +65,10 @@ __all__ = [
     "AssertionList",
     "Channel",
     "ChannelKind",
+    "CompiledAssertion",
+    "CompiledConfiguration",
+    "CompiledInstruction",
+    "CompiledTestIR",
     "Configuration",
     "DigitalInputConfiguration",
     "DigitalInputPointAssertion",

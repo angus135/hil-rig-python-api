@@ -28,3 +28,9 @@ for instruction in test.instructions:
     print(instruction)
 for assertion in test.assertions:
     print(assertion)
+
+compiled = test.compile()
+
+json_text = compiled.to_json()  # JSON string, no file created
+compiled.write_json("build/my-test.json")  # machine-readable RIG input
+compiled.write_excel("build/my-test.xlsx")  # human-readable review workbook

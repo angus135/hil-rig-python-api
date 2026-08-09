@@ -2,9 +2,10 @@
 
 ## Current responsibility
 
-The implemented library constructs an in-memory description of a test. It does not
-currently define how that description becomes an IDC application message, how bytes
-are transported to the rig, or how returned time-series data is parsed and evaluated.
+The implemented library constructs an in-memory description of a test and compiles it
+into a protocol-neutral intermediate representation. It does not define how that IR
+becomes an IDC application message, how bytes are transported to the rig, or how
+returned time-series data is parsed and evaluated.
 
 ```text
 User script
@@ -19,8 +20,14 @@ Internal model
     |-- sequentially identified stimulus instructions
     `-- host-side digital-input assertions
 
+    |
+    v
+Immutable CompiledTestIR
+    |-- versioned machine JSON (summary, configurations, instructions)
+    `-- human Excel workbook (also includes assertions)
+
 Future, intentionally undecided:
-    compilation/lowering -> IDC serialization -> transport -> result/assertion engine
+    IDC lowering/serialization -> transport -> result/assertion engine
 ```
 
 ## Test ownership
@@ -97,12 +104,25 @@ on the host against returned time-series data. The current internal model only d
 digital-input point, remain-high, and transition assertions. It does not yet define
 results or evaluation algorithms.
 
-## Preliminary compiler boundary
+## Compiler and intermediate-representation boundary
 
-The existing `compile()` method is retained only as a preliminary stable ordering and
-freezing mechanism. Its `ExecutionPlan` and `TimeSlot` objects do not define a package,
-wire format, instruction lowering strategy, or IDC contract. Those decisions remain
-open and can be replaced without changing the internal test-definition model.
+`compile()` runs the current validation, makes instruction ordering deterministic, and
+returns an immutable `CompiledTestIR` snapshot. The snapshot contains copied scalar IR
+data rather than live configuration collections. A successful compile freezes the
+source `Test`; repeated calls return the same compiled object.
+
+The machine-readable JSON IR is explicitly versioned. It contains the test summary,
+peripheral configurations, and chronological stimulus instructions. It omits assertions
+because those are host-side operations and must not be sent to the RIG. Bytes are hex,
+test IDs are fixed-width hex, and enums are stored by symbolic member name.
+
+The human-readable `.xlsx` view contains `Test Summary`, `Configurations`,
+`Instructions`, and `Assertions` sheets. It is generated from the same compiled
+snapshot, so it cannot disagree with the JSON about rig-facing data.
+
+Neither representation defines an IDC package, wire format, instruction opcode, USB
+transport, or returned-result format. The future IDC layer will lower the machine IR
+into the eventual transport representation without changing the user-facing test API.
 
 An observation-only test may contain assertions without stimulus instructions, because
 the rig is expected to record all channels.
@@ -116,8 +136,7 @@ src/hilrig/
 |-- idc/          Application-message serialization and parsing
 |-- transport/    USB CDC connection and byte transfer
 |-- results/      Typed channel time series and firmware result parsing
-|-- assertions/   Evaluation of stored assertions against result series
-`-- reporting/    Human- and machine-readable reports
+`-- assertions/   Evaluation of stored assertions against result series
 ```
 
 ## Testing approach
