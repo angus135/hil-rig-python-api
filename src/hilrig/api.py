@@ -30,7 +30,18 @@ from hilrig.models.configuration import (
     Pullup,
     PwmInputConfiguration,
     PwmOutputConfiguration,
+    SPIBaud,
+    SPIConfiguration,
+    SPIFirst,
+    SPIMode,
+    SPIRole,
+    SPISize,
     StartMode,
+    UARTConfiguration,
+    UARTLengthBits,
+    UARTMode,
+    UARTParity,
+    UARTStopBits,
 )
 from hilrig.models.execution import ExecutionPlan
 from hilrig.models.instructions import (
@@ -46,6 +57,8 @@ from hilrig.models.instructions import (
     PwmSetDutyCycleInstruction,
     PwmSetFrequencyInstruction,
     PwmSetInstruction,
+    SPITransferInstruction,
+    UARTWriteInstruction,
 )
 from hilrig.timing import TimeRange, TimeValue, resolve_time_range, resolve_timestamp
 
@@ -445,6 +458,160 @@ class I2C(_ChannelHandle):
             )
 
 
+class SPI(_ChannelHandle):
+    """A reusable handle for one SPI channel."""
+
+    def configure(
+        self,
+        *,
+        role: SPIRole,
+        baud: SPIBaud,
+        data_size: SPISize,
+        mode: SPIMode,
+        first_bit: SPIFirst,
+    ) -> SPI:
+        """Configure this SPI channel."""
+        _require_enum(role, SPIRole, name="role")
+        _require_enum(baud, SPIBaud, name="baud")
+        _require_enum(data_size, SPISize, name="data_size")
+        _require_enum(mode, SPIMode, name="mode")
+        _require_enum(first_bit, SPIFirst, name="first_bit")
+        self._test._configure_channel(
+            self._identity,
+            SPIConfiguration(
+                role=role,
+                baud=baud,
+                data_size=data_size,
+                mode=mode,
+                first_bit=first_bit,
+            ),
+        )
+        return self
+
+    def transfer(
+        self,
+        *,
+        tx_data: bytes,
+        rx_length: int,
+        at_tick: int | None = None,
+        at_ms: TimeValue | None = None,
+        at_s: TimeValue | None = None,
+    ) -> SPI:
+        """Schedule one master-mode SPI transfer."""
+        configuration = self._configuration_for_transfer()
+        payload = _bytes(tx_data)
+        received_bytes = _non_negative_integer(rx_length, name="rx_length")
+        if not payload and received_bytes == 0:
+            raise ValueError("An SPI transfer must transmit or receive at least one byte")
+        if configuration.data_size is SPISize.SIZE_16BIT:
+            if len(payload) % 2 != 0:
+                raise ValueError("tx_data length must be even for 16-bit SPI frames")
+            if received_bytes % 2 != 0:
+                raise ValueError("rx_length must be even for 16-bit SPI frames")
+        timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
+        self._test._schedule(
+            lambda instruction_id: SPITransferInstruction(
+                instruction_id=instruction_id,
+                timestamp=timestamp,
+                channel=self._identity,
+                tx_data=payload,
+                rx_length=received_bytes,
+            )
+        )
+        return self
+
+    def _configuration_for_transfer(self) -> SPIConfiguration:
+        configuration = self._test.configuration.for_channel(self._identity)
+        if not isinstance(configuration, SPIConfiguration):
+            raise ConfigurationError(
+                f"SPI channel {self.channel} must be configured before adding stimuli"
+            )
+        if configuration.role is not SPIRole.MASTER:
+            raise PeripheralError(
+                f"SPI channel {self.channel} is configured as slave; transfer() generates "
+                "clocks and is only defined for a master channel"
+            )
+        return configuration
+
+
+class UART(_ChannelHandle):
+    """A reusable handle for one UART channel."""
+
+    def configure(
+        self,
+        *,
+        mode: UARTMode,
+        baud_hz: int,
+        parity: UARTParity,
+        length: UARTLengthBits,
+        stop: UARTStopBits,
+    ) -> UART:
+        """Configure this UART channel."""
+        _require_enum(mode, UARTMode, name="mode")
+        _require_enum(parity, UARTParity, name="parity")
+        _require_enum(length, UARTLengthBits, name="length")
+        _require_enum(stop, UARTStopBits, name="stop")
+        baud = _positive_integer(baud_hz, name="baud_hz")
+        if baud > 921_600:
+            raise ValueError("baud_hz must not exceed 921600")
+        self._test._configure_channel(
+            self._identity,
+            UARTConfiguration(
+                mode=mode,
+                baud_hz=baud,
+                parity=parity,
+                length=length,
+                stop=stop,
+            ),
+        )
+        return self
+
+    def write(
+        self,
+        *,
+        data: bytes,
+        at_tick: int | None = None,
+        at_ms: TimeValue | None = None,
+        at_s: TimeValue | None = None,
+    ) -> UART:
+        """Schedule raw bytes for transmission on this UART channel."""
+        payload = _bytes(data)
+        timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
+        return self._write_bytes(payload, timestamp=timestamp)
+
+    def write_text(
+        self,
+        *,
+        data: str,
+        encoding: str,
+        at_tick: int | None = None,
+        at_ms: TimeValue | None = None,
+        at_s: TimeValue | None = None,
+    ) -> UART:
+        """Encode text immediately and store a raw UART byte instruction."""
+        if not isinstance(data, str):
+            raise TypeError("data must be a string")
+        if not isinstance(encoding, str) or not encoding:
+            raise TypeError("encoding must be a non-empty string")
+        try:
+            payload = data.encode(encoding)
+        except LookupError as error:
+            raise ValueError(f"Unknown text encoding: {encoding}") from error
+        timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
+        return self._write_bytes(payload, timestamp=timestamp)
+
+    def _write_bytes(self, data: bytes, *, timestamp: int) -> UART:
+        self._test._schedule(
+            lambda instruction_id: UARTWriteInstruction(
+                instruction_id=instruction_id,
+                timestamp=timestamp,
+                channel=self._identity,
+                data=data,
+            )
+        )
+        return self
+
+
 class DigitalInputExpectation:
     """Builder for assertions over one digital input's returned time series."""
 
@@ -642,6 +809,14 @@ class Test:
         """Return a stable I2C channel handle."""
         return self._handle(ChannelKind.I2C, channel, I2C)
 
+    def spi(self, *, channel: int) -> SPI:
+        """Return a stable SPI channel handle."""
+        return self._handle(ChannelKind.SPI, channel, SPI)
+
+    def uart(self, *, channel: int) -> UART:
+        """Return a stable UART channel handle."""
+        return self._handle(ChannelKind.UART, channel, UART)
+
     def expect(self, channel: DigitalInput) -> DigitalInputExpectation:
         """Begin a host-side assertion for a digital input channel."""
         self._ensure_mutable()
@@ -780,6 +955,18 @@ def _i2c_address(address: int | None, *, name: str) -> int:
     if not isinstance(address, int) or isinstance(address, bool) or not 0 <= address <= 0x7F:
         raise ValueError(f"{name} must be a 7-bit I2C address (0x00 to 0x7F)")
     return address
+
+
+def _non_negative_integer(value: int, *, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return value
+
+
+def _positive_integer(value: int, *, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
 
 
 def _bytes(data: bytes) -> bytes:

@@ -13,6 +13,8 @@ class ChannelKind(str, Enum):
     PWM_OUTPUT = "pwm_output"
     ANALOGUE_OUTPUT = "analogue_output"
     I2C = "i2c"
+    SPI = "spi"
+    UART = "uart"
 
 
 @dataclass(frozen=True, slots=True)

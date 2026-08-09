@@ -2,6 +2,8 @@
 
 from hilrig.api import (
     I2C,
+    SPI,
+    UART,
     AnalogueOutput,
     DigitalInput,
     DigitalInputExpectation,
@@ -25,7 +27,16 @@ from hilrig.models.configuration import (
     I2CSpeed,
     LogicVoltage,
     Pullup,
+    SPIBaud,
+    SPIFirst,
+    SPIMode,
+    SPIRole,
+    SPISize,
     StartMode,
+    UARTLengthBits,
+    UARTMode,
+    UARTParity,
+    UARTStopBits,
 )
 
 __all__ = [
@@ -46,8 +57,19 @@ __all__ = [
     "Pullup",
     "PwmInput",
     "PwmOutput",
+    "SPI",
+    "SPIBaud",
+    "SPIFirst",
+    "SPIMode",
+    "SPIRole",
+    "SPISize",
     "StartMode",
     "Test",
     "TimingError",
+    "UART",
+    "UARTLengthBits",
+    "UARTMode",
+    "UARTParity",
+    "UARTStopBits",
     "ValidationError",
 ]

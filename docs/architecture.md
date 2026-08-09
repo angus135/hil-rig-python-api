@@ -38,6 +38,12 @@ The same immutable `Channel` identity is referenced by its peripheral configurat
 stimulus instructions, and assertions. These objects do not create independent copies
 of a channel.
 
+SPI transfers are currently defined only for master channels because the operation
+requires the rig to generate clock pulses. Slave channels can be configured, but their
+stimulus or preload behavior remains unspecified. UART text writes are converted to
+bytes when the instruction is created, so text encoding is not part of the future rig
+protocol.
+
 ## Public handles and internal data
 
 User-facing handles translate readable operations into data objects. For example:

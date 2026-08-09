@@ -21,7 +21,18 @@ from hilrig.models.configuration import (
     Pullup,
     PwmInputConfiguration,
     PwmOutputConfiguration,
+    SPIBaud,
+    SPIConfiguration,
+    SPIFirst,
+    SPIMode,
+    SPIRole,
+    SPISize,
     StartMode,
+    UARTConfiguration,
+    UARTLengthBits,
+    UARTMode,
+    UARTParity,
+    UARTStopBits,
 )
 from hilrig.models.execution import ExecutionPlan, TimeSlot
 from hilrig.models.instructions import (
@@ -37,6 +48,8 @@ from hilrig.models.instructions import (
     PwmSetDutyCycleInstruction,
     PwmSetFrequencyInstruction,
     PwmSetInstruction,
+    SPITransferInstruction,
+    UARTWriteInstruction,
 )
 
 __all__ = [
@@ -72,6 +85,19 @@ __all__ = [
     "PwmSetDutyCycleInstruction",
     "PwmSetFrequencyInstruction",
     "PwmSetInstruction",
+    "SPIBaud",
+    "SPIConfiguration",
+    "SPIFirst",
+    "SPIMode",
+    "SPIRole",
+    "SPISize",
+    "SPITransferInstruction",
     "StartMode",
     "TimeSlot",
+    "UARTConfiguration",
+    "UARTLengthBits",
+    "UARTMode",
+    "UARTParity",
+    "UARTStopBits",
+    "UARTWriteInstruction",
 ]

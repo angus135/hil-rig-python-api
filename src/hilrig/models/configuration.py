@@ -73,6 +73,79 @@ class Pullup(Enum):
     OHM_10K = 10_000
 
 
+class SPIRole(str, Enum):
+    """Role assigned to an SPI channel."""
+
+    MASTER = "master"
+    SLAVE = "slave"
+
+
+class SPIBaud(Enum):
+    """Supported approximate SPI bit rates in bits per second."""
+
+    BAUD_45MBIT = 45_000_000
+    BAUD_22M5BIT = 22_500_000
+    BAUD_11M25BIT = 11_250_000
+    BAUD_5M625BIT = 5_625_000
+    BAUD_2M813BIT = 2_813_000
+    BAUD_1M406BIT = 1_406_000
+    BAUD_703KBIT = 703_000
+    BAUD_352KBIT = 352_000
+
+
+class SPISize(IntEnum):
+    """Supported SPI frame sizes in bits."""
+
+    SIZE_8BIT = 8
+    SIZE_16BIT = 16
+
+
+class SPIMode(IntEnum):
+    """SPI clock polarity and phase combinations."""
+
+    MODE_0 = 0
+    MODE_1 = 1
+    MODE_2 = 2
+    MODE_3 = 3
+
+
+class SPIFirst(str, Enum):
+    """Bit order within each SPI frame."""
+
+    MSB = "msb"
+    LSB = "lsb"
+
+
+class UARTMode(str, Enum):
+    """Electrical interface selected for a UART channel."""
+
+    TTL_3V3 = "ttl_3v3"
+    TTL_5V0 = "ttl_5v0"
+    RS232 = "rs232"
+
+
+class UARTParity(str, Enum):
+    """Supported UART parity modes."""
+
+    NONE = "none"
+    ODD = "odd"
+    EVEN = "even"
+
+
+class UARTLengthBits(IntEnum):
+    """Supported UART word lengths in bits."""
+
+    EIGHT = 8
+    NINE = 9
+
+
+class UARTStopBits(IntEnum):
+    """Supported UART stop-bit counts."""
+
+    ONE = 1
+    TWO = 2
+
+
 @dataclass(frozen=True, slots=True)
 class DigitalInputConfiguration:
     """Static configuration for a digital input channel."""
@@ -116,12 +189,36 @@ class I2CConfiguration:
     own_address: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class SPIConfiguration:
+    """Static configuration for an SPI channel."""
+
+    role: SPIRole
+    baud: SPIBaud
+    data_size: SPISize
+    mode: SPIMode
+    first_bit: SPIFirst
+
+
+@dataclass(frozen=True, slots=True)
+class UARTConfiguration:
+    """Static configuration for a UART channel."""
+
+    mode: UARTMode
+    baud_hz: int
+    parity: UARTParity
+    length: UARTLengthBits
+    stop: UARTStopBits
+
+
 PeripheralConfiguration: TypeAlias = (
     DigitalInputConfiguration
     | DigitalOutputConfiguration
     | PwmInputConfiguration
     | PwmOutputConfiguration
     | I2CConfiguration
+    | SPIConfiguration
+    | UARTConfiguration
 )
 
 

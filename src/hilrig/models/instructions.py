@@ -90,6 +90,21 @@ class I2CPreloadResponseInstruction(Instruction):
     data: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class SPITransferInstruction(Instruction):
+    """Perform one SPI transfer and optionally record received bytes."""
+
+    tx_data: bytes
+    rx_length: int
+
+
+@dataclass(frozen=True, slots=True)
+class UARTWriteInstruction(Instruction):
+    """Write raw bytes on a UART channel."""
+
+    data: bytes
+
+
 class InstructionList:
     """Insertion-ordered collection of stimulus instructions under construction."""
 
