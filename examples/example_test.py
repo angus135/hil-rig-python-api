@@ -2,12 +2,12 @@ from hilrig import (
     DigitalState,
     FrequencyMode,
     LogicVoltage,
-    UARTMode,
-    UARTLengthBits,
-    UARTParity,
-    UARTStopBits,
     StartMode,
     Test,
+    UARTLengthBits,
+    UARTMode,
+    UARTParity,
+    UARTStopBits,
 )
 
 test = Test(name="Digital input/output example")
@@ -30,7 +30,13 @@ test.expect(button).remain_high(from_ms=100, until_ms=150)
 
 # Communication tests
 uart = test.uart(channel=0)
-uart.configure(mode=UARTMode.TTL_5V0, baud_hz=9600, length=UARTLengthBits.EIGHT, stop=UARTStopBits.ONE, parity=UARTParity.NONE)
+uart.configure(
+    mode=UARTMode.TTL_5V0,
+    baud_hz=9600,
+    length=UARTLengthBits.EIGHT,
+    stop=UARTStopBits.ONE,
+    parity=UARTParity.NONE,
+)
 
 uart.write(data=b"Hello, UART!", at_ms=50)
 uart.write(data=b"Goodbye, UART!", at_ms=300)
