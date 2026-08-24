@@ -3,9 +3,10 @@
 ## Current responsibility
 
 The implemented library constructs an in-memory description of a test and compiles it
-into a protocol-neutral intermediate representation. It does not define how that IR
-becomes an IDC application message, how bytes are transported to the rig, or how
-returned time-series data is parsed and evaluated.
+into a protocol-neutral intermediate representation. The returned-data side now has a
+protocol-neutral typed ingestion boundary and SQLite-backed captured-run IR. It still
+does not define how outgoing data becomes an IDC message, how bytes are transported,
+how final application-message objects are mapped, or how assertions are evaluated.
 
 ```text
 User script
@@ -26,8 +27,15 @@ Immutable CompiledTestIR
     |-- versioned machine JSON (summary, configurations, instructions)
     `-- human Excel workbook (also includes assertions)
 
-Future, intentionally undecided:
-    IDC lowering/serialization -> transport -> result/assertion engine
+Future outgoing, intentionally undecided:
+    IDC lowering/serialization -> transport
+
+Future incoming protocol adapter:
+    USB bytes -> transport -> application message
+                                  |
+                                  v
+Implemented stable boundary:
+    typed result records -> batched CapturedRunBuilder -> SQLite -> CapturedRunIR
 ```
 
 ## Test ownership
@@ -127,7 +135,77 @@ into the eventual transport representation without changing the user-facing test
 An observation-only test may contain assertions without stimulus instructions, because
 the rig is expected to record all channels.
 
-## Planned boundaries
+## Captured-run boundary
+
+The incoming protocol is isolated from result storage. The final adapter will turn one
+complete application message into one `TickResult`, zero or more raw
+`CommunicationResult` values, or an `ApplicationErrorRecord`. These typed records have
+no dependency on a C binding, USB framing, application union layout, or IDC opcodes.
+
+`TickResult` currently mirrors the stable semantic content identified in the
+application design:
+
+- one non-negative tick number;
+- ten digital input values;
+- two signed analogue values in integer microvolts;
+- two PWM period/duty measurements in nanoseconds and permyriad;
+- `OK`, `PARTIAL`, or `EXECUTION_PROBLEM` validity and optional problem detail.
+
+`PARTIAL` means the fixed measurements remain valid. `EXECUTION_PROBLEM` normalizes all
+fixed measurements to absent values, which SQLite stores as `NULL`. Communication data
+is retained as unmodified bytes with peripheral, channel, tick, and per-channel/tick
+ordinal. Decoding or cleaning those bytes belongs in a later derived parser, never in
+the evidence capture step.
+
+### Batched writer
+
+`CapturedRunBuilder` creates a new database and will not overwrite an existing file.
+Producers submit records to a bounded queue; if storage falls behind, producers receive
+backpressure rather than silent data loss. One dedicated thread owns the SQLite
+connection. It collects all record kinds and atomically commits them when either:
+
+- the batch reaches 2,000 records by default; or
+- the oldest pending record reaches 25 ms by default.
+
+SQLite uses WAL journal mode and `synchronous=NORMAL`. `flush()` sends a barrier through
+the same queue and waits for every older record to commit. A failed batch is rolled back
+as a unit and the failure is surfaced to the caller. Previously committed batches stay
+intact.
+
+Finalization checks that unique fixed results cover every tick from zero through
+`expected_tick_count - 1`. It automatically records `COMPLETE` or `INCOMPLETE`; the
+future execution orchestrator can instead record `SESSION_LOST`, `PROTOCOL_ERROR`, or
+`ABORTED`. Capture status is deliberately separate from future assertion verdicts.
+
+### SQLite representation
+
+The SQLite file is authoritative and schema-versioned:
+
+- `run_metadata` contains test/run IDs, timing, provenance, live tick counts, and state;
+- `tick_results` contains one wide row per tick rather than one row per channel;
+- `communication_results` contains sparse variable-size payload BLOBs;
+- `application_errors` contains recoverable/non-recoverable diagnostics.
+
+Keeping fixed results wide limits a 100 kHz capture to 100,000 fixed rows per second,
+instead of multiplying that by the number of input channels. Payload BLOBs are separate
+because they are sparse and variable length.
+
+### Read-only logical IR
+
+`CapturedRunIR` validates and opens the database, then provides tick, digital, analogue,
+PWM, communication, and diagnostic queries. Range methods return streaming iterators.
+A future assertion evaluator therefore asks for channel samples instead of importing
+`sqlite3` or embedding SQL. This abstraction leaves room for another storage backend if
+measurements later show one is needed.
+
+The IR derives optional review artifacts while keeping bulk values out of JSON:
+
+- a small JSON manifest;
+- a wide fixed-results CSV;
+- a raw communication-results CSV;
+- an application-errors CSV.
+
+## Remaining planned boundaries
 
 Add these only after their designs are agreed:
 
@@ -135,9 +213,14 @@ Add these only after their designs are agreed:
 src/hilrig/
 |-- idc/          Application-message serialization and parsing
 |-- transport/    USB CDC connection and byte transfer
-|-- results/      Typed channel time series and firmware result parsing
 `-- assertions/   Evaluation of stored assertions against result series
 ```
+
+`results/adapter.py` reserves the incoming orchestration and mapping methods. They are
+documented stubs because inventing a Python representation for
+`HIL_Application_Message_T` before the binding is final would create the wrong
+dependency. The implemented builder can already be tested with fabricated typed
+records.
 
 ## Testing approach
 
@@ -145,7 +228,9 @@ src/hilrig/
 - Timing tests verify exact conversion and alignment errors.
 - Instruction tests verify each specified stimulus payload and I2C role rules.
 - Assertion tests verify only the currently specified digital-input definitions.
-- Future IDC tests should use agreed known byte vectors.
+- Captured-run tests verify batching barriers, transactional rollback, finalization,
+  validity normalization, raw payload preservation, queries, and derived exports.
+- Future IDC and result-adapter tests should use agreed known message vectors.
 - Future hardware tests should be a separate, explicitly selected test category.
 
 The default CI workflow runs deterministic tests that require no connected rig.

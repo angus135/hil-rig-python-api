@@ -5,8 +5,9 @@ test for the HIL-RIG.
 
 The current implementation covers test and peripheral configuration, stimulus
 instructions, exact user-time-to-tick conversion, digital-input assertion definitions,
-and protocol-neutral JSON and Excel intermediate representations. It does not define an
-IDC representation, communicate over USB, execute assertions, or parse result data.
+protocol-neutral JSON and Excel intermediate representations, and persistent captured-run
+storage. It does not define an IDC representation, communicate over USB, translate the
+unfinished application-message interface, or execute assertions.
 
 ## Requirements
 
@@ -180,7 +181,73 @@ Only digital-input assertion definitions are implemented:
 - transition between states within a range.
 
 The assertion objects are only stored in the internal model. Result data and assertion
-evaluation are deliberately not implemented yet.
+evaluation are separate: captured result storage is implemented, while the assertion
+evaluator is deliberately not implemented yet.
+
+## Captured-run intermediate representation
+
+`CapturedRunBuilder` is the stable destination for the future application-message
+adapter. It receives typed, protocol-neutral records and writes them to a new SQLite
+database without holding an entire run in memory:
+
+```python
+from hilrig import CapturedRunBuilder, PWMMeasurement, TickResult
+
+builder = CapturedRunBuilder(
+    "results/run.sqlite3",
+    test_id=compiled.test_id,
+    test_name=compiled.name,
+    tick_period_ns=100_000,
+    expected_tick_count=10_001,
+)
+
+builder.add_tick_result(
+    TickResult(
+        tick=0,
+        digital_inputs=(False,) * 10,
+        analogue_inputs_uv=(1_250_000, 0),
+        pwm_inputs=(
+            PWMMeasurement(period_ns=20_000, duty_permyriad=5_000),
+            PWMMeasurement(period_ns=0, duty_permyriad=0),
+        ),
+    )
+)
+
+captured_run = builder.finalize()
+sample = captured_run.digital_input(channel=0).sample_at(0)
+```
+
+The fixed channel counts currently match the application-layer result shape: ten
+digital inputs, two analogue inputs, and two PWM inputs. `PARTIAL` tick results retain
+valid fixed measurements. `EXECUTION_PROBLEM` results store SQL `NULL` values so
+firmware placeholders cannot be mistaken for real zeroes.
+
+The builder owns a bounded producer queue. One background thread owns the SQLite
+connection and commits records together when either the configured batch size or flush
+interval is reached. `flush()` is an explicit durability barrier. `finalize()` flushes
+the remaining records, verifies the expected fixed tick range, writes a terminal
+capture status, stops the writer, and returns a read-only `CapturedRunIR`.
+
+Bulk evidence is separated by shape:
+
+- `tick_results` stores one wide fixed-size row per tick;
+- `communication_results` stores raw variable-length I2C, SPI, or UART payloads;
+- `application_errors` stores diagnostics;
+- `run_metadata` stores identifiers, timing, provenance, counts, and capture status.
+
+`CapturedRunIR` provides streaming channel and range queries, so future assertion code
+does not contain SQL. It can also derive a small JSON manifest and separate CSV files
+for fixed results, communication captures, and application errors. SQLite remains the
+authoritative copy.
+
+`IncomingResultAdapter` contains documented skeleton methods for the future flow:
+
+```text
+USB bytes -> transport messages -> application messages -> typed builder records
+```
+
+Those methods intentionally raise `NotImplementedError` until the transport/application
+Python interfaces and application-message field mapping are final.
 
 ## Compile and export
 
@@ -241,6 +308,7 @@ python -m ruff format .
 |   |-- compiler.py                Validation and immutable IR snapshot construction
 |   |-- exporters/                 JSON machine IR and human-readable Excel export
 |   |-- exceptions.py              Library-specific exception hierarchy
+|   |-- results/                   Batched SQLite capture storage and query facade
 |   `-- models/                    Internal configuration/instruction/assertion data
 |-- tests/                         Unit tests
 `-- pyproject.toml                 Package, dependency, and tool configuration

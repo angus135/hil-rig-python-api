@@ -23,3 +23,19 @@ class TimingError(ValidationError):
 
 class FrozenTestError(HilRigError):
     """A caller attempted to change an already compiled test."""
+
+
+class CaptureError(HilRigError):
+    """Base class for errors while receiving or reading a captured run."""
+
+
+class CaptureStateError(CaptureError):
+    """A capture operation was attempted after the builder stopped accepting data."""
+
+
+class CaptureStorageError(CaptureError):
+    """Captured data could not be written to or read from persistent storage."""
+
+
+class CaptureSchemaError(CaptureStorageError):
+    """A capture database has an absent or unsupported schema."""
