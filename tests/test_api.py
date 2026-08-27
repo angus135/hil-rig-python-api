@@ -204,6 +204,13 @@ def test_old_digital_out_name_and_recording_commands_are_not_exposed() -> None:
     assert not hasattr(digital_input, "enable_recording")
 
 
+def test_full_analogue_output_name_is_exposed() -> None:
+    test = HilRigTest(name="Analogue output naming")
+
+    assert test.analogue_output(channel=0).channel == 0
+    assert not hasattr(test, "analogue_out")
+
+
 @pytest.mark.parametrize("name", ["", "   ", None])
 def test_test_requires_a_name(name: str | None) -> None:
     with pytest.raises(ValueError):

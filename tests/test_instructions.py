@@ -22,7 +22,7 @@ def test_instruction_ids_increment_across_peripheral_types() -> None:
 
     test.digital_output(channel=0).high(at_tick=0)
     test.pwm_output(channel=0).enable(at_tick=1)
-    test.analogue_out(channel=0).set_voltage(3.2, at_tick=2)
+    test.analogue_output(channel=0).set_voltage(3.2, at_tick=2)
 
     assert [instruction.instruction_id for instruction in test.instructions] == [0, 1, 2]
 
@@ -68,7 +68,7 @@ def test_pwm_stimuli_preserve_atomic_and_individual_updates() -> None:
 def test_analogue_output_stimulus_stores_voltage() -> None:
     test = HilRigTest(name="Analogue action")
 
-    test.analogue_out(channel=1).set_voltage(18.4, at_tick=250)
+    test.analogue_output(channel=1).set_voltage(18.4, at_tick=250)
 
     instruction = tuple(test.instructions)[0]
     assert isinstance(instruction, AnalogueOutputInstruction)

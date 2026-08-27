@@ -801,7 +801,7 @@ class Test:
             raise ValueError("PWM output channel must be 0 (LV) or 1 (HV)")
         return self._handle(ChannelKind.PWM_OUTPUT, channel, PwmOutput)
 
-    def analogue_out(self, *, channel: int) -> AnalogueOutput:
+    def analogue_output(self, *, channel: int) -> AnalogueOutput:
         """Return a stable analogue output handle."""
         return self._handle(ChannelKind.ANALOGUE_OUTPUT, channel, AnalogueOutput)
 
