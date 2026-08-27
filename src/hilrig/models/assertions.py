@@ -11,6 +11,7 @@ from hilrig.models.configuration import DigitalState
 class Assertion:
     """Information shared by every host-side assertion."""
 
+    assertion_id: int
     channel: Channel
 
 

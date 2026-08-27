@@ -18,9 +18,11 @@ def test_point_assertions_store_high_and_low_at_converted_ticks() -> None:
 
     high, low = tuple(test.assertions)
     assert isinstance(high, DigitalInputPointAssertion)
+    assert high.assertion_id == 0
     assert high.timestamp == 100
     assert high.expected_state is DigitalState.HIGH
     assert isinstance(low, DigitalInputPointAssertion)
+    assert low.assertion_id == 1
     assert low.timestamp == 200
     assert low.expected_state is DigitalState.LOW
     assert high.channel is digital_input.identity
@@ -41,6 +43,7 @@ def test_remain_high_supports_tick_millisecond_and_second_ranges() -> None:
         (30, 40),
         (50, 60),
     ]
+    assert [item.assertion_id for item in assertions] == [0, 1, 2]
 
 
 def test_transition_assertion_stores_states_and_converted_range() -> None:
@@ -59,6 +62,7 @@ def test_transition_assertion_stores_states_and_converted_range() -> None:
 
     assertion = tuple(test.assertions)[0]
     assert isinstance(assertion, DigitalInputTransitionAssertion)
+    assert assertion.assertion_id == 0
     assert assertion.from_state is DigitalState.LOW
     assert assertion.to_state is DigitalState.HIGH
     assert (assertion.from_tick, assertion.until_tick) == (90, 110)
@@ -82,3 +86,17 @@ def test_expect_rejects_a_channel_from_another_test() -> None:
 
     with pytest.raises(TypeError, match="from this Test"):
         first.expect(second.digital_input(channel=0))
+
+
+def test_assertion_ids_are_sequential_and_independent_of_instruction_ids() -> None:
+    test = HilRigTest(name="Independent IDs")
+    digital_input = test.digital_input(channel=0)
+    digital_output = test.digital_output(channel=0)
+
+    digital_output.high(at_tick=0)
+    test.expect(digital_input).high(at_tick=0)
+    digital_output.low(at_tick=1)
+    test.expect(digital_input).low(at_tick=1)
+
+    assert [item.instruction_id for item in test.instructions] == [0, 1]
+    assert [item.assertion_id for item in test.assertions] == [0, 1]

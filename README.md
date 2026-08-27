@@ -67,7 +67,9 @@ compiled.write_excel("motor-controller-startup.xlsx")
 
 Every `Test` receives a random 128-bit integer `test_id`. Every stimulus instruction
 receives a sequential integer `instruction_id`, starting at zero. These identifiers are
-created by the API rather than supplied by the user.
+created by the API rather than supplied by the user. Host-side assertions independently
+receive sequential `assertion_id` values starting at zero, which are retained for future
+evaluation reports but are not sent to the RIG.
 
 ## Time arguments
 

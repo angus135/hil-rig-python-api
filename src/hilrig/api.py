@@ -65,6 +65,7 @@ from hilrig.models.instructions import (
 from hilrig.timing import TimeRange, TimeValue, resolve_time_range, resolve_timestamp
 
 InstructionType = TypeVar("InstructionType", bound=Instruction)
+AssertionType = TypeVar("AssertionType", bound=Assertion)
 
 
 class _ChannelHandle:
@@ -677,7 +678,8 @@ class DigitalInputExpectation:
             seconds=_optional_pair(from_s, until_s, names="from_s and until_s"),
         )
         self._test._add_assertion(
-            DigitalInputRemainHighAssertion(
+            lambda assertion_id: DigitalInputRemainHighAssertion(
+                assertion_id=assertion_id,
                 channel=self._input.identity,
                 from_tick=start,
                 until_tick=end,
@@ -705,7 +707,8 @@ class DigitalInputExpectation:
             seconds=between_s,
         )
         self._test._add_assertion(
-            DigitalInputTransitionAssertion(
+            lambda assertion_id: DigitalInputTransitionAssertion(
+                assertion_id=assertion_id,
                 channel=self._input.identity,
                 from_state=DigitalState(from_state),
                 to_state=DigitalState(to_state),
@@ -725,7 +728,8 @@ class DigitalInputExpectation:
     ) -> DigitalInputExpectation:
         timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
         self._test._add_assertion(
-            DigitalInputPointAssertion(
+            lambda assertion_id: DigitalInputPointAssertion(
+                assertion_id=assertion_id,
                 channel=self._input.identity,
                 timestamp=timestamp,
                 expected_state=state,
@@ -748,6 +752,7 @@ class Test:
         self._instructions = InstructionList()
         self._assertions = AssertionList()
         self._next_instruction_id = 0
+        self._next_assertion_id = 0
         self._handles: dict[tuple[ChannelKind, int], _ChannelHandle] = {}
         self._compiled_plan: CompiledTestIR | None = None
 
@@ -915,9 +920,12 @@ class Test:
         self._next_instruction_id += 1
         return instruction
 
-    def _add_assertion(self, assertion: Assertion) -> None:
+    def _add_assertion(self, factory: Callable[[int], AssertionType]) -> AssertionType:
         self._ensure_mutable()
+        assertion = factory(self._next_assertion_id)
         self._assertions._append(assertion)
+        self._next_assertion_id += 1
+        return assertion
 
     def _ensure_mutable(self) -> None:
         if self.is_compiled:

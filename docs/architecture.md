@@ -118,6 +118,12 @@ on the host against returned time-series data. The current internal model only d
 digital-input point, remain-high, and transition assertions. It does not yet define
 results or evaluation algorithms.
 
+Every assertion receives an API-assigned sequential `assertion_id`, starting at zero for
+each test. This counter is independent of stimulus instruction IDs. The identifier is
+preserved in `CompiledAssertion` and the human-readable Assertions sheet so future
+evaluation results can refer back to a stable definition. Assertion definitions and IDs
+remain excluded from the RIG-facing JSON.
+
 ## Compiler and intermediate-representation boundary
 
 `compile()` runs the current validation, makes instruction ordering deterministic, and

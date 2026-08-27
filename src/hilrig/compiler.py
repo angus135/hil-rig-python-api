@@ -200,6 +200,7 @@ def _compile_assertion(assertion: Assertion) -> CompiledAssertion:
             f"No human-readable representation is defined for {type(assertion).__name__}"
         )
     return CompiledAssertion(
+        assertion_id=assertion.assertion_id,
         peripheral=assertion.channel.kind.value,
         channel=assertion.channel.index,
         assertion=name,
@@ -225,7 +226,9 @@ def _validate_instructions(instructions: InstructionList) -> None:
 
 
 def _validate_assertions(assertions: AssertionList) -> None:
-    for assertion in assertions:
+    for expected_id, assertion in enumerate(assertions):
+        if assertion.assertion_id != expected_id:
+            raise ValidationError("Assertion IDs must be sequential from zero")
         if isinstance(assertion, DigitalInputPointAssertion):
             _validate_tick(assertion.timestamp, label="Assertion timestamp")
         elif isinstance(

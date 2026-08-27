@@ -49,6 +49,7 @@ def test_compile_returns_an_immutable_chronological_snapshot() -> None:
     assert isinstance(compiled, CompiledTestIR)
     assert [item.tick for item in compiled.instructions] == [10, 20]
     assert [item.instruction_id for item in compiled.instructions] == [1, 0]
+    assert [item.assertion_id for item in compiled.assertions] == [0]
     assert len(compiled.test_id_hex) == 32
     assert int(compiled.test_id_hex, 16) == compiled.test_id
 
@@ -115,6 +116,7 @@ def test_excel_contains_the_four_human_sheets_and_host_assertions(tmp_path: Path
         assert f'name="{name}"' in workbook_xml
     assert "state_at_tick" in assertions_xml
     assert 'expected_state="HIGH"' in assertions_xml
+    assert "Assertion ID" in assertions_xml
     assert "Expected tick count" in summary_xml
     assert ">10021<" in summary_xml
 

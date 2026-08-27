@@ -51,6 +51,7 @@ class CompiledInstruction:
 class CompiledAssertion:
     """One host-side assertion retained for human-readable output."""
 
+    assertion_id: int
     peripheral: str
     channel: int
     assertion: str
