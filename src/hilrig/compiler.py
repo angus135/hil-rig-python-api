@@ -51,6 +51,8 @@ _INSTRUCTION_OPERATIONS: dict[type[Instruction], str] = {
     UARTWriteInstruction: "write",
 }
 
+_POST_TEST_SETTLING_SECONDS = 1
+
 
 def compile_test(
     *,
@@ -81,18 +83,50 @@ def compile_test(
     )
     compiled_instructions = tuple(_compile_instruction(item) for item in ordered_instructions)
     compiled_assertions = tuple(_compile_assertion(item) for item in assertions)
+    expected_tick_count = _expected_tick_count(
+        instructions=ordered_instructions,
+        assertions=assertions,
+        frequency_hz=configuration.frequency_mode.hertz,
+    )
 
     return CompiledTestIR(
         test_id=test_id,
         name=name,
         frequency_mode=configuration.frequency_mode.name,
         frequency_hz=configuration.frequency_mode.hertz,
+        expected_tick_count=expected_tick_count,
         start_mode=configuration.start_mode.name,
         configurations=compiled_configurations,
         instructions=compiled_instructions,
         assertions=compiled_assertions,
         time_slots=time_slots,
     )
+
+
+def _expected_tick_count(
+    *,
+    instructions: tuple[Instruction, ...],
+    assertions: AssertionList,
+    frequency_hz: int,
+) -> int:
+    """Return ticks 0 through the last event plus one second, inclusively."""
+    latest_relevant_tick = max(
+        (instruction.timestamp for instruction in instructions),
+        default=0,
+    )
+    for assertion in assertions:
+        latest_relevant_tick = max(latest_relevant_tick, _assertion_end_tick(assertion))
+
+    settling_ticks = frequency_hz * _POST_TEST_SETTLING_SECONDS
+    return latest_relevant_tick + settling_ticks + 1
+
+
+def _assertion_end_tick(assertion: Assertion) -> int:
+    if isinstance(assertion, DigitalInputPointAssertion):
+        return assertion.timestamp
+    if isinstance(assertion, (DigitalInputRemainHighAssertion, DigitalInputTransitionAssertion)):
+        return assertion.until_tick
+    raise ValidationError(f"Unsupported assertion type: {type(assertion).__name__}")
 
 
 def _build_time_slots(instructions: tuple[Instruction, ...]) -> tuple[TimeSlot, ...]:

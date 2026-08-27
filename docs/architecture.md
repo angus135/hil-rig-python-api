@@ -124,6 +124,20 @@ peripheral configurations, and chronological stimulus instructions. It omits ass
 because those are host-side operations and must not be sent to the RIG. Bytes are hex,
 test IDs are fixed-width hex, and enums are stored by symbolic member name.
 
+Compilation also derives an inclusive expected result count:
+
+```text
+latest_relevant_tick = max(latest stimulus, latest assertion end, 0)
+expected_tick_count = latest_relevant_tick + frequency_hz + 1
+```
+
+`frequency_hz` supplies exactly one second of settling ticks. The final `+1` represents
+tick zero: a count of 1,001 describes ticks `0..1000`, not `0..1001`. Point assertions
+use their timestamp; range assertions use `until_tick`. Assertions remain absent from
+the machine instruction list, but their latest required tick can extend this transmitted
+duration so the RIG captures enough evidence for host evaluation. The additive field
+changes the outgoing IR schema version from 1.0 to 1.1.
+
 The human-readable `.xlsx` view contains `Test Summary`, `Configurations`,
 `Instructions`, and `Assertions` sheets. It is generated from the same compiled
 snapshot, so it cannot disagree with the JSON about rig-facing data.
@@ -171,6 +185,10 @@ SQLite uses WAL journal mode and `synchronous=NORMAL`. `flush()` sends a barrier
 the same queue and waits for every older record to commit. A failed batch is rolled back
 as a unit and the failure is surfaced to the caller. Previously committed batches stay
 intact.
+
+`CapturedRunBuilder.from_compiled_test()` copies the test ID, name, tick period, and
+expected tick count directly from `CompiledTestIR`. This prevents the outgoing RIG
+configuration and incoming completion check from calculating different run lengths.
 
 Finalization checks that unique fixed results cover every tick from zero through
 `expected_tick_count - 1`. It automatically records `COMPLETE` or `INCOMPLETE`; the

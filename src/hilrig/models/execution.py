@@ -9,7 +9,7 @@ from typing import TypeAlias
 
 from hilrig.models.instructions import Instruction
 
-IR_SCHEMA_VERSION = "1.0"
+IR_SCHEMA_VERSION = "1.1"
 IRScalar: TypeAlias = str | int | float | bool | None
 
 
@@ -61,15 +61,16 @@ class CompiledAssertion:
 class CompiledTestIR:
     """Immutable compiled snapshot from which files can be exported repeatedly.
 
-    Assertions deliberately live only on this host-side snapshot. They are omitted
-    from :meth:`to_dict`, :meth:`to_json`, and :meth:`write_json`, so the machine IR
-    contains only information that the RIG needs.
+    Assertion definitions deliberately live only on this host-side snapshot and are
+    omitted from :meth:`to_dict`, :meth:`to_json`, and :meth:`write_json`. Their latest
+    tick can still extend ``expected_tick_count`` so the RIG captures enough evidence.
     """
 
     test_id: int
     name: str
     frequency_mode: str
     frequency_hz: int
+    expected_tick_count: int
     start_mode: str
     configurations: tuple[CompiledConfiguration, ...]
     instructions: tuple[CompiledInstruction, ...]
@@ -81,6 +82,11 @@ class CompiledTestIR:
     def test_id_hex(self) -> str:
         """Return the 128-bit test ID as exactly 32 lowercase hexadecimal digits."""
         return f"{self.test_id:032x}"
+
+    @property
+    def tick_period_ns(self) -> int:
+        """Return the duration of one configured execution tick in nanoseconds."""
+        return 1_000_000_000 // self.frequency_hz
 
     def to_dict(self) -> dict[str, object]:
         """Return the JSON-compatible, RIG-facing intermediate representation."""

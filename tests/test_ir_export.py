@@ -61,9 +61,10 @@ def test_compile_returns_an_immutable_chronological_snapshot() -> None:
 def test_machine_ir_uses_stable_values_and_excludes_assertions() -> None:
     machine_ir = _compiled_example().to_dict()
 
-    assert machine_ir["ir_version"] == "1.0"
+    assert machine_ir["ir_version"] == "1.1"
     assert machine_ir["test"]["frequency_mode"] == "HZ_10K"
     assert machine_ir["test"]["start_mode"] == "HOST_COMMAND"
+    assert machine_ir["test"]["expected_tick_count"] == 10_021
     assert "assertions" not in machine_ir
     assert machine_ir["instructions"][0] == {
         "instruction_id": 1,
@@ -94,12 +95,15 @@ def test_excel_contains_the_four_human_sheets_and_host_assertions(tmp_path: Path
     assert output_path.is_absolute()
     with zipfile.ZipFile(output_path) as workbook:
         workbook_xml = workbook.read("xl/workbook.xml").decode("utf-8")
+        summary_xml = workbook.read("xl/worksheets/sheet1.xml").decode("utf-8")
         assertions_xml = workbook.read("xl/worksheets/sheet4.xml").decode("utf-8")
 
     for name in ("Test Summary", "Configurations", "Instructions", "Assertions"):
         assert f'name="{name}"' in workbook_xml
     assert "state_at_tick" in assertions_xml
     assert 'expected_state="HIGH"' in assertions_xml
+    assert "Expected tick count" in summary_xml
+    assert ">10021<" in summary_xml
 
     with pytest.raises(ValueError, match="end in .xlsx"):
         compiled.write_excel(tmp_path / "compiled-test.xls")

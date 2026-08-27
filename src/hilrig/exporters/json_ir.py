@@ -17,6 +17,7 @@ def as_machine_ir(compiled: CompiledTestIR) -> dict[str, object]:
             "name": compiled.name,
             "frequency_mode": compiled.frequency_mode,
             "frequency_hz": compiled.frequency_hz,
+            "expected_tick_count": compiled.expected_tick_count,
             "start_mode": compiled.start_mode,
         },
         "configurations": [

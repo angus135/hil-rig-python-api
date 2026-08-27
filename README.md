@@ -193,12 +193,9 @@ database without holding an entire run in memory:
 ```python
 from hilrig import CapturedRunBuilder, PWMMeasurement, TickResult
 
-builder = CapturedRunBuilder(
+builder = CapturedRunBuilder.from_compiled_test(
     "results/run.sqlite3",
-    test_id=compiled.test_id,
-    test_name=compiled.name,
-    tick_period_ns=100_000,
-    expected_tick_count=10_001,
+    compiled,
 )
 
 builder.add_tick_result(
@@ -240,6 +237,10 @@ does not contain SQL. It can also derive a small JSON manifest and separate CSV 
 for fixed results, communication captures, and application errors. SQLite remains the
 authoritative copy.
 
+The builder factory copies the test ID, test name, tick period, and expected tick count
+from the same compiled snapshot that is sent toward the RIG. The lower-level builder
+constructor remains available for tests and protocol-independent use.
+
 `IncomingResultAdapter` contains documented skeleton methods for the future flow:
 
 ```text
@@ -268,7 +269,19 @@ The versioned JSON document contains the test summary, peripheral configurations
 chronological stimulus instructions. Test IDs are written as 32 hexadecimal digits,
 enum members use their stable symbolic names, and byte strings use `0x`-prefixed hex.
 Assertions are deliberately excluded because they are evaluated on the host rather
-than sent to the RIG.
+than sent to the RIG. The JSON test summary does include `expected_tick_count`, which is
+calculated as:
+
+```text
+max(latest stimulus tick, latest assertion tick/range end, 0)
+    + one second of ticks
+    + 1 for inclusive tick zero
+```
+
+For example, a final event at tick 750 in 1 kHz mode produces 1,751 expected application
+results, covering ticks `0..1750`. An observation-only test in that mode produces 1,001
+results covering ticks `0..1000`. This keeps the RIG capturing long enough for host-side
+assertions even though their definitions are not transmitted.
 
 The Excel workbook contains four sheets:
 

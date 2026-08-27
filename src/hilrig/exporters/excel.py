@@ -53,6 +53,7 @@ def _workbook_rows(compiled: CompiledTestIR) -> dict[str, list[list[object]]]:
         ["Test name", compiled.name],
         ["Frequency mode", compiled.frequency_mode],
         ["Frequency (Hz)", compiled.frequency_hz],
+        ["Expected tick count", compiled.expected_tick_count],
         ["Start mode", compiled.start_mode],
         ["Configurations", len(compiled.configurations)],
         ["Instructions", len(compiled.instructions)],

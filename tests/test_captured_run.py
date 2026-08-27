@@ -13,11 +13,14 @@ from hilrig import (
     CaptureStorageError,
     CommunicationPeripheral,
     CommunicationResult,
+    FrequencyMode,
     IncomingResultAdapter,
     PWMMeasurement,
+    StartMode,
     TickCondition,
     TickResult,
 )
+from hilrig import Test as HilRigTest
 
 
 def _tick(tick: int, *, condition: TickCondition = TickCondition.OK) -> TickResult:
@@ -77,6 +80,27 @@ def test_builder_persists_complete_run_and_channel_queries(tmp_path: Path) -> No
     assert pwm is not None
     assert pwm.measurement == PWMMeasurement(period_ns=10_000, duty_permyriad=8_000)
     assert pwm.measurement.duty_cycle == 0.8
+
+
+def test_builder_can_reuse_identity_and_timing_from_compiled_test(tmp_path: Path) -> None:
+    test = HilRigTest(name="Compiled capture")
+    test.configure(frequency_mode=FrequencyMode.HZ_10K, start_mode=StartMode.IMMEDIATE)
+    test.digital_output(channel=0).high(at_tick=25)
+    compiled = test.compile()
+
+    builder = CapturedRunBuilder.from_compiled_test(
+        tmp_path / "run.sqlite3",
+        compiled,
+        run_id=0xABCD,
+    )
+    live_run = CapturedRunIR.open(builder.database_path)
+
+    assert live_run.metadata.test_id == compiled.test_id
+    assert live_run.metadata.test_name == compiled.name
+    assert live_run.metadata.run_id == 0xABCD
+    assert live_run.metadata.tick_period_ns == compiled.tick_period_ns == 100_000
+    assert live_run.metadata.expected_tick_count == compiled.expected_tick_count == 10_026
+    builder.abort()
 
 
 def test_flush_is_a_barrier_that_makes_pending_rows_visible(tmp_path: Path) -> None:

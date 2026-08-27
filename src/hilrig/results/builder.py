@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from hilrig.exceptions import CaptureStateError, CaptureStorageError
+from hilrig.models.execution import CompiledTestIR
 from hilrig.results.models import (
     ApplicationErrorRecord,
     CaptureStatus,
@@ -46,6 +47,36 @@ class CapturedRunBuilder:
     is reached, and commits the complete mixed batch in one transaction. The queue is
     bounded and blocks rather than silently discarding test evidence.
     """
+
+    @classmethod
+    def from_compiled_test(
+        cls,
+        database_path: str | Path,
+        compiled_test: CompiledTestIR,
+        *,
+        run_id: int | None = None,
+        application_protocol_version: str | None = None,
+        firmware_version: str | None = None,
+        batch_size: int = 2_000,
+        flush_interval_s: float = 0.025,
+        queue_capacity: int = 20_000,
+    ) -> CapturedRunBuilder:
+        """Create a capture using timing and identity from one compiled outgoing IR."""
+        if not isinstance(compiled_test, CompiledTestIR):
+            raise TypeError("compiled_test must be a CompiledTestIR")
+        return cls(
+            database_path,
+            test_id=compiled_test.test_id,
+            test_name=compiled_test.name,
+            tick_period_ns=compiled_test.tick_period_ns,
+            expected_tick_count=compiled_test.expected_tick_count,
+            run_id=run_id,
+            application_protocol_version=application_protocol_version,
+            firmware_version=firmware_version,
+            batch_size=batch_size,
+            flush_interval_s=flush_interval_s,
+            queue_capacity=queue_capacity,
+        )
 
     def __init__(
         self,
