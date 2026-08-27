@@ -9,6 +9,8 @@ from hilrig.models.assertions import (
 )
 from hilrig.models.channels import Channel, ChannelKind
 from hilrig.models.configuration import (
+    AnalogueInputConfiguration,
+    AnalogueOutputConfiguration,
     Configuration,
     DigitalInputConfiguration,
     DigitalOutputConfiguration,
@@ -60,6 +62,8 @@ from hilrig.models.instructions import (
 )
 
 __all__ = [
+    "AnalogueInputConfiguration",
+    "AnalogueOutputConfiguration",
     "AnalogueOutputInstruction",
     "Assertion",
     "AssertionList",

@@ -179,6 +179,16 @@ class PwmOutputConfiguration:
 
 
 @dataclass(frozen=True, slots=True)
+class AnalogueInputConfiguration:
+    """Marker declaring that an analogue input channel is used by the test."""
+
+
+@dataclass(frozen=True, slots=True)
+class AnalogueOutputConfiguration:
+    """Marker declaring that an analogue output channel is used by the test."""
+
+
+@dataclass(frozen=True, slots=True)
 class I2CConfiguration:
     """Static configuration for an I2C channel."""
 
@@ -212,7 +222,9 @@ class UARTConfiguration:
 
 
 PeripheralConfiguration: TypeAlias = (
-    DigitalInputConfiguration
+    AnalogueInputConfiguration
+    | AnalogueOutputConfiguration
+    | DigitalInputConfiguration
     | DigitalOutputConfiguration
     | PwmInputConfiguration
     | PwmOutputConfiguration

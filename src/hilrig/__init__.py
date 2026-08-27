@@ -4,6 +4,7 @@ from hilrig.api import (
     I2C,
     SPI,
     UART,
+    AnalogueInput,
     AnalogueOutput,
     DigitalInput,
     DigitalInputExpectation,
@@ -57,6 +58,7 @@ from hilrig.results import (
 )
 
 __all__ = [
+    "AnalogueInput",
     "AnalogueOutput",
     "ApplicationErrorRecord",
     "CapturedRunBuilder",

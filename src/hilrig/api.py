@@ -18,6 +18,8 @@ from hilrig.models.assertions import (
 )
 from hilrig.models.channels import Channel, ChannelKind
 from hilrig.models.configuration import (
+    AnalogueInputConfiguration,
+    AnalogueOutputConfiguration,
     Configuration,
     DigitalInputConfiguration,
     DigitalOutputConfiguration,
@@ -312,8 +314,22 @@ class PwmOutput(_ChannelHandle):
         return self
 
 
+class AnalogueInput(_ChannelHandle):
+    """A reusable handle for one analogue input channel."""
+
+    def configure(self) -> AnalogueInput:
+        """Declare that this analogue input is part of the test."""
+        self._test._configure_channel(self._identity, AnalogueInputConfiguration())
+        return self
+
+
 class AnalogueOutput(_ChannelHandle):
     """A reusable handle for one analogue output channel."""
+
+    def configure(self) -> AnalogueOutput:
+        """Declare that this analogue output is part of the test."""
+        self._test._configure_channel(self._identity, AnalogueOutputConfiguration())
+        return self
 
     def set_voltage(
         self,
@@ -324,6 +340,11 @@ class AnalogueOutput(_ChannelHandle):
         at_s: TimeValue | None = None,
     ) -> AnalogueOutput:
         """Schedule an analogue output voltage."""
+        configuration = self._test.configuration.for_channel(self._identity)
+        if not isinstance(configuration, AnalogueOutputConfiguration):
+            raise ConfigurationError(
+                f"analogue_output channel {self.channel} must be configured before adding stimuli"
+            )
         requested_voltage = _non_negative_number(voltage, name="voltage")
         timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
         self._test._schedule(
@@ -800,6 +821,10 @@ class Test:
         if channel not in (0, 1):
             raise ValueError("PWM output channel must be 0 (LV) or 1 (HV)")
         return self._handle(ChannelKind.PWM_OUTPUT, channel, PwmOutput)
+
+    def analogue_input(self, *, channel: int) -> AnalogueInput:
+        """Return a stable analogue input handle."""
+        return self._handle(ChannelKind.ANALOGUE_INPUT, channel, AnalogueInput)
 
     def analogue_output(self, *, channel: int) -> AnalogueOutput:
         """Return a stable analogue output handle."""

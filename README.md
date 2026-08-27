@@ -111,12 +111,26 @@ expectation.to_transition(
 - Digital output logic voltage and initial state
 - PWM input logic voltage
 - PWM output voltage, initial frequency, initial duty cycle, and initial enable state
+- Analogue input and output usage declarations with no hardware parameters
 - I2C role, speed, logic voltage, pull-up value, and slave address
 - SPI role, supported baud rate, frame size, mode, and bit order
 - UART electrical mode, baud rate, parity, word length, and stop bits
 
 There is no per-channel recording or measurement-enable configuration. The model
 assumes the rig records all channels.
+
+Analogue channels have nothing electrical to configure, but they are declared explicitly
+so they appear in the internal model and compiled IR:
+
+```python
+analogue_input = test.analogue_input(channel=0).configure()
+analogue_output = test.analogue_output(channel=0).configure()
+
+analogue_output.set_voltage(3.3, at_ms=100)
+```
+
+Their compiled configuration has an empty `parameters` object. An analogue output must
+be configured before voltage stimuli can be scheduled.
 
 ## Implemented stimuli
 

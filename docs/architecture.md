@@ -83,6 +83,12 @@ only be configured once.
 No recording-enable setting exists. Recording is treated as rig-wide behaviour rather
 than user-selected channel configuration.
 
+Analogue inputs and outputs use zero-field configuration marker objects. Calling
+`configure()` has no electrical effect; it explicitly declares that the channel belongs
+to the test, produces an empty `parameters` object in the compiled IR, and gives later
+validation and assertion features a stable channel identity. Analogue output stimuli
+require this declaration first.
+
 ## Time model
 
 `timing.py` converts ticks, milliseconds, or seconds into integer ticks using the

@@ -88,6 +88,19 @@ def test_json_can_be_returned_or_written(tmp_path: Path) -> None:
         compiled.write_json(tmp_path / "compiled-test.txt")
 
 
+def test_analogue_declarations_compile_as_empty_parameter_configurations() -> None:
+    test = HilRigTest(name="Analogue IR markers")
+    test.analogue_input(channel=0).configure()
+    test.analogue_output(channel=1).configure()
+
+    configurations = test.compile().to_dict()["configurations"]
+
+    assert configurations == [
+        {"peripheral": "analogue_input", "channel": 0, "parameters": {}},
+        {"peripheral": "analogue_output", "channel": 1, "parameters": {}},
+    ]
+
+
 def test_excel_contains_the_four_human_sheets_and_host_assertions(tmp_path: Path) -> None:
     compiled = _compiled_example()
     output_path = compiled.write_excel(tmp_path / "compiled-test.xlsx")

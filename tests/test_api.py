@@ -16,6 +16,8 @@ from hilrig import (
     Test as HilRigTest,
 )
 from hilrig.models.configuration import (
+    AnalogueInputConfiguration,
+    AnalogueOutputConfiguration,
     DigitalInputConfiguration,
     DigitalOutputConfiguration,
     I2CConfiguration,
@@ -209,6 +211,17 @@ def test_full_analogue_output_name_is_exposed() -> None:
 
     assert test.analogue_output(channel=0).channel == 0
     assert not hasattr(test, "analogue_out")
+
+
+def test_analogue_channels_use_no_argument_configuration_markers() -> None:
+    test = HilRigTest(name="Analogue declarations")
+    analogue_input = test.analogue_input(channel=0)
+    analogue_output = test.analogue_output(channel=1)
+
+    assert analogue_input.configure() is analogue_input
+    assert analogue_output.configure() is analogue_output
+    assert test.configuration.for_channel(analogue_input.identity) == AnalogueInputConfiguration()
+    assert test.configuration.for_channel(analogue_output.identity) == AnalogueOutputConfiguration()
 
 
 @pytest.mark.parametrize("name", ["", "   ", None])

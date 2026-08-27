@@ -11,6 +11,7 @@ class ChannelKind(str, Enum):
     DIGITAL_OUTPUT = "digital_output"
     PWM_INPUT = "pwm_input"
     PWM_OUTPUT = "pwm_output"
+    ANALOGUE_INPUT = "analogue_input"
     ANALOGUE_OUTPUT = "analogue_output"
     I2C = "i2c"
     SPI = "spi"

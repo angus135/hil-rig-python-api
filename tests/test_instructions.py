@@ -22,7 +22,9 @@ def test_instruction_ids_increment_across_peripheral_types() -> None:
 
     test.digital_output(channel=0).high(at_tick=0)
     test.pwm_output(channel=0).enable(at_tick=1)
-    test.analogue_output(channel=0).set_voltage(3.2, at_tick=2)
+    analogue_output = test.analogue_output(channel=0)
+    analogue_output.configure()
+    analogue_output.set_voltage(3.2, at_tick=2)
 
     assert [instruction.instruction_id for instruction in test.instructions] == [0, 1, 2]
 
@@ -67,12 +69,21 @@ def test_pwm_stimuli_preserve_atomic_and_individual_updates() -> None:
 
 def test_analogue_output_stimulus_stores_voltage() -> None:
     test = HilRigTest(name="Analogue action")
+    analogue_output = test.analogue_output(channel=1)
+    analogue_output.configure()
 
-    test.analogue_output(channel=1).set_voltage(18.4, at_tick=250)
+    analogue_output.set_voltage(18.4, at_tick=250)
 
     instruction = tuple(test.instructions)[0]
     assert isinstance(instruction, AnalogueOutputInstruction)
     assert instruction.voltage == 18.4
+
+
+def test_analogue_output_stimulus_requires_configuration() -> None:
+    test = HilRigTest(name="Unconfigured analogue output")
+
+    with pytest.raises(ConfigurationError, match="must be configured"):
+        test.analogue_output(channel=0).set_voltage(3.3, at_tick=0)
 
 
 def test_i2c_master_write_and_read_are_stored() -> None:
