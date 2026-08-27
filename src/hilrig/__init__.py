@@ -5,11 +5,13 @@ from hilrig.api import (
     SPI,
     UART,
     AnalogueInput,
+    AnalogueInputExpectation,
     AnalogueOutput,
     DigitalInput,
     DigitalInputExpectation,
     DigitalOutput,
     PwmInput,
+    PwmInputExpectation,
     PwmOutput,
     Test,
 )
@@ -59,6 +61,7 @@ from hilrig.results import (
 
 __all__ = [
     "AnalogueInput",
+    "AnalogueInputExpectation",
     "AnalogueOutput",
     "ApplicationErrorRecord",
     "CapturedRunBuilder",
@@ -87,6 +90,7 @@ __all__ = [
     "PeripheralError",
     "Pullup",
     "PwmInput",
+    "PwmInputExpectation",
     "PwmOutput",
     "PWMMeasurement",
     "SPI",

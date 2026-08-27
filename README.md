@@ -4,10 +4,11 @@ Host-side Python library for constructing an internal model of a hardware-in-the
 test for the HIL-RIG.
 
 The current implementation covers test and peripheral configuration, stimulus
-instructions, exact user-time-to-tick conversion, digital-input assertion definitions,
-protocol-neutral JSON and Excel intermediate representations, and persistent captured-run
-storage. It does not define an IDC representation, communicate over USB, translate the
-unfinished application-message interface, or execute assertions.
+instructions, exact user-time-to-tick conversion, digital, PWM, and analogue-input
+assertion definitions, protocol-neutral JSON and Excel intermediate representations,
+and persistent captured-run storage. It does not define an IDC representation,
+communicate over USB, translate the unfinished application-message interface, or execute
+assertions.
 
 ## Requirements
 
@@ -190,11 +191,38 @@ only the bytes that will eventually be sent to the rig.
 
 ## Implemented assertions
 
-Only digital-input assertion definitions are implemented:
+The following assertion definitions are implemented:
 
-- high or low at one point;
-- remain high over a range;
-- transition between states within a range.
+- Digital input: high or low at one point, remain high or low over a range, and a
+  transition within a range.
+- PWM input: period, frequency, duty cycle, or combined waveform near a target at one
+  point; frequency or duty cycle remaining within a range.
+- Analogue input: voltage near a target or within a band at one point; voltage remaining
+  within a band, above a threshold, or below a threshold over a range.
+
+For example:
+
+```python
+pwm = test.pwm_input(channel=0)
+test.expect(pwm).frequency_near(
+    frequency_hz=50_000,
+    tolerance_hz=500,
+    at_tick=100,
+)
+
+analogue = test.analogue_input(channel=0).configure()
+test.expect(analogue).remain_within(
+    minimum_v=4.9,
+    maximum_v=5.1,
+    from_tick=100,
+    until_tick=500,
+)
+```
+
+Analogue assertion arguments use volts for readability. They are immediately converted
+to exact integer microvolts in the internal model, matching captured analogue samples.
+Values finer than one microvolt are rejected rather than rounded. Analogue input channel
+indices are limited to `0` and `1`, matching the two physical inputs.
 
 The assertion objects are only stored in the internal model. Result data and assertion
 evaluation are separate: captured result storage is implemented, while the assertion

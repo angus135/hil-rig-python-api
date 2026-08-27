@@ -5,11 +5,25 @@ from enum import Enum
 
 from hilrig.exceptions import TimingError, ValidationError
 from hilrig.models.assertions import (
+    AnalogueInputNearAssertion,
+    AnalogueInputRemainAboveAssertion,
+    AnalogueInputRemainBelowAssertion,
+    AnalogueInputRemainWithinAssertion,
+    AnalogueInputWithinAssertion,
     Assertion,
     AssertionList,
     DigitalInputPointAssertion,
     DigitalInputRemainHighAssertion,
+    DigitalInputRemainLowAssertion,
     DigitalInputTransitionAssertion,
+    PointAssertion,
+    PwmInputDutyCycleNearAssertion,
+    PwmInputDutyCycleRemainWithinAssertion,
+    PwmInputFrequencyNearAssertion,
+    PwmInputFrequencyRemainWithinAssertion,
+    PwmInputPeriodNearAssertion,
+    PwmInputWaveformNearAssertion,
+    RangeAssertion,
 )
 from hilrig.models.configuration import Configuration
 from hilrig.models.execution import (
@@ -49,6 +63,24 @@ _INSTRUCTION_OPERATIONS: dict[type[Instruction], str] = {
     I2CPreloadResponseInstruction: "preload_response",
     SPITransferInstruction: "transfer",
     UARTWriteInstruction: "write",
+}
+
+_ASSERTION_OPERATIONS: dict[type[Assertion], str] = {
+    DigitalInputPointAssertion: "state_at_tick",
+    DigitalInputRemainHighAssertion: "remain_high",
+    DigitalInputRemainLowAssertion: "remain_low",
+    DigitalInputTransitionAssertion: "transition",
+    PwmInputPeriodNearAssertion: "period_near",
+    PwmInputFrequencyNearAssertion: "frequency_near",
+    PwmInputDutyCycleNearAssertion: "duty_cycle_near",
+    PwmInputWaveformNearAssertion: "waveform_near",
+    PwmInputFrequencyRemainWithinAssertion: "frequency_remain_within",
+    PwmInputDutyCycleRemainWithinAssertion: "duty_cycle_remain_within",
+    AnalogueInputNearAssertion: "near",
+    AnalogueInputWithinAssertion: "within",
+    AnalogueInputRemainWithinAssertion: "remain_within",
+    AnalogueInputRemainAboveAssertion: "remain_above",
+    AnalogueInputRemainBelowAssertion: "remain_below",
 }
 
 _POST_TEST_SETTLING_SECONDS = 1
@@ -122,9 +154,9 @@ def _expected_tick_count(
 
 
 def _assertion_end_tick(assertion: Assertion) -> int:
-    if isinstance(assertion, DigitalInputPointAssertion):
+    if isinstance(assertion, PointAssertion):
         return assertion.timestamp
-    if isinstance(assertion, (DigitalInputRemainHighAssertion, DigitalInputTransitionAssertion)):
+    if isinstance(assertion, RangeAssertion):
         return assertion.until_tick
     raise ValidationError(f"Unsupported assertion type: {type(assertion).__name__}")
 
@@ -178,32 +210,24 @@ def _compile_instruction(instruction: Instruction) -> CompiledInstruction:
 
 
 def _compile_assertion(assertion: Assertion) -> CompiledAssertion:
-    if isinstance(assertion, DigitalInputPointAssertion):
-        name = "state_at_tick"
-        arguments: dict[str, IRScalar] = {
-            "tick": assertion.timestamp,
-            "expected_state": assertion.expected_state.name,
-        }
-    elif isinstance(assertion, DigitalInputRemainHighAssertion):
-        name = "remain_high"
-        arguments = {"from_tick": assertion.from_tick, "until_tick": assertion.until_tick}
-    elif isinstance(assertion, DigitalInputTransitionAssertion):
-        name = "transition"
-        arguments = {
-            "from_state": assertion.from_state.name,
-            "to_state": assertion.to_state.name,
-            "from_tick": assertion.from_tick,
-            "until_tick": assertion.until_tick,
-        }
-    else:
+    operation = _ASSERTION_OPERATIONS.get(type(assertion))
+    if operation is None:
         raise ValidationError(
             f"No human-readable representation is defined for {type(assertion).__name__}"
         )
+    excluded = {"assertion_id", "channel"}
+    arguments = {
+        ("tick" if field.name == "timestamp" else field.name): _ir_value(
+            getattr(assertion, field.name)
+        )
+        for field in fields(assertion)
+        if field.name not in excluded
+    }
     return CompiledAssertion(
         assertion_id=assertion.assertion_id,
         peripheral=assertion.channel.kind.value,
         channel=assertion.channel.index,
-        assertion=name,
+        assertion=operation,
         arguments=immutable_fields(arguments),
     )
 
@@ -229,11 +253,11 @@ def _validate_assertions(assertions: AssertionList) -> None:
     for expected_id, assertion in enumerate(assertions):
         if assertion.assertion_id != expected_id:
             raise ValidationError("Assertion IDs must be sequential from zero")
-        if isinstance(assertion, DigitalInputPointAssertion):
+        if type(assertion) not in _ASSERTION_OPERATIONS:
+            raise ValidationError(f"Unsupported assertion type: {type(assertion).__name__}")
+        if isinstance(assertion, PointAssertion):
             _validate_tick(assertion.timestamp, label="Assertion timestamp")
-        elif isinstance(
-            assertion, (DigitalInputRemainHighAssertion, DigitalInputTransitionAssertion)
-        ):
+        elif isinstance(assertion, RangeAssertion):
             _validate_tick(assertion.from_tick, label="Assertion start tick")
             _validate_tick(assertion.until_tick, label="Assertion end tick")
             if assertion.from_tick > assertion.until_tick:

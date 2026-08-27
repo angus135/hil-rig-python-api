@@ -1,11 +1,25 @@
 """Protocol-neutral data models used by the host-side API."""
 
 from hilrig.models.assertions import (
+    AnalogueInputNearAssertion,
+    AnalogueInputRemainAboveAssertion,
+    AnalogueInputRemainBelowAssertion,
+    AnalogueInputRemainWithinAssertion,
+    AnalogueInputWithinAssertion,
     Assertion,
     AssertionList,
     DigitalInputPointAssertion,
     DigitalInputRemainHighAssertion,
+    DigitalInputRemainLowAssertion,
     DigitalInputTransitionAssertion,
+    PointAssertion,
+    PwmInputDutyCycleNearAssertion,
+    PwmInputDutyCycleRemainWithinAssertion,
+    PwmInputFrequencyNearAssertion,
+    PwmInputFrequencyRemainWithinAssertion,
+    PwmInputPeriodNearAssertion,
+    PwmInputWaveformNearAssertion,
+    RangeAssertion,
 )
 from hilrig.models.channels import Channel, ChannelKind
 from hilrig.models.configuration import (
@@ -63,6 +77,11 @@ from hilrig.models.instructions import (
 
 __all__ = [
     "AnalogueInputConfiguration",
+    "AnalogueInputNearAssertion",
+    "AnalogueInputRemainAboveAssertion",
+    "AnalogueInputRemainBelowAssertion",
+    "AnalogueInputRemainWithinAssertion",
+    "AnalogueInputWithinAssertion",
     "AnalogueOutputConfiguration",
     "AnalogueOutputInstruction",
     "Assertion",
@@ -77,6 +96,7 @@ __all__ = [
     "DigitalInputConfiguration",
     "DigitalInputPointAssertion",
     "DigitalInputRemainHighAssertion",
+    "DigitalInputRemainLowAssertion",
     "DigitalInputTransitionAssertion",
     "DigitalOutputAction",
     "DigitalOutputConfiguration",
@@ -94,6 +114,13 @@ __all__ = [
     "InstructionList",
     "LogicVoltage",
     "Pullup",
+    "PointAssertion",
+    "PwmInputDutyCycleNearAssertion",
+    "PwmInputDutyCycleRemainWithinAssertion",
+    "PwmInputFrequencyNearAssertion",
+    "PwmInputFrequencyRemainWithinAssertion",
+    "PwmInputPeriodNearAssertion",
+    "PwmInputWaveformNearAssertion",
     "PwmEnableInstruction",
     "PwmInputConfiguration",
     "PwmOutputConfiguration",
@@ -108,6 +135,7 @@ __all__ = [
     "SPISize",
     "SPITransferInstruction",
     "StartMode",
+    "RangeAssertion",
     "TimeSlot",
     "UARTConfiguration",
     "UARTLengthBits",

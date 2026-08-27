@@ -19,7 +19,7 @@ Internal model
     |-- test ID and test-level configuration
     |-- shared channel identities and peripheral configurations
     |-- sequentially identified stimulus instructions
-    `-- host-side digital-input assertions
+    `-- host-side digital, PWM, and analogue-input assertions
 
     |
     v
@@ -87,7 +87,8 @@ Analogue inputs and outputs use zero-field configuration marker objects. Calling
 `configure()` has no electrical effect; it explicitly declares that the channel belongs
 to the test, produces an empty `parameters` object in the compiled IR, and gives later
 validation and assertion features a stable channel identity. Analogue output stimuli
-require this declaration first.
+require this declaration first. Analogue input handles are limited to physical channels
+0 and 1.
 
 ## Time model
 
@@ -114,9 +115,17 @@ also provides stable sorting and grouping helpers.
 ## Assertion model
 
 Assertions remain separate from stimulus instructions and are intended to be evaluated
-on the host against returned time-series data. The current internal model only defines
-digital-input point, remain-high, and transition assertions. It does not yet define
-results or evaluation algorithms.
+on the host against returned time-series data. Reusable `PointAssertion` and
+`RangeAssertion` bases hold the converted point tick or inclusive tick bounds. Concrete
+definitions currently cover digital states and transitions, PWM period/frequency/duty
+measurements, and analogue voltage targets, bands, and thresholds. Evaluation algorithms
+remain deliberately unimplemented.
+
+Analogue assertion builders accept volts (`target_v`, `minimum_v`, and similar names)
+for user readability, then store signed integer microvolts (`target_uv`, `minimum_uv`,
+and similar fields). This matches `CapturedRunIR` without requiring floating-point unit
+conversion during future evaluation. The conversion must be exact to one microvolt;
+sub-microvolt values are rejected rather than rounded.
 
 Every assertion receives an API-assigned sequential `assertion_id`, starting at zero for
 each test. This counter is independent of stimulus instruction IDs. The identifier is

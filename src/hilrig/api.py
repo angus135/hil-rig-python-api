@@ -5,16 +5,29 @@ from __future__ import annotations
 import math
 import secrets
 from collections.abc import Callable
-from typing import TypeVar
+from decimal import Decimal, InvalidOperation
+from typing import TypeVar, overload
 
 from hilrig.compiler import compile_test
 from hilrig.exceptions import ConfigurationError, FrozenTestError, PeripheralError, TimingError
 from hilrig.models.assertions import (
+    AnalogueInputNearAssertion,
+    AnalogueInputRemainAboveAssertion,
+    AnalogueInputRemainBelowAssertion,
+    AnalogueInputRemainWithinAssertion,
+    AnalogueInputWithinAssertion,
     Assertion,
     AssertionList,
     DigitalInputPointAssertion,
     DigitalInputRemainHighAssertion,
+    DigitalInputRemainLowAssertion,
     DigitalInputTransitionAssertion,
+    PwmInputDutyCycleNearAssertion,
+    PwmInputDutyCycleRemainWithinAssertion,
+    PwmInputFrequencyNearAssertion,
+    PwmInputFrequencyRemainWithinAssertion,
+    PwmInputPeriodNearAssertion,
+    PwmInputWaveformNearAssertion,
 )
 from hilrig.models.channels import Channel, ChannelKind
 from hilrig.models.configuration import (
@@ -687,6 +700,32 @@ class DigitalInputExpectation:
         )
         return self
 
+    def remain_low(
+        self,
+        *,
+        from_tick: int | None = None,
+        until_tick: int | None = None,
+        from_ms: TimeValue | None = None,
+        until_ms: TimeValue | None = None,
+        from_s: TimeValue | None = None,
+        until_s: TimeValue | None = None,
+    ) -> DigitalInputExpectation:
+        """Expect the input to stay low throughout one inclusive time range."""
+        start, end = self._test._time_range(
+            ticks=_optional_pair(from_tick, until_tick, names="from_tick and until_tick"),
+            milliseconds=_optional_pair(from_ms, until_ms, names="from_ms and until_ms"),
+            seconds=_optional_pair(from_s, until_s, names="from_s and until_s"),
+        )
+        self._test._add_assertion(
+            lambda assertion_id: DigitalInputRemainLowAssertion(
+                assertion_id=assertion_id,
+                channel=self._input.identity,
+                from_tick=start,
+                until_tick=end,
+            )
+        )
+        return self
+
     def to_transition(
         self,
         *,
@@ -736,6 +775,380 @@ class DigitalInputExpectation:
             )
         )
         return self
+
+
+class PwmInputExpectation:
+    """Builder for assertions over one PWM input's returned measurements."""
+
+    def __init__(self, test: Test, pwm_input: PwmInput) -> None:
+        self._test = test
+        self._input = pwm_input
+
+    def period_near(
+        self,
+        *,
+        period_ns: int,
+        tolerance_ns: int,
+        at_tick: int | None = None,
+        at_ms: TimeValue | None = None,
+        at_s: TimeValue | None = None,
+    ) -> PwmInputExpectation:
+        """Expect the measured period to be near a target at one time."""
+        period = _positive_integer(period_ns, name="period_ns")
+        tolerance = _non_negative_integer(tolerance_ns, name="tolerance_ns")
+        timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
+        self._test._add_assertion(
+            lambda assertion_id: PwmInputPeriodNearAssertion(
+                assertion_id=assertion_id,
+                channel=self._input.identity,
+                timestamp=timestamp,
+                period_ns=period,
+                tolerance_ns=tolerance,
+            )
+        )
+        return self
+
+    def frequency_near(
+        self,
+        *,
+        frequency_hz: int | float,
+        tolerance_hz: int | float,
+        at_tick: int | None = None,
+        at_ms: TimeValue | None = None,
+        at_s: TimeValue | None = None,
+    ) -> PwmInputExpectation:
+        """Expect the measured frequency to be near a target at one time."""
+        frequency = _positive_number(frequency_hz, name="frequency_hz")
+        tolerance = _non_negative_number(tolerance_hz, name="tolerance_hz")
+        timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
+        self._test._add_assertion(
+            lambda assertion_id: PwmInputFrequencyNearAssertion(
+                assertion_id=assertion_id,
+                channel=self._input.identity,
+                timestamp=timestamp,
+                frequency_hz=frequency,
+                tolerance_hz=tolerance,
+            )
+        )
+        return self
+
+    def duty_cycle_near(
+        self,
+        *,
+        duty_cycle: int | float,
+        duty_cycle_tolerance: int | float,
+        at_tick: int | None = None,
+        at_ms: TimeValue | None = None,
+        at_s: TimeValue | None = None,
+    ) -> PwmInputExpectation:
+        """Expect the measured duty cycle to be near a target at one time."""
+        duty = _duty_cycle(duty_cycle, name="duty_cycle")
+        tolerance = _duty_cycle(duty_cycle_tolerance, name="duty_cycle_tolerance")
+        timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
+        self._test._add_assertion(
+            lambda assertion_id: PwmInputDutyCycleNearAssertion(
+                assertion_id=assertion_id,
+                channel=self._input.identity,
+                timestamp=timestamp,
+                duty_cycle=duty,
+                duty_cycle_tolerance=tolerance,
+            )
+        )
+        return self
+
+    def waveform_near(
+        self,
+        *,
+        frequency_hz: int | float,
+        frequency_tolerance_hz: int | float,
+        duty_cycle: int | float,
+        duty_cycle_tolerance: int | float,
+        at_tick: int | None = None,
+        at_ms: TimeValue | None = None,
+        at_s: TimeValue | None = None,
+    ) -> PwmInputExpectation:
+        """Expect frequency and duty cycle to be near targets at one time."""
+        frequency = _positive_number(frequency_hz, name="frequency_hz")
+        frequency_tolerance = _non_negative_number(
+            frequency_tolerance_hz,
+            name="frequency_tolerance_hz",
+        )
+        duty = _duty_cycle(duty_cycle, name="duty_cycle")
+        duty_tolerance = _duty_cycle(duty_cycle_tolerance, name="duty_cycle_tolerance")
+        timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
+        self._test._add_assertion(
+            lambda assertion_id: PwmInputWaveformNearAssertion(
+                assertion_id=assertion_id,
+                channel=self._input.identity,
+                timestamp=timestamp,
+                frequency_hz=frequency,
+                frequency_tolerance_hz=frequency_tolerance,
+                duty_cycle=duty,
+                duty_cycle_tolerance=duty_tolerance,
+            )
+        )
+        return self
+
+    def frequency_remain_within(
+        self,
+        *,
+        minimum_hz: int | float,
+        maximum_hz: int | float,
+        from_tick: int | None = None,
+        until_tick: int | None = None,
+        from_ms: TimeValue | None = None,
+        until_ms: TimeValue | None = None,
+        from_s: TimeValue | None = None,
+        until_s: TimeValue | None = None,
+    ) -> PwmInputExpectation:
+        """Expect frequency to remain within an inclusive band."""
+        minimum = _non_negative_number(minimum_hz, name="minimum_hz")
+        maximum = _non_negative_number(maximum_hz, name="maximum_hz")
+        _ordered_bounds(minimum, maximum, names="minimum_hz and maximum_hz")
+        start, end = self._range(
+            from_tick=from_tick,
+            until_tick=until_tick,
+            from_ms=from_ms,
+            until_ms=until_ms,
+            from_s=from_s,
+            until_s=until_s,
+        )
+        self._test._add_assertion(
+            lambda assertion_id: PwmInputFrequencyRemainWithinAssertion(
+                assertion_id=assertion_id,
+                channel=self._input.identity,
+                from_tick=start,
+                until_tick=end,
+                minimum_hz=minimum,
+                maximum_hz=maximum,
+            )
+        )
+        return self
+
+    def duty_cycle_remain_within(
+        self,
+        *,
+        minimum_duty_cycle: int | float,
+        maximum_duty_cycle: int | float,
+        from_tick: int | None = None,
+        until_tick: int | None = None,
+        from_ms: TimeValue | None = None,
+        until_ms: TimeValue | None = None,
+        from_s: TimeValue | None = None,
+        until_s: TimeValue | None = None,
+    ) -> PwmInputExpectation:
+        """Expect duty cycle to remain within an inclusive band."""
+        minimum = _duty_cycle(minimum_duty_cycle, name="minimum_duty_cycle")
+        maximum = _duty_cycle(maximum_duty_cycle, name="maximum_duty_cycle")
+        _ordered_bounds(
+            minimum,
+            maximum,
+            names="minimum_duty_cycle and maximum_duty_cycle",
+        )
+        start, end = self._range(
+            from_tick=from_tick,
+            until_tick=until_tick,
+            from_ms=from_ms,
+            until_ms=until_ms,
+            from_s=from_s,
+            until_s=until_s,
+        )
+        self._test._add_assertion(
+            lambda assertion_id: PwmInputDutyCycleRemainWithinAssertion(
+                assertion_id=assertion_id,
+                channel=self._input.identity,
+                from_tick=start,
+                until_tick=end,
+                minimum_duty_cycle=minimum,
+                maximum_duty_cycle=maximum,
+            )
+        )
+        return self
+
+    def _range(
+        self,
+        *,
+        from_tick: int | None,
+        until_tick: int | None,
+        from_ms: TimeValue | None,
+        until_ms: TimeValue | None,
+        from_s: TimeValue | None,
+        until_s: TimeValue | None,
+    ) -> tuple[int, int]:
+        return self._test._time_range(
+            ticks=_optional_pair(from_tick, until_tick, names="from_tick and until_tick"),
+            milliseconds=_optional_pair(from_ms, until_ms, names="from_ms and until_ms"),
+            seconds=_optional_pair(from_s, until_s, names="from_s and until_s"),
+        )
+
+
+class AnalogueInputExpectation:
+    """Builder for assertions over one analogue input's returned microvolt samples."""
+
+    def __init__(self, test: Test, analogue_input: AnalogueInput) -> None:
+        self._test = test
+        self._input = analogue_input
+
+    def near(
+        self,
+        *,
+        target_v: int | float | Decimal,
+        tolerance_v: int | float | Decimal,
+        at_tick: int | None = None,
+        at_ms: TimeValue | None = None,
+        at_s: TimeValue | None = None,
+    ) -> AnalogueInputExpectation:
+        """Expect a voltage to be near a target at one time."""
+        target_uv = _volts_to_microvolts(target_v, name="target_v")
+        tolerance_uv = _non_negative_microvolts(tolerance_v, name="tolerance_v")
+        timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
+        self._test._add_assertion(
+            lambda assertion_id: AnalogueInputNearAssertion(
+                assertion_id=assertion_id,
+                channel=self._input.identity,
+                timestamp=timestamp,
+                target_uv=target_uv,
+                tolerance_uv=tolerance_uv,
+            )
+        )
+        return self
+
+    def within(
+        self,
+        *,
+        minimum_v: int | float | Decimal,
+        maximum_v: int | float | Decimal,
+        at_tick: int | None = None,
+        at_ms: TimeValue | None = None,
+        at_s: TimeValue | None = None,
+    ) -> AnalogueInputExpectation:
+        """Expect a voltage to be within an inclusive band at one time."""
+        minimum_uv, maximum_uv = _voltage_bounds(minimum_v, maximum_v)
+        timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
+        self._test._add_assertion(
+            lambda assertion_id: AnalogueInputWithinAssertion(
+                assertion_id=assertion_id,
+                channel=self._input.identity,
+                timestamp=timestamp,
+                minimum_uv=minimum_uv,
+                maximum_uv=maximum_uv,
+            )
+        )
+        return self
+
+    def remain_within(
+        self,
+        *,
+        minimum_v: int | float | Decimal,
+        maximum_v: int | float | Decimal,
+        from_tick: int | None = None,
+        until_tick: int | None = None,
+        from_ms: TimeValue | None = None,
+        until_ms: TimeValue | None = None,
+        from_s: TimeValue | None = None,
+        until_s: TimeValue | None = None,
+    ) -> AnalogueInputExpectation:
+        """Expect a voltage to remain within an inclusive band."""
+        minimum_uv, maximum_uv = _voltage_bounds(minimum_v, maximum_v)
+        start, end = self._range(
+            from_tick=from_tick,
+            until_tick=until_tick,
+            from_ms=from_ms,
+            until_ms=until_ms,
+            from_s=from_s,
+            until_s=until_s,
+        )
+        self._test._add_assertion(
+            lambda assertion_id: AnalogueInputRemainWithinAssertion(
+                assertion_id=assertion_id,
+                channel=self._input.identity,
+                from_tick=start,
+                until_tick=end,
+                minimum_uv=minimum_uv,
+                maximum_uv=maximum_uv,
+            )
+        )
+        return self
+
+    def remain_above(
+        self,
+        *,
+        threshold_v: int | float | Decimal,
+        from_tick: int | None = None,
+        until_tick: int | None = None,
+        from_ms: TimeValue | None = None,
+        until_ms: TimeValue | None = None,
+        from_s: TimeValue | None = None,
+        until_s: TimeValue | None = None,
+    ) -> AnalogueInputExpectation:
+        """Expect a voltage to remain above a threshold."""
+        threshold_uv = _volts_to_microvolts(threshold_v, name="threshold_v")
+        start, end = self._range(
+            from_tick=from_tick,
+            until_tick=until_tick,
+            from_ms=from_ms,
+            until_ms=until_ms,
+            from_s=from_s,
+            until_s=until_s,
+        )
+        self._test._add_assertion(
+            lambda assertion_id: AnalogueInputRemainAboveAssertion(
+                assertion_id=assertion_id,
+                channel=self._input.identity,
+                from_tick=start,
+                until_tick=end,
+                threshold_uv=threshold_uv,
+            )
+        )
+        return self
+
+    def remain_below(
+        self,
+        *,
+        threshold_v: int | float | Decimal,
+        from_tick: int | None = None,
+        until_tick: int | None = None,
+        from_ms: TimeValue | None = None,
+        until_ms: TimeValue | None = None,
+        from_s: TimeValue | None = None,
+        until_s: TimeValue | None = None,
+    ) -> AnalogueInputExpectation:
+        """Expect a voltage to remain below a threshold."""
+        threshold_uv = _volts_to_microvolts(threshold_v, name="threshold_v")
+        start, end = self._range(
+            from_tick=from_tick,
+            until_tick=until_tick,
+            from_ms=from_ms,
+            until_ms=until_ms,
+            from_s=from_s,
+            until_s=until_s,
+        )
+        self._test._add_assertion(
+            lambda assertion_id: AnalogueInputRemainBelowAssertion(
+                assertion_id=assertion_id,
+                channel=self._input.identity,
+                from_tick=start,
+                until_tick=end,
+                threshold_uv=threshold_uv,
+            )
+        )
+        return self
+
+    def _range(
+        self,
+        *,
+        from_tick: int | None,
+        until_tick: int | None,
+        from_ms: TimeValue | None,
+        until_ms: TimeValue | None,
+        from_s: TimeValue | None,
+        until_s: TimeValue | None,
+    ) -> tuple[int, int]:
+        return self._test._time_range(
+            ticks=_optional_pair(from_tick, until_tick, names="from_tick and until_tick"),
+            milliseconds=_optional_pair(from_ms, until_ms, names="from_ms and until_ms"),
+            seconds=_optional_pair(from_s, until_s, names="from_s and until_s"),
+        )
 
 
 class Test:
@@ -828,7 +1241,10 @@ class Test:
         return self._handle(ChannelKind.PWM_OUTPUT, channel, PwmOutput)
 
     def analogue_input(self, *, channel: int) -> AnalogueInput:
-        """Return a stable analogue input handle."""
+        """Return one of the two analogue input handles."""
+        _channel_index(channel)
+        if channel not in (0, 1):
+            raise ValueError("Analogue input channel must be 0 or 1")
         return self._handle(ChannelKind.ANALOGUE_INPUT, channel, AnalogueInput)
 
     def analogue_output(self, *, channel: int) -> AnalogueOutput:
@@ -847,12 +1263,32 @@ class Test:
         """Return a stable UART channel handle."""
         return self._handle(ChannelKind.UART, channel, UART)
 
-    def expect(self, channel: DigitalInput) -> DigitalInputExpectation:
-        """Begin a host-side assertion for a digital input channel."""
+    @overload
+    def expect(self, channel: DigitalInput) -> DigitalInputExpectation: ...
+
+    @overload
+    def expect(self, channel: PwmInput) -> PwmInputExpectation: ...
+
+    @overload
+    def expect(self, channel: AnalogueInput) -> AnalogueInputExpectation: ...
+
+    def expect(
+        self,
+        channel: DigitalInput | PwmInput | AnalogueInput,
+    ) -> DigitalInputExpectation | PwmInputExpectation | AnalogueInputExpectation:
+        """Begin a host-side assertion for a supported input channel."""
         self._ensure_mutable()
-        if not isinstance(channel, DigitalInput) or channel._test is not self:
-            raise TypeError("expect() currently supports a digital input from this Test")
-        return DigitalInputExpectation(self, channel)
+        if not isinstance(channel, (DigitalInput, PwmInput, AnalogueInput)):
+            raise TypeError(
+                "expect() supports digital, PWM, or analogue input handles from this Test"
+            )
+        if channel._test is not self:
+            raise TypeError("expect() requires an input handle from this Test")
+        if isinstance(channel, DigitalInput):
+            return DigitalInputExpectation(self, channel)
+        if isinstance(channel, PwmInput):
+            return PwmInputExpectation(self, channel)
+        return AnalogueInputExpectation(self, channel)
 
     def compile(self) -> CompiledTestIR:
         """Validate, snapshot, and freeze this test definition."""
@@ -973,6 +1409,46 @@ def _duty_cycle(value: int | float, *, name: str) -> float:
     if not 0.0 <= converted <= 1.0:
         raise ValueError(f"{name} must be between 0.0 and 1.0")
     return converted
+
+
+def _ordered_bounds(minimum: int | float, maximum: int | float, *, names: str) -> None:
+    if minimum > maximum:
+        raise ValueError(f"{names} must be in ascending order")
+
+
+def _volts_to_microvolts(value: int | float | Decimal, *, name: str) -> int:
+    """Convert a finite voltage to an exact whole number of microvolts."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+        raise TypeError(f"{name} must be a number")
+    try:
+        volts = Decimal(str(value))
+    except InvalidOperation as error:
+        raise ValueError(f"{name} must be finite") from error
+    if not volts.is_finite():
+        raise ValueError(f"{name} must be finite")
+
+    microvolts = volts * 1_000_000
+    integral_microvolts = microvolts.to_integral_value()
+    if microvolts != integral_microvolts:
+        raise ValueError(f"{name} must align with a whole microvolt")
+    return int(integral_microvolts)
+
+
+def _non_negative_microvolts(value: int | float | Decimal, *, name: str) -> int:
+    microvolts = _volts_to_microvolts(value, name=name)
+    if microvolts < 0:
+        raise ValueError(f"{name} must be non-negative")
+    return microvolts
+
+
+def _voltage_bounds(
+    minimum_v: int | float | Decimal,
+    maximum_v: int | float | Decimal,
+) -> tuple[int, int]:
+    minimum_uv = _volts_to_microvolts(minimum_v, name="minimum_v")
+    maximum_uv = _volts_to_microvolts(maximum_v, name="maximum_v")
+    _ordered_bounds(minimum_uv, maximum_uv, names="minimum_v and maximum_v")
+    return minimum_uv, maximum_uv
 
 
 def _validate_pwm_voltage(channel: int, voltage: LogicVoltage) -> None:
