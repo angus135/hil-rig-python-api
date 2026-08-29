@@ -6,7 +6,6 @@ from collections import deque
 from pathlib import Path
 
 import pytest
-
 from hil_rig_protocol import (
     Failure,
     LinkState,

@@ -82,7 +82,7 @@ class PySerialPort:
         return self._identity
 
     def _translate(self, operation: str, exc: Exception) -> SerialIOError:
-        timeout_type = getattr(self._serial_module, "SerialTimeoutException")
+        timeout_type = self._serial_module.SerialTimeoutException
         if isinstance(exc, timeout_type):
             return SerialWriteTimeout(f"serial {operation} timed out: {exc}")
         return SerialIOError(f"serial {operation} failed: {exc}")
@@ -91,7 +91,7 @@ class PySerialPort:
         try:
             self._handle.close()
         except Exception as exc:
-            serial_exception = getattr(self._serial_module, "SerialException")
+            serial_exception = self._serial_module.SerialException
             if isinstance(exc, serial_exception):
                 raise self._translate("close", exc) from exc
             raise
@@ -100,7 +100,7 @@ class PySerialPort:
         try:
             return bytes(self._handle.read(size))
         except Exception as exc:
-            serial_exception = getattr(self._serial_module, "SerialException")
+            serial_exception = self._serial_module.SerialException
             if isinstance(exc, serial_exception):
                 raise self._translate("read", exc) from exc
             raise
@@ -109,8 +109,8 @@ class PySerialPort:
         try:
             return self._handle.write(data)
         except Exception as exc:
-            serial_exception = getattr(self._serial_module, "SerialException")
-            timeout_exception = getattr(self._serial_module, "SerialTimeoutException")
+            serial_exception = self._serial_module.SerialException
+            timeout_exception = self._serial_module.SerialTimeoutException
             if isinstance(exc, (serial_exception, timeout_exception)):
                 raise self._translate("write", exc) from exc
             raise
@@ -120,7 +120,7 @@ class PySerialPort:
         try:
             return int(self._handle.in_waiting)
         except Exception as exc:
-            serial_exception = getattr(self._serial_module, "SerialException")
+            serial_exception = self._serial_module.SerialException
             if isinstance(exc, serial_exception):
                 raise self._translate("read readiness", exc) from exc
             raise
@@ -129,7 +129,7 @@ class PySerialPort:
         try:
             self._handle.reset_input_buffer()
         except Exception as exc:
-            serial_exception = getattr(self._serial_module, "SerialException")
+            serial_exception = self._serial_module.SerialException
             if isinstance(exc, serial_exception):
                 raise self._translate("input reset", exc) from exc
             raise
@@ -138,7 +138,7 @@ class PySerialPort:
         try:
             self._handle.reset_output_buffer()
         except Exception as exc:
-            serial_exception = getattr(self._serial_module, "SerialException")
+            serial_exception = self._serial_module.SerialException
             if isinstance(exc, serial_exception):
                 raise self._translate("output reset", exc) from exc
             raise
@@ -191,7 +191,7 @@ class PySerialProvider:
                 write_timeout=0,
             )
         except Exception as exc:
-            serial_exception = getattr(serial, "SerialException")
+            serial_exception = serial.SerialException
             if isinstance(exc, serial_exception):
                 raise SerialIOError(f"failed to open {device.port}: {exc}") from exc
             raise

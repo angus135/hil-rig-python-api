@@ -4,7 +4,6 @@ import threading
 from collections import deque
 
 import pytest
-
 from hil_rig_protocol import (
     EventType,
     Failure,

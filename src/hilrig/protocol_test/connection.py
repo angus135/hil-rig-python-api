@@ -15,17 +15,16 @@ from hil_rig_protocol import (
     Role,
     Transport,
     TransportConfig,
-    TransportStatus,
 )
 
 from .models import (
+    UINT32_MASK,
     ConnectionCounters,
     ConnectionEvent,
     ReceivedApplicationMessage,
     SerialSelector,
     ServiceBudgets,
     ServiceResult,
-    UINT32_MASK,
 )
 from .serial_port import SerialIOError, SerialPort, SerialProvider, SerialWriteTimeout
 
