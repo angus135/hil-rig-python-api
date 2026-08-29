@@ -126,9 +126,7 @@ class ScenarioConnection:
             request_id = (request_id + 1) & 0xFFFF_FFFF
         if self.behavior == "wrong_opcode":
             opcode = (
-                Opcode.STATUS_RESPONSE
-                if opcode is Opcode.ECHO_RESPONSE
-                else Opcode.ECHO_RESPONSE
+                Opcode.STATUS_RESPONSE if opcode is Opcode.ECHO_RESPONSE else Opcode.ECHO_RESPONSE
             )
         if self.behavior == "mismatch":
             payload = b"wrong"

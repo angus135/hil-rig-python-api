@@ -188,9 +188,7 @@ class ProtocolTestConnection:
             self._events.clear()
             self._generation_counter += 1
             generation = self._generation_counter
-            status = self._transport.notify_link_state(
-                LinkState.CONNECTED, self._transport_ms(now)
-            )
+            status = self._transport.notify_link_state(LinkState.CONNECTED, self._transport_ms(now))
             if not self._allowed(status, "OK", "CAPACITY_EXHAUSTED"):
                 raise ConnectionError(
                     f"CONNECTED notification returned {getattr(status, 'name', status)}"
@@ -498,9 +496,7 @@ class ProtocolTestConnection:
             if receive_calls == self._budgets.receive_calls and self._retained_input:
                 budget_exhausted = True
 
-        process_status = self._transport.process(
-            self._transport_ms(now_ms), OperatingMode.NORMAL
-        )
+        process_status = self._transport.process(self._transport_ms(now_ms), OperatingMode.NORMAL)
         self._zero_receive_needed = True
         self._counters.count_status(self._counters.process_statuses, process_status)
         process_progress = self._allowed(
