@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, StrEnum
 
 RESULT_IR_SCHEMA_VERSION = "1.0"
 
@@ -12,7 +12,7 @@ ANALOGUE_INPUT_CHANNEL_COUNT = 2
 PWM_INPUT_CHANNEL_COUNT = 2
 
 
-class TickCondition(str, Enum):
+class TickCondition(StrEnum):
     """Validity reported for one fixed-size application result."""
 
     OK = "ok"
@@ -20,7 +20,7 @@ class TickCondition(str, Enum):
     EXECUTION_PROBLEM = "execution_problem"
 
 
-class CaptureStatus(str, Enum):
+class CaptureStatus(StrEnum):
     """State of receiving a run, separate from future assertion pass/fail results."""
 
     IN_PROGRESS = "in_progress"
@@ -31,7 +31,7 @@ class CaptureStatus(str, Enum):
     ABORTED = "aborted"
 
 
-class CommunicationPeripheral(str, Enum):
+class CommunicationPeripheral(StrEnum):
     """Communication peripherals that can produce variable-length capture data."""
 
     I2C = "i2c"

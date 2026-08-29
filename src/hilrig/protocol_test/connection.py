@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from collections import deque
@@ -208,10 +209,8 @@ class ProtocolTestConnection:
         serial_port = self._serial
         self._serial = None
         if serial_port is not None:
-            try:
+            with contextlib.suppress(SerialIOError):
                 serial_port.close()
-            except SerialIOError:
-                pass
 
     def close_link(self) -> None:
         self._require_live()
@@ -462,10 +461,7 @@ class ProtocolTestConnection:
                 self._disconnect_after_serial_error()
             raise LinkDisconnectedError("serial link is disconnected")
         now_ms = self._clock_ms()
-        if self._last_service_ms is None:
-            gap = 0
-        else:
-            gap = max(0, now_ms - self._last_service_ms)
+        gap = 0 if self._last_service_ms is None else max(0, now_ms - self._last_service_ms)
         self._last_service_ms = now_ms
         self._current_service_gap_ms = gap
         self._max_service_gap_ms = max(self._max_service_gap_ms, gap)

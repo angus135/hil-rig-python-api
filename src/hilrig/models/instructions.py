@@ -2,7 +2,7 @@
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 from hilrig.models.channels import Channel
 
@@ -16,7 +16,7 @@ class Instruction:
     channel: Channel
 
 
-class DigitalOutputAction(str, Enum):
+class DigitalOutputAction(StrEnum):
     """Supported digital output stimulus operations."""
 
     HIGH = "high"

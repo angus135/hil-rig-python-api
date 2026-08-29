@@ -200,7 +200,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if passed:
                     passed = False
                     failure_reason = f"cleanup failed: {exc}"
-        summary = trace.finish(
+        trace.finish(
             passed=passed,
             failure_reason=failure_reason,
             diagnostics=diagnostics,

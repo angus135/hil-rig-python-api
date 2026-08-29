@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import Enum, IntEnum
+from enum import Enum, IntEnum, StrEnum
 from types import MappingProxyType
-from typing import TypeAlias
 
 from hilrig.exceptions import ConfigurationError
 from hilrig.models.channels import Channel
@@ -25,7 +24,7 @@ class FrequencyMode(Enum):
         return int(self.value)
 
 
-class StartMode(str, Enum):
+class StartMode(StrEnum):
     """Condition that will eventually start an uploaded test."""
 
     IMMEDIATE = "immediate"
@@ -49,7 +48,7 @@ class DigitalState(IntEnum):
     HIGH = 1
 
 
-class I2CRole(str, Enum):
+class I2CRole(StrEnum):
     """Role assigned to an I2C channel."""
 
     MASTER = "master"
@@ -73,7 +72,7 @@ class Pullup(Enum):
     OHM_10K = 10_000
 
 
-class SPIRole(str, Enum):
+class SPIRole(StrEnum):
     """Role assigned to an SPI channel."""
 
     MASTER = "master"
@@ -109,14 +108,14 @@ class SPIMode(IntEnum):
     MODE_3 = 3
 
 
-class SPIFirst(str, Enum):
+class SPIFirst(StrEnum):
     """Bit order within each SPI frame."""
 
     MSB = "msb"
     LSB = "lsb"
 
 
-class UARTMode(str, Enum):
+class UARTMode(StrEnum):
     """Electrical interface selected for a UART channel."""
 
     TTL_3V3 = "ttl_3v3"
@@ -124,7 +123,7 @@ class UARTMode(str, Enum):
     RS232 = "rs232"
 
 
-class UARTParity(str, Enum):
+class UARTParity(StrEnum):
     """Supported UART parity modes."""
 
     NONE = "none"
@@ -221,7 +220,7 @@ class UARTConfiguration:
     stop: UARTStopBits
 
 
-PeripheralConfiguration: TypeAlias = (
+type PeripheralConfiguration = (
     AnalogueInputConfiguration
     | AnalogueOutputConfiguration
     | DigitalInputConfiguration
