@@ -1,0 +1,29 @@
+{
+  "python_api_branch": "test/DEV-138--protocol-test",
+  "python_api_branch_point_commit": "959f3fd30c749c711cb7be39c4c4b3f3bc95b2ef",
+  "python_implementation": "WORKING_TREE_UNCOMMITTED_FROM_SUPPLIED_ZIP",
+  "protocol_submodule_path": "external/hil-rig-protocol",
+  "protocol_submodule_commit": "a24fccc403007cbf6268ff7d0d21f50566a6b2de",
+  "firmware_branch": "test/DEV-138--protocol-test",
+  "firmware_commit": "TBD_AFTER_FIRMWARE_HARNESS_IMPLEMENTATION",
+  "python_versions": ["3.12", "3.13"],
+  "operating_systems": ["Linux", "Windows"],
+  "pyserial_requirement": ">=3.5",
+  "transport_configuration": {
+    "source": "hil_rig_protocol.TransportConfig public defaults",
+    "max_application_message_size": 512,
+    "max_encoded_frame_size": 640,
+    "session_seed": "HOST-generated effective non-reserved seed",
+    "initial_reliable_sequence": 0,
+    "connection_timeout_ms": 0,
+    "retransmit_timeout_ms": 0,
+    "max_retries": 0
+  },
+  "test_envelope_version": 1,
+  "expected_usb_identity": {
+    "port": "runtime-selected",
+    "vid": "project hardware value or explicit selector",
+    "pid": "project hardware value or explicit selector",
+    "serial_number": "preferred for reset/re-enumeration testing when available"
+  }
+}
