@@ -1,0 +1,3 @@
+[submodule "external/hil-rig-protocol"]
+	path = external/hil-rig-protocol
+	url = https://github.com/angus135/hil-rig-protocol
