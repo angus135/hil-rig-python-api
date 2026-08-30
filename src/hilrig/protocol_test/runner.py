@@ -456,7 +456,7 @@ class ProtocolTestRunner:
                     }
                     raise ScenarioFailure(
                         "reconnected serial link but Transport"
-                        + " session establishment failed: {exc}",
+                        + f" session establishment failed: {exc}",
                         details=details,
                     ) from exc
                 new_generation = generation
