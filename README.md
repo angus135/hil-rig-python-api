@@ -383,3 +383,11 @@ package building.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the normal branch, test, and pull-request
 workflow.
+
+## Temporary DEV-138 Transport hardware testing
+
+Branch `test/DEV-138--protocol-test` contains an opt-in host harness for exercising the
+shared CFFI-backed Transport implementation against the matching MCU firmware branch.
+It is temporary test infrastructure and is not the production Application protocol.
+Setup, CLI commands, hardware-test selection, evidence output, and troubleshooting are
+documented in [docs/transport_hardware_test.md](docs/transport_hardware_test.md).

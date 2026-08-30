@@ -1,10 +1,10 @@
 """Physical channel identities shared by configuration and instructions."""
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 
-class ChannelKind(str, Enum):
+class ChannelKind(StrEnum):
     """Kinds of channel currently represented by the internal model."""
 
     DIGITAL_INPUT = "digital_input"

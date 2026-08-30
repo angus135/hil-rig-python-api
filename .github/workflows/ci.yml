@@ -11,51 +11,66 @@ permissions:
 
 jobs:
   tests:
-    name: Unit tests (Python ${{ matrix.python-version }})
+    name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version:
-          - "3.10"
-          - "3.11"
           - "3.12"
           - "3.13"
 
     steps:
-      - name: Check out repository
+      - name: Check out repository and protocol submodule
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: |
+            pyproject.toml
+            external/hil-rig-protocol/pyproject.toml
 
-      - name: Install package and test dependencies
-        run: python -m pip install -e ".[dev]"
+      - name: Install shared protocol package
+        run: python -m pip install -e external/hil-rig-protocol
 
-      - name: Run unit tests
+      - name: Install API development and hardware-test dependencies
+        run: python -m pip install -e ".[dev,hardware-test]"
+
+      - name: Run non-hardware tests including real-protocol integration
         run: python -m pytest --cov=hilrig --cov-report=term-missing
+
+      - name: Prove hardware tests are discoverable but opt-in
+        run: python -m pytest -m hardware --collect-only
 
   quality:
     name: Code quality and package build
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out repository
+      - name: Check out repository and protocol submodule
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: |
+            pyproject.toml
+            external/hil-rig-protocol/pyproject.toml
+
+      - name: Install shared protocol package
+        run: python -m pip install -e external/hil-rig-protocol
 
       - name: Install package and development dependencies
-        run: python -m pip install -e ".[dev]"
+        run: python -m pip install -e ".[dev,hardware-test]"
 
       - name: Lint
         run: python -m ruff check .
@@ -65,3 +80,12 @@ jobs:
 
       - name: Build source and wheel distributions
         run: python -m build
+
+      - name: Smoke-test built wheel in a clean virtual environment
+        shell: bash
+        run: |
+          python -m venv .wheel-venv
+          .wheel-venv/bin/python -m pip install external/hil-rig-protocol
+          .wheel-venv/bin/python -m pip install dist/*.whl pyserial
+          .wheel-venv/bin/python -c "import hilrig; import hilrig.protocol_test.connection"
+          .wheel-venv/bin/hilrig-protocol-test --help

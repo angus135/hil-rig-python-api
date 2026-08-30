@@ -1,0 +1,38 @@
+{
+  "python_api_branch": "test/DEV-138--protocol-test",
+  "python_api_branch_point_commit": "1cd530dc1352c3b2a449eb8f0ab02684370c614b",
+  "python_review_zip_git_head": "ef26c04f425f3617075591d4ba4a4ce5d4b63a4f",
+  "python_runtime_revision_evidence": "Trace source_evidence records the observed Git commit and dirty state when Git metadata is available.",
+  "protocol_submodule_path": "external/hil-rig-protocol",
+  "protocol_submodule_commit": "a24fccc403007cbf6268ff7d0d21f50566a6b2de",
+  "firmware_branch": "test/DEV-138--protocol-test",
+  "firmware_commit": "c6c0af2af586108949c30fb4a12df54eb9dd2fda",
+  "python_versions": [
+    "3.12",
+    "3.13"
+  ],
+  "operating_systems": [
+    "Linux",
+    "Windows"
+  ],
+  "pyserial_requirement": ">=3.5",
+  "transport_configuration": {
+    "source": "hilrig.protocol_test.connection.hardware_test_transport_config",
+    "max_application_message_size": 512,
+    "max_encoded_frame_size": 640,
+    "session_seed": "HOST-generated effective non-reserved seed",
+    "initial_reliable_sequence": 0,
+    "connection_timeout_ms": 0,
+    "retransmit_timeout_ms": 100,
+    "max_retries": 5
+  },
+  "test_envelope_version": 1,
+  "status_schema_version": 1,
+  "status_payload_size_bytes": 48,
+  "expected_usb_identity": {
+    "port": "runtime-selected",
+    "vid": "project hardware value or explicit selector",
+    "pid": "project hardware value or explicit selector",
+    "serial_number": "preferred for reset/re-enumeration testing when available"
+  }
+}

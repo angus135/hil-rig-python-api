@@ -7,7 +7,7 @@ name = "hil-rig-api"
 version = "0.1.0"
 description = "Host-side API for defining and compiling HIL-RIG hardware tests"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = []
 
 [project.optional-dependencies]
@@ -17,6 +17,12 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.9",
 ]
+hardware-test = [
+    "pyserial>=3.5",
+]
+
+[project.scripts]
+hilrig-protocol-test = "hilrig.protocol_test.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -28,8 +34,12 @@ where = ["src"]
 hilrig = ["py.typed"]
 
 [tool.pytest.ini_options]
-addopts = ["-ra", "--strict-config", "--strict-markers"]
+addopts = ["-ra", "--strict-config", "--strict-markers", "-m", "not hardware"]
 testpaths = ["tests"]
+markers = [
+    "hardware: requires a physical HIL-RIG serial device and explicit selection",
+    "protocol_integration: uses the installed public hil_rig_protocol Transport facade",
+]
 
 [tool.coverage.run]
 branch = true
@@ -41,7 +51,7 @@ skip_covered = true
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

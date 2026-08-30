@@ -5,12 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import TypeAlias
 
 from hilrig.models.instructions import Instruction
 
 IR_SCHEMA_VERSION = "1.1"
-IRScalar: TypeAlias = str | int | float | bool | None
+type IRScalar = str | int | float | bool | None
 
 
 def immutable_fields(fields: dict[str, IRScalar]) -> MappingProxyType[str, IRScalar]:
