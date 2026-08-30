@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import threading
 from collections import deque
+from pathlib import Path
 
 import pytest
 from hil_rig_protocol import (
@@ -18,11 +20,13 @@ from hil_rig_protocol import (
     TransportStatus,
 )
 
+import hilrig.protocol_test.connection as connection_module
 from hilrig.protocol_test.connection import (
     CommitOutputError,
     ConnectionOwnershipError,
     LinkDisconnectedError,
     ProtocolTestConnection,
+    hardware_test_transport_config,
 )
 from hilrig.protocol_test.models import SerialDevice, SerialSelector, ServiceBudgets
 from hilrig.protocol_test.serial_port import SerialIOError, SerialWriteTimeout
@@ -191,6 +195,75 @@ def test_serial_open_notifies_connected_once() -> None:
     connection, _, transport, _ = make_connection()
     assert connection.open_link() == 1
     assert [state for state, _ in transport.notifications] == [LinkState.CONNECTED]
+
+
+def test_default_hardware_transport_configuration_enables_retransmission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[tuple[Role, TransportConfig]] = []
+
+    def transport_factory(role: Role, config: TransportConfig) -> FakeTransport:
+        created.append((role, config))
+        transport = FakeTransport()
+        transport.config = config
+        return transport
+
+    monkeypatch.setattr(connection_module, "Transport", transport_factory)
+    connection = ProtocolTestConnection(FakeProvider(), SerialSelector(port="fake"))
+    assert created == [(Role.HOST, hardware_test_transport_config())]
+    assert connection.transport_config.retransmit_timeout_ms == 100
+    assert connection.transport_config.max_retries == 5
+    assert connection.transport_config.connection_timeout_ms == 0
+    assert connection.transport_config.initial_reliable_sequence == 0
+    assert connection.transport_config.max_application_message_size == 512
+    assert connection.transport_config.max_encoded_frame_size == 640
+    assert connection.transport_config.session_seed is None
+    connection.close()
+
+
+def test_explicit_transport_configuration_is_respected(monkeypatch: pytest.MonkeyPatch) -> None:
+    created: list[TransportConfig] = []
+
+    def transport_factory(role: Role, config: TransportConfig) -> FakeTransport:
+        assert role is Role.HOST
+        created.append(config)
+        transport = FakeTransport()
+        transport.config = config
+        return transport
+
+    custom = TransportConfig(
+        max_application_message_size=256,
+        max_encoded_frame_size=384,
+        session_seed=123,
+        initial_reliable_sequence=7,
+        connection_timeout_ms=9,
+        retransmit_timeout_ms=250,
+        max_retries=2,
+    )
+    monkeypatch.setattr(connection_module, "Transport", transport_factory)
+    connection = ProtocolTestConnection(
+        FakeProvider(),
+        SerialSelector(port="fake"),
+        transport_config=custom,
+    )
+    assert created == [custom]
+    assert connection.transport_config == custom
+    connection.close()
+
+
+def test_compatibility_manifest_matches_default_hardware_transport_configuration() -> None:
+    root = Path(__file__).resolve().parents[2]
+    manifest = json.loads(
+        (root / "docs" / "transport_hardware_test_compatibility.json").read_text()
+    )
+    configured = hardware_test_transport_config()
+    transport = manifest["transport_configuration"]
+    assert transport["max_application_message_size"] == configured.max_application_message_size
+    assert transport["max_encoded_frame_size"] == configured.max_encoded_frame_size
+    assert transport["initial_reliable_sequence"] == configured.initial_reliable_sequence
+    assert transport["connection_timeout_ms"] == configured.connection_timeout_ms
+    assert transport["retransmit_timeout_ms"] == configured.retransmit_timeout_ms
+    assert transport["max_retries"] == configured.max_retries
 
 
 def test_link_close_notifies_disconnected_and_final_close_is_idempotent() -> None:

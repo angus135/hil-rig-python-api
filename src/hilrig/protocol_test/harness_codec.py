@@ -11,7 +11,7 @@ from .models import ENVELOPE_VERSION, UINT32_MASK
 MAGIC = b"HRTP"
 HEADER = struct.Struct("<4sBBHII")
 HEADER_SIZE = HEADER.size
-STATUS_V1 = struct.Struct("<BBH10I")
+STATUS_V1 = struct.Struct("<12I")
 SUPPORTED_FLAGS = 0
 
 
@@ -48,7 +48,7 @@ class StatusPayloadV1:
     usb_tx_busy_retries: int
     invalid_harness_messages: int
     maximum_service_gap_ms: int
-    operation_budget_exhaustion_count: int
+    transport_session_state: int
 
 
 class RequestIdAllocator:
@@ -161,9 +161,7 @@ def decode_status_payload(payload: bytes) -> StatusPayloadV1:
             f"STATUS v1 payload must be {STATUS_V1.size} bytes, received {len(payload)}"
         )
     values = STATUS_V1.unpack(payload)
-    version, link_state, reserved, *counters = values
+    version = values[0]
     if version != 1:
         raise HarnessCodecError(f"unsupported STATUS schema version {version}")
-    if reserved != 0:
-        raise HarnessCodecError("STATUS reserved field must be zero")
-    return StatusPayloadV1(version, link_state, *counters)
+    return StatusPayloadV1(*values)

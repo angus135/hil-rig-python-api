@@ -28,7 +28,9 @@ from .trace import TraceWriter, payload_hash
 
 
 class ScenarioFailure(RuntimeError):
-    pass
+    def __init__(self, message: str, *, details: dict[str, object] | None = None) -> None:
+        super().__init__(message)
+        self.details = details
 
 
 class ProtocolTestRunner:
@@ -118,23 +120,33 @@ class ProtocolTestRunner:
                     f"unexpected Transport event during request: {event.type.name}"
                 )
 
-    def _service(self) -> None:
+    def _service(self, *, disconnect_expected: bool = False) -> None:
         try:
             result = self.connection.service_once()
         except LinkDisconnectedError as exc:
             self.trace.record(
-                "unexpected_disconnect",
+                "link_disconnect_observed" if disconnect_expected else "unexpected_disconnect",
                 reason=str(exc),
+                expected=disconnect_expected,
                 diagnostics=self.connection.get_diagnostics(),
             )
             raise
-        self.trace.record(
-            "service",
-            progress=result.progress,
-            operation_budget_exhausted=result.operation_budget_exhausted,
-            current_service_gap_ms=result.current_service_gap_ms,
-            max_service_gap_ms=result.max_service_gap_ms,
-        )
+        if result.operation_budget_exhausted:
+            self.trace.record(
+                "service_budget_exhausted",
+                current_service_gap_ms=result.current_service_gap_ms,
+                max_service_gap_ms=result.max_service_gap_ms,
+                diagnostics=self.connection.get_diagnostics(),
+            )
+        if result.current_service_gap_ms > self.connection.maximum_acceptable_service_gap_ms:
+            self.trace.record(
+                "service_gap_late",
+                current_service_gap_ms=result.current_service_gap_ms,
+                maximum_acceptable_service_gap_ms=(
+                    self.connection.maximum_acceptable_service_gap_ms
+                ),
+                max_service_gap_ms=result.max_service_gap_ms,
+            )
         self._record_events()
 
     def _wait_for_session(self, deadline: float) -> None:
@@ -365,32 +377,56 @@ class ProtocolTestRunner:
         cycles: int,
         *,
         prompt: Callable[[str], None],
+        allow_unobserved_reset: bool = False,
     ) -> dict[str, object]:
         if cycles < 1:
             raise ValueError("cycles must be positive")
+        cycle_results: list[dict[str, object]] = []
         for cycle in range(cycles):
             self.run_echo(f"before-reset-{cycle}".encode())
             old_generation = self.connection.link_generation
             prompt(f"Reset the HIL-RIG board for cycle {cycle + 1}, then continue")
-            observe_deadline = min(
-                self._deadline(self.reconnect_timeout_ms), self._monotonic() + 2.0
-            )
+            observe_deadline = self._deadline(self.reconnect_timeout_ms)
             disconnected = False
             while self._monotonic() <= observe_deadline:
                 try:
-                    self._service()
+                    self._service(disconnect_expected=True)
                 except LinkDisconnectedError:
                     disconnected = True
                     break
                 self._pause()
-            if not disconnected and self.connection.link_open:
+            fallback_used = False
+            if not disconnected:
                 self.trace.record(
                     "reset_disconnect_not_observed",
                     link_generation=old_generation,
-                    action="closing host link to establish a clean physical generation boundary",
+                    allow_unobserved_reset=allow_unobserved_reset,
+                )
+                if not allow_unobserved_reset:
+                    details = {
+                        "cycles_requested": cycles,
+                        "cycles_completed": cycle,
+                        "physical_disconnect_observed": False,
+                        "mcu_reset_verified": False,
+                        "host_link_fallback_used": False,
+                        "old_link_generation": old_generation,
+                        "new_link_generation": None,
+                        "cycle_results": cycle_results,
+                    }
+                    raise ScenarioFailure(
+                        "MCU reset was not verified because no physical serial disconnect "
+                        "was observed",
+                        details=details,
+                    )
+                fallback_used = True
+                self.trace.record(
+                    "reset_host_link_fallback",
+                    link_generation=old_generation,
+                    classification="host-link recycle; MCU reset not verified",
                 )
                 self.connection.close_link()
             reconnect_deadline = self._deadline(self.reconnect_timeout_ms)
+            new_generation: int | None = None
             while self._monotonic() <= reconnect_deadline:
                 try:
                     generation = self.connection.open_link()
@@ -405,12 +441,81 @@ class ProtocolTestRunner:
                 )
                 if generation == old_generation:
                     raise ScenarioFailure("reconnect did not allocate a new link generation")
-                self._wait_for_session(self._deadline(self.request_timeout_ms))
+                try:
+                    self._wait_for_session(self._deadline(self.request_timeout_ms))
+                except ScenarioFailure as exc:
+                    details = {
+                        "cycles_requested": cycles,
+                        "cycles_completed": cycle,
+                        "physical_disconnect_observed": disconnected,
+                        "mcu_reset_verified": False,
+                        "host_link_fallback_used": fallback_used,
+                        "old_link_generation": old_generation,
+                        "new_link_generation": generation,
+                        "cycle_results": cycle_results,
+                    }
+                    raise ScenarioFailure(
+                        "reconnected serial link but Transport"
+                        + " session establishment failed: {exc}",
+                        details=details,
+                    ) from exc
+                new_generation = generation
                 break
             else:
-                raise ScenarioFailure("timed out re-resolving and reopening serial device")
-            self.run_echo(f"after-reset-{cycle}".encode())
-        return {"cycles": cycles}
+                details = {
+                    "cycles_requested": cycles,
+                    "cycles_completed": cycle,
+                    "physical_disconnect_observed": disconnected,
+                    "mcu_reset_verified": False,
+                    "host_link_fallback_used": fallback_used,
+                    "old_link_generation": old_generation,
+                    "new_link_generation": None,
+                    "cycle_results": cycle_results,
+                }
+                raise ScenarioFailure(
+                    "timed out re-resolving and reopening serial device", details=details
+                )
+            try:
+                self.run_echo(f"after-reset-{cycle}".encode())
+            except ScenarioFailure as exc:
+                details = {
+                    "cycles_requested": cycles,
+                    "cycles_completed": cycle,
+                    "physical_disconnect_observed": disconnected,
+                    "mcu_reset_verified": False,
+                    "host_link_fallback_used": fallback_used,
+                    "old_link_generation": old_generation,
+                    "new_link_generation": new_generation,
+                    "cycle_results": cycle_results,
+                }
+                raise ScenarioFailure(
+                    f"post-reconnect ECHO failed: {exc}", details=details
+                ) from exc
+            cycle_result = {
+                "cycle": cycle + 1,
+                "physical_disconnect_observed": disconnected,
+                "mcu_reset_verified": disconnected,
+                "host_link_fallback_used": fallback_used,
+                "old_link_generation": old_generation,
+                "new_link_generation": new_generation,
+            }
+            cycle_results.append(cycle_result)
+            self.trace.record("reset_cycle_complete", **cycle_result)
+        return {
+            "cycles": cycles,
+            "physical_disconnect_observed": all(
+                bool(result["physical_disconnect_observed"]) for result in cycle_results
+            ),
+            "mcu_reset_verified": all(
+                bool(result["mcu_reset_verified"]) for result in cycle_results
+            ),
+            "host_link_fallback_used": any(
+                bool(result["host_link_fallback_used"]) for result in cycle_results
+            ),
+            "old_link_generation": cycle_results[0]["old_link_generation"],
+            "new_link_generation": cycle_results[-1]["new_link_generation"],
+            "cycle_results": cycle_results,
+        }
 
     def run_soak(
         self,

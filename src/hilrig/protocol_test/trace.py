@@ -9,13 +9,32 @@ import platform
 import subprocess
 import sys
 import uuid
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .models import ENVELOPE_VERSION, PROTOCOL_COMMIT, PYTHON_API_BRANCH_POINT_COMMIT
+from .models import (
+    ENVELOPE_VERSION,
+    FIRMWARE_BRANCH,
+    FIRMWARE_COMMIT,
+    PROTOCOL_COMMIT,
+    PYTHON_API_BRANCH_POINT_COMMIT,
+)
+
+
+class CompatibilityError(RuntimeError):
+    """Observed runtime source is incompatible with the hardware-test manifest."""
+
+
+@dataclass(frozen=True, slots=True)
+class GitSourceMetadata:
+    """Observed Git metadata, or an explicit unavailable result."""
+
+    commit: str | None
+    dirty: bool | None
+    available: bool
 
 
 def utc_now() -> str:
@@ -40,13 +59,68 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-def source_identifier() -> str:
+def inspect_git_source(path: Path) -> GitSourceMetadata:
+    """Inspect one Git worktree without treating configured revisions as observations."""
+    if not path.exists():
+        return GitSourceMetadata(None, None, False)
     try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
-        ).strip()
-    except (OSError, subprocess.CalledProcessError):
-        return "WORKING_TREE_FROM_SUPPLIED_ZIP"
+        commit_result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return GitSourceMetadata(None, None, False)
+    if commit_result.returncode != 0:
+        return GitSourceMetadata(None, None, False)
+    commit = commit_result.stdout.strip()
+    if not commit:
+        return GitSourceMetadata(None, None, False)
+    try:
+        status_result = subprocess.run(
+            ["git", "-C", str(path), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return GitSourceMetadata(commit, None, True)
+    dirty = None if status_result.returncode != 0 else bool(status_result.stdout.strip())
+    return GitSourceMetadata(commit, dirty, True)
+
+
+def _default_source_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def collect_source_evidence(repo_root: Path | None = None) -> dict[str, object]:
+    """Collect expected compatibility revisions and separately observed Git revisions."""
+    root = _default_source_root() if repo_root is None else repo_root
+    python_source = inspect_git_source(root)
+    protocol_source = inspect_git_source(root / "external" / "hil-rig-protocol")
+    return {
+        "python_api_expected_branch_point": PYTHON_API_BRANCH_POINT_COMMIT,
+        "python_api_observed_commit": python_source.commit,
+        "python_api_working_tree_dirty": python_source.dirty,
+        "python_api_git_metadata_available": python_source.available,
+        "protocol_expected_commit": PROTOCOL_COMMIT,
+        "protocol_observed_commit": protocol_source.commit,
+        "protocol_working_tree_dirty": protocol_source.dirty,
+        "protocol_git_metadata_available": protocol_source.available,
+        "firmware_expected_branch": FIRMWARE_BRANCH,
+        "firmware_expected_commit": FIRMWARE_COMMIT,
+    }
+
+
+def validate_protocol_compatibility(source_evidence: dict[str, object]) -> None:
+    """Reject an observed protocol submodule revision that differs from the required pin."""
+    observed = source_evidence.get("protocol_observed_commit")
+    expected = source_evidence.get("protocol_expected_commit")
+    if observed is not None and observed != expected:
+        raise CompatibilityError(
+            f"protocol submodule revision mismatch: expected {expected}, observed {observed}"
+        )
 
 
 def package_version(name: str) -> str | None:
@@ -57,9 +131,21 @@ def package_version(name: str) -> str | None:
 
 
 class TraceWriter:
-    """Flush each evidence record immediately so failures retain useful context."""
+    """Write important evidence immediately and a final accumulated JSON summary."""
 
-    def __init__(self, output_dir: Path, scenario: str, *, seed: int) -> None:
+    def __init__(
+        self,
+        output_dir: Path,
+        scenario: str,
+        *,
+        seed: int,
+        source_root: Path | None = None,
+        source_evidence: dict[str, object] | None = None,
+    ) -> None:
+        self.source_evidence = (
+            collect_source_evidence(source_root) if source_evidence is None else source_evidence
+        )
+        validate_protocol_compatibility(self.source_evidence)
         output_dir.mkdir(parents=True, exist_ok=True)
         self.run_id = f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:10]}"
         self.scenario = scenario
@@ -72,9 +158,7 @@ class TraceWriter:
             "run_start",
             scenario=scenario,
             seed=seed,
-            python_api_source=source_identifier(),
-            python_api_branch_point=PYTHON_API_BRANCH_POINT_COMMIT,
-            protocol_commit=PROTOCOL_COMMIT,
+            source_evidence=self.source_evidence,
             python_version=sys.version,
             operating_system=platform.platform(),
             pyserial_version=package_version("pyserial"),
@@ -106,9 +190,7 @@ class TraceWriter:
             "end_time": utc_now(),
             "passed": passed,
             "failure_reason": failure_reason,
-            "python_api_source": source_identifier(),
-            "python_api_branch_point": PYTHON_API_BRANCH_POINT_COMMIT,
-            "protocol_commit": PROTOCOL_COMMIT,
+            "source_evidence": self.source_evidence,
             "python_version": sys.version,
             "operating_system": platform.platform(),
             "pyserial_version": package_version("pyserial"),

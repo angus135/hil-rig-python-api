@@ -16,8 +16,8 @@ be pinned to:
 The matching firmware test branch is `test/DEV-138--protocol-test` in
 `angus135/hil-rig-mcu-firmware`. See
 `docs/transport_hardware_test_compatibility.json` for the machine-readable compatibility
-manifest. The firmware commit remains a placeholder until the firmware harness changes
-are committed.
+manifest. The paired firmware revision for this compatibility snapshot is
+`c6c0af2af586108949c30fb4a12df54eb9dd2fda`.
 
 A normal checkout/setup is:
 
@@ -27,12 +27,7 @@ python -m pip install -e external/hil-rig-protocol
 python -m pip install -e ".[dev,hardware-test]"
 ```
 
-### Applying the ZIP working tree to the real Git branch
-
-The review ZIP does not contain the parent repository `.git` metadata, so it cannot
-materialize or stage the parent repository's submodule gitlink itself. After applying
-these working-tree changes to a real checkout of `test/DEV-138--protocol-test`, pin and
-stage the submodule with:
+To verify the submodule pin in a checkout, use:
 
 ```sh
 git submodule update --init --recursive
@@ -40,14 +35,6 @@ git -C external/hil-rig-protocol fetch origin
 git -C external/hil-rig-protocol checkout --detach a24fccc403007cbf6268ff7d0d21f50566a6b2de
 git add .gitmodules external/hil-rig-protocol
 git diff --cached --submodule
-```
-
-If the branch has not registered the submodule at all, add it first in the real checkout:
-
-```sh
-git submodule add https://github.com/angus135/hil-rig-protocol.git external/hil-rig-protocol
-git -C external/hil-rig-protocol checkout --detach a24fccc403007cbf6268ff7d0d21f50566a6b2de
-git add .gitmodules external/hil-rig-protocol
 ```
 
 The staged gitlink must resolve to exactly
@@ -86,9 +73,22 @@ The temporary layers are:
 
 ## Transport configuration and servicing
 
-The harness constructs `Transport(Role.HOST, TransportConfig())`. It deliberately uses
-the pinned package's public defaults rather than maintaining a second set of protocol
-constants. The effective HOST configuration, including the generated session seed, is
+The harness uses the public `TransportConfig` API through the single
+`hardware_test_transport_config()` factory. Its default HOST test configuration matches
+the firmware hardware-test settings:
+
+- maximum Application message size: 512 bytes;
+- maximum encoded frame size: 640 bytes;
+- HOST session seed: generated normally by the public Transport facade;
+- initial reliable sequence: 0;
+- connection timeout: 0 ms;
+- retransmission timeout: 100 ms;
+- maximum retries: 5.
+
+Retransmission remains entirely inside the shared Transport implementation. The Python
+harness only supplies the configuration, which allows accepted-but-dropped or corrupted
+fault-injection writes to exercise Transport-level recovery. The effective configuration
+actually owned by the created Transport, including its generated HOST session seed, is
 recorded in each run.
 
 Transport time is always derived from monotonic time and wrapped to uint32 milliseconds.
@@ -145,11 +145,27 @@ Opcodes are `0x01` ECHO request, `0x81` ECHO response, `0x02` STATUS request, an
 STATUS response. ECHO responses preserve the request ID and payload exactly. STATUS
 requests have no payload.
 
-STATUS schema version 1 is 44 bytes: version, link state, two reserved zero bytes, then
-little-endian uint32 values for link generation, Transport event count, USB RX bytes,
-USB TX bytes, Application requests received, responses submitted, USB TX busy retries,
-invalid harness messages, maximum service gap, and operation-budget exhaustion count.
-The exact raw STATUS payload is retained as hex, together with its hash and size, even if typed decoding fails.
+STATUS schema version 1 is exactly 48 bytes and contains twelve consecutive
+little-endian `uint32` values, matching firmware PR #63:
+
+| Index | Field |
+| ---: | --- |
+| 0 | `schema_version` (`1`) |
+| 1 | `link_state` |
+| 2 | `link_generation` |
+| 3 | `transport_event_count` |
+| 4 | `usb_rx_bytes` |
+| 5 | `usb_tx_bytes` |
+| 6 | `application_requests_received` |
+| 7 | `responses_submitted` |
+| 8 | `usb_tx_busy_retries` |
+| 9 | `invalid_harness_messages` |
+| 10 | `maximum_service_gap_ms` |
+| 11 | `transport_session_state` |
+
+There are no Python-only reserved bytes and no operation-budget counter in the firmware
+STATUS v1 wire payload. The exact raw STATUS payload is retained as hex, together with
+its hash and size, even if typed decoding fails.
 
 The maximum ECHO test payload is derived from the effective Transport maximum
 Application message size minus the 16-byte HRTP header. It is never hardcoded separately.
@@ -182,11 +198,15 @@ locally without submitting it to Transport.
 `repeat` performs a requested number of deterministic one-at-a-time ECHOs and requires
 exactly one matching response for each.
 
-`reset-reconnect` completes an ECHO, asks the operator to reset the board, observes serial
-loss if the OS exposes it, otherwise explicitly closes the host link to establish a clean
-physical generation boundary, re-resolves the selector, opens a new link generation,
-waits for a new Transport session, and completes another ECHO. A USB path may change on
-re-enumeration, so serial-number or VID/PID selection is preferred.
+`reset-reconnect` completes an ECHO, asks the operator to reset the board, and requires an
+observed physical serial disconnect by default. If no disconnect is observed before the
+observation deadline, the scenario fails and does not claim that the MCU reset occurred.
+For systems where USB disconnect is known to be unobservable, the explicit
+`--allow-unobserved-reset` option permits a host-link close/reopen fallback. That mode
+still allocates a new link generation, re-establishes a Transport session, and completes
+the post-reconnect ECHO, but its result is classified as a host-link recycle with
+`mcu_reset_verified=false`. A USB path may change on re-enumeration, so serial-number or
+VID/PID selection is preferred.
 
 `soak` supports both elapsed-time and transfer-count limits, deterministic payloads,
 periodic STATUS requests, progress evidence, and immediate trace flushing. Long soak
@@ -214,12 +234,16 @@ hilrig-protocol-test repeat --port /dev/ttyACM0 --count 20 --fault-corrupt-write
 ## Evidence
 
 Every run creates one `<run-id>.jsonl` trace and one `<run-id>.summary.json` in the output
-directory. Evidence includes source/protocol identifiers, Python and OS versions,
+directory. Evidence includes expected compatibility revisions and separately observed
+Git revisions when available, Python working-tree dirty state, Python and OS versions,
 pyserial version, selected device identity, effective Transport configuration, link
 generations, request IDs, payload sizes and SHA-256 hashes, timestamps/latencies, public
 Transport events, serial and service counters, disconnect/reconnect actions, fault
 injection, maximum service gap, and the final pass/failure reason. Large payload contents
-are not logged by default. The JSONL writer flushes every record.
+are not logged by default. Routine idle 1 ms service iterations are not written to JSONL.
+Budget exhaustion and late service gaps are written immediately, and final diagnostics
+retain total service-loop, late-loop, maximum-gap, and budget-exhaustion counts. The
+JSONL writer flushes every record that is retained.
 
 ## Pytest
 
@@ -235,6 +259,9 @@ python -m pytest -m hardware tests/hardware
 Hardware tests require `HILRIG_TEST_PORT` or an unambiguous combination of
 `HILRIG_TEST_VID`, `HILRIG_TEST_PID`, and `HILRIG_TEST_SERIAL_NUMBER`. Reset tests also
 require explicit manual-reset opt-in, and soak tests require an explicit soak opt-in.
+The manual reset test is strict by default. Set
+`HILRIG_TEST_ALLOW_UNOBSERVED_RESET=1` only when deliberately testing the host-link
+fallback classification rather than verifying an observed MCU reset.
 
 ## Known USB CDC limitations
 

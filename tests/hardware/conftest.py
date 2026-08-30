@@ -41,7 +41,15 @@ def hardware_runner(tmp_path: Path, request: pytest.FixtureRequest):
     except Exception as exc:
         diagnostics = None if connection.closed else connection.get_diagnostics()
         runner.close()
-        trace.finish(passed=False, failure_reason=str(exc), diagnostics=diagnostics)
+        trace.finish(
+            passed=False,
+            failure_reason=str(exc),
+            diagnostics=diagnostics,
+            extra={
+                "selected_serial_device": connection.serial_identity,
+                "effective_transport_config": connection.transport_config,
+            },
+        )
         raise
     try:
         yield runner, trace
@@ -55,4 +63,8 @@ def hardware_runner(tmp_path: Path, request: pytest.FixtureRequest):
             passed=not failed,
             failure_reason=failure_reason,
             diagnostics=diagnostics,
+            extra={
+                "selected_serial_device": connection.serial_identity,
+                "effective_transport_config": connection.transport_config,
+            },
         )

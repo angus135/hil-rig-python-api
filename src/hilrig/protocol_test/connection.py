@@ -58,6 +58,19 @@ def monotonic_transport_ms() -> int:
     return int(time.monotonic() * 1000) & UINT32_MASK
 
 
+def hardware_test_transport_config() -> TransportConfig:
+    """Return the HOST Transport configuration paired with the firmware test harness."""
+    return TransportConfig(
+        max_application_message_size=512,
+        max_encoded_frame_size=640,
+        session_seed=None,
+        initial_reliable_sequence=0,
+        connection_timeout_ms=0,
+        retransmit_timeout_ms=100,
+        max_retries=5,
+    )
+
+
 class ProtocolTestConnection:
     """Own one HOST Transport and one serial link on one creating thread.
 
@@ -93,7 +106,8 @@ class ProtocolTestConnection:
         self._clock = clock
         self._budgets = budgets or ServiceBudgets()
         self._maximum_service_gap_ms = maximum_service_gap_ms
-        self._transport = transport or Transport(Role.HOST, transport_config or TransportConfig())
+        requested_config = transport_config or hardware_test_transport_config()
+        self._transport = transport or Transport(Role.HOST, requested_config)
         self._transport_config = self._transport.config
         default_input_limit = self._transport_config.max_encoded_frame_size * 4
         self._caller_input_limit = caller_input_limit or default_input_limit
@@ -143,6 +157,10 @@ class ProtocolTestConnection:
     @property
     def closed(self) -> bool:
         return self._closed
+
+    @property
+    def maximum_acceptable_service_gap_ms(self) -> int:
+        return self._maximum_service_gap_ms
 
     def _require_owner(self) -> None:
         if threading.current_thread() is not self._owner_thread:

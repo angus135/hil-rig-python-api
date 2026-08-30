@@ -18,7 +18,7 @@ from .serial_port import (
     SerialIOError,
     SerialSelectionError,
 )
-from .trace import TraceWriter
+from .trace import CompatibilityError, TraceWriter
 
 
 def _auto_int(value: str) -> int:
@@ -90,6 +90,14 @@ def build_parser() -> argparse.ArgumentParser:
     reset = subparsers.add_parser("reset-reconnect")
     _add_common(reset)
     reset.add_argument("--cycles", type=int, default=1)
+    reset.add_argument(
+        "--allow-unobserved-reset",
+        action="store_true",
+        help=(
+            "allow host-link recycle when no physical serial disconnect is observed; "
+            "this does not verify an MCU reset"
+        ),
+    )
     soak = subparsers.add_parser("soak")
     _add_common(soak)
     soak.add_argument("--duration-seconds", type=float)
@@ -125,7 +133,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         selector = SerialSelector(args.port, args.vid, args.pid, args.serial_number)
     except ValueError as exc:
         parser.error(str(exc))
-    trace = TraceWriter(args.output_dir, args.scenario, seed=args.seed)
+    try:
+        trace = TraceWriter(args.output_dir, args.scenario, seed=args.seed)
+    except CompatibilityError as exc:
+        print(f"{args.scenario}: FAIL | compatibility error: {exc}")
+        return 1
     plan = _fault_plan(args)
     base_provider = PySerialProvider()
     provider = (
@@ -162,7 +174,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.scenario == "repeat":
             result = runner.run_repeat(args.count)
         elif args.scenario == "reset-reconnect":
-            result = runner.run_reset_reconnect(args.cycles, prompt=_prompt)
+            result = runner.run_reset_reconnect(
+                args.cycles,
+                prompt=_prompt,
+                allow_unobserved_reset=args.allow_unobserved_reset,
+            )
         elif args.scenario == "soak":
             result = runner.run_soak(
                 duration_seconds=args.duration_seconds,
@@ -172,8 +188,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:  # pragma: no cover - argparse guarantees the set above.
             raise AssertionError(args.scenario)
         passed = True
+    except ScenarioFailure as exc:
+        failure_reason = str(exc)
+        if exc.details is not None:
+            result = exc.details
+        trace.record("scenario_failure", reason=failure_reason, details=exc.details)
     except (
-        ScenarioFailure,
         SerialDependencyError,
         SerialSelectionError,
         SerialIOError,

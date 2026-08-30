@@ -26,7 +26,12 @@ def test_hardware_reset_reconnect(hardware_runner) -> None:
     if os.getenv("HILRIG_TEST_MANUAL_RESET") != "1":
         pytest.skip("set HILRIG_TEST_MANUAL_RESET=1 for the manual reset test")
     runner, _ = hardware_runner
-    runner.run_reset_reconnect(1, prompt=lambda message: input(f"{message}: "))
+    allow_unobserved_reset = os.getenv("HILRIG_TEST_ALLOW_UNOBSERVED_RESET") == "1"
+    runner.run_reset_reconnect(
+        1,
+        prompt=lambda message: input(f"{message}: "),
+        allow_unobserved_reset=allow_unobserved_reset,
+    )
 
 
 def test_hardware_soak(hardware_runner) -> None:

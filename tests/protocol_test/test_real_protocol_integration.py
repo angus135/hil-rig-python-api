@@ -172,6 +172,8 @@ def test_real_protocol_session_and_opaque_request_response(read_chunk: int | Non
     provider = InMemoryProvider(max_read_chunk=read_chunk)
     connection = ProtocolTestConnection(provider, SerialSelector(port="memory-rig"))
     try:
+        assert connection.transport_config.retransmit_timeout_ms == 100
+        assert connection.transport_config.max_retries == 5
         connection.open_link()
         establish(connection)
         assert exchange(connection, b"opaque-request") == b"rig-response:opaque-request"

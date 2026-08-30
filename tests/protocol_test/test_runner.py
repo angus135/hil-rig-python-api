@@ -3,23 +3,30 @@ from __future__ import annotations
 import json
 import struct
 from collections import deque
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 from hil_rig_protocol import (
+    EventType,
     Failure,
     LinkState,
     OperatingMode,
     Role,
     SessionState,
-    TransportConfig,
+    TransportEvent,
     TransportSnapshot,
     TransportStatus,
 )
 
-from hilrig.protocol_test.connection import LinkDisconnectedError
+from hilrig.protocol_test.connection import LinkDisconnectedError, hardware_test_transport_config
 from hilrig.protocol_test.harness_codec import Opcode, decode_message, encode_message
-from hilrig.protocol_test.models import ReceivedApplicationMessage, SerialDevice, ServiceResult
+from hilrig.protocol_test.models import (
+    ConnectionEvent,
+    ReceivedApplicationMessage,
+    SerialDevice,
+    ServiceResult,
+)
 from hilrig.protocol_test.runner import ProtocolTestRunner, ScenarioFailure
 from hilrig.protocol_test.trace import TraceWriter
 
@@ -39,7 +46,7 @@ class ScenarioConnection:
     def __init__(self, clock: FakeTime, behavior: str = "success") -> None:
         self.clock = clock
         self.behavior = behavior
-        self.transport_config = TransportConfig(session_seed=1)
+        self.transport_config = hardware_test_transport_config()
         self.link_generation: int | None = None
         self.serial_identity = SerialDevice("fake", "Fake", 1, 2, "SER")
         self.closed = False
@@ -52,8 +59,18 @@ class ScenarioConnection:
         self.service_calls = 0
         self.close_link_calls = 0
         self.disconnect_on_service = False
+        self.service_results: deque[ServiceResult] = deque()
+        self.open_failures = 0
+        self.session_ready = True
+        self.maximum_acceptable_service_gap_ms = 10
+        self.late_service_calls = 0
+        self.budget_exhaustions = 0
+        self.max_service_gap_ms = 0
 
     def open_link(self) -> int:
+        if self.open_failures:
+            self.open_failures -= 1
+            raise RuntimeError("simulated open failure")
         self._generation += 1
         self.link_generation = self._generation
         self.link_open = True
@@ -73,7 +90,13 @@ class ScenarioConnection:
         return TransportSnapshot(
             Role.HOST,
             LinkState.CONNECTED if self.link_open else LinkState.DISCONNECTED,
-            SessionState.ESTABLISHED if self.link_open else SessionState.DISCONNECTED,
+            (
+                SessionState.ESTABLISHED
+                if self.link_open and self.session_ready
+                else SessionState.CONNECTING
+                if self.link_open
+                else SessionState.DISCONNECTED
+            ),
             OperatingMode.NORMAL if self.link_open else None,
             False,
             bool(self.messages),
@@ -89,7 +112,17 @@ class ScenarioConnection:
             self.link_open = False
             self.link_generation = None
             raise LinkDisconnectedError("simulated disconnect")
-        return ServiceResult(False, False, 1, 1)
+        result = (
+            self.service_results.popleft()
+            if self.service_results
+            else ServiceResult(False, False, 1, 1)
+        )
+        self.max_service_gap_ms = max(self.max_service_gap_ms, result.current_service_gap_ms)
+        if result.current_service_gap_ms > self.maximum_acceptable_service_gap_ms:
+            self.late_service_calls += 1
+        if result.operation_budget_exhausted:
+            self.budget_exhaustions += 1
+        return result
 
     def pop_event(self):
         return self.events.popleft() if self.events else None
@@ -98,7 +131,16 @@ class ScenarioConnection:
         return self.messages.popleft() if self.messages else None
 
     def get_diagnostics(self) -> dict[str, object]:
-        return {"service_calls": self.service_calls, "generation": self.link_generation}
+        return {
+            "service_calls": self.service_calls,
+            "generation": self.link_generation,
+            "max_service_gap_ms": self.max_service_gap_ms,
+            "counters": {
+                "service_loops": self.service_calls,
+                "late_loops": self.late_service_calls,
+                "operation_budget_exhaustions": self.budget_exhaustions,
+            },
+        }
 
     def submit_application_data(self, data: bytes) -> TransportStatus:
         self.submissions += 1
@@ -120,7 +162,7 @@ class ScenarioConnection:
         )
         payload = request.payload
         if request.opcode is Opcode.STATUS_REQUEST:
-            payload = struct.pack("<BBH10I", 1, 1, 0, *range(10))
+            payload = struct.pack("<12I", 1, 1, *range(10))
         if self.behavior == "wrong_id":
             request_id = (request_id + 1) & 0xFFFF_FFFF
         if self.behavior == "wrong_opcode":
@@ -227,25 +269,151 @@ def test_status_request_and_typed_decode(tmp_path: Path) -> None:
     status = runner.run_status()
     assert status.schema_version == 1
     assert status.link_generation == 0
-    assert status.operation_budget_exhaustion_count == 9
+    assert status.transport_session_state == 9
     records = [json.loads(line) for line in trace.trace_path.read_text().splitlines()]
     raw = next(record for record in records if record["kind"] == "status_raw")
-    assert raw["payload_hex"] == struct.pack("<BBH10I", 1, 1, 0, *range(10)).hex()
+    assert raw["payload_hex"] == struct.pack("<12I", 1, 1, *range(10)).hex()
     runner.close()
     finish(trace, connection, passed=True)
 
 
-def test_reconnect_allocates_new_generation_and_echoes_again(tmp_path: Path) -> None:
-    runner, connection, trace, fake_time = make_runner(tmp_path)
+def test_reset_reconnect_observed_disconnect_is_verified(tmp_path: Path) -> None:
+    runner, connection, trace, _ = make_runner(tmp_path)
 
     def prompt(_: str) -> None:
-        # Force the observe window to elapse immediately; runner then establishes a
-        # deliberate host link boundary before re-resolving the device.
-        fake_time.now += 3
+        connection.disconnect_on_service = True
 
     result = runner.run_reset_reconnect(1, prompt=prompt)
-    assert result == {"cycles": 1}
+    assert result["physical_disconnect_observed"] is True
+    assert result["mcu_reset_verified"] is True
+    assert result["host_link_fallback_used"] is False
+    assert result["old_link_generation"] == 1
+    assert result["new_link_generation"] == 2
     assert connection._generation == 2
+    runner.close()
+    finish(trace, connection, passed=True)
+
+
+def test_reset_reconnect_strict_mode_fails_without_observed_disconnect(tmp_path: Path) -> None:
+    runner, connection, trace, _ = make_runner(tmp_path)
+    with pytest.raises(ScenarioFailure, match="no physical serial disconnect") as exc_info:
+        runner.run_reset_reconnect(1, prompt=lambda _: None)
+    assert exc_info.value.details is not None
+    assert exc_info.value.details["physical_disconnect_observed"] is False
+    assert exc_info.value.details["mcu_reset_verified"] is False
+    assert exc_info.value.details["host_link_fallback_used"] is False
+    assert connection._generation == 1
+    runner.close()
+    finish(trace, connection, passed=False)
+
+
+def test_reset_reconnect_explicit_host_link_fallback_is_not_reset_verification(
+    tmp_path: Path,
+) -> None:
+    runner, connection, trace, _ = make_runner(tmp_path)
+    result = runner.run_reset_reconnect(
+        1,
+        prompt=lambda _: None,
+        allow_unobserved_reset=True,
+    )
+    assert result["physical_disconnect_observed"] is False
+    assert result["mcu_reset_verified"] is False
+    assert result["host_link_fallback_used"] is True
+    assert result["old_link_generation"] == 1
+    assert result["new_link_generation"] == 2
+    runner.close()
+    finish(trace, connection, passed=True)
+
+
+def test_reset_reconnect_fails_when_reopen_never_succeeds(tmp_path: Path) -> None:
+    runner, connection, trace, _ = make_runner(tmp_path)
+
+    def prompt(_: str) -> None:
+        connection.disconnect_on_service = True
+        connection.open_failures = 100
+
+    with pytest.raises(ScenarioFailure, match="timed out re-resolving"):
+        runner.run_reset_reconnect(1, prompt=prompt)
+    runner.close()
+    finish(trace, connection, passed=False)
+
+
+def test_reset_reconnect_fails_when_new_session_does_not_establish(tmp_path: Path) -> None:
+    runner, connection, trace, _ = make_runner(tmp_path)
+
+    def prompt(_: str) -> None:
+        connection.disconnect_on_service = True
+        connection.session_ready = False
+
+    with pytest.raises(ScenarioFailure, match="session establishment"):
+        runner.run_reset_reconnect(1, prompt=prompt)
+    runner.close()
+    finish(trace, connection, passed=False)
+
+
+def test_idle_service_calls_do_not_emit_one_trace_record_per_loop(tmp_path: Path) -> None:
+    runner, connection, trace, _ = make_runner(tmp_path)
+    before = len(trace.trace_path.read_text().splitlines())
+    for _ in range(100):
+        runner._service()
+    after = len(trace.trace_path.read_text().splitlines())
+    assert after == before
+    runner.close()
+    finish(trace, connection, passed=True)
+
+
+def test_service_anomalies_are_recorded(tmp_path: Path) -> None:
+    runner, connection, trace, _ = make_runner(tmp_path)
+    connection.service_results.extend(
+        [
+            ServiceResult(False, True, 1, 1),
+            ServiceResult(False, False, 11, 11),
+        ]
+    )
+    runner._service()
+    runner._service()
+    kinds = [json.loads(line)["kind"] for line in trace.trace_path.read_text().splitlines()]
+    assert "service_budget_exhausted" in kinds
+    assert "service_gap_late" in kinds
+    runner.close()
+    finish(trace, connection, passed=True)
+
+
+def test_request_response_event_and_failure_evidence_remains_available(tmp_path: Path) -> None:
+    runner, connection, trace, _ = make_runner(tmp_path)
+    connection.events.append(
+        ConnectionEvent(
+            event=TransportEvent(
+                EventType.SESSION_ESTABLISHED,
+                TransportStatus.OK,
+                Failure.NONE,
+                0,
+            ),
+            link_generation=connection.link_generation,
+            monotonic_ms=1000,
+        )
+    )
+    runner.run_echo(b"evidence")
+    runner._service()
+    runner.close()
+    trace.finish(
+        passed=False, failure_reason="synthetic failure", diagnostics=connection.get_diagnostics()
+    )
+    kinds = [json.loads(line)["kind"] for line in trace.trace_path.read_text().splitlines()]
+    assert "request_submitted" in kinds
+    assert "response_received" in kinds
+    assert "transport_event" in kinds
+    assert "run_end" in kinds
+
+
+def test_link_open_records_actual_effective_transport_configuration(tmp_path: Path) -> None:
+    runner, connection, trace, _ = make_runner(tmp_path)
+    record = next(
+        json.loads(line)
+        for line in trace.trace_path.read_text().splitlines()
+        if json.loads(line)["kind"] == "link_open"
+    )
+    assert record["effective_transport_config"] == asdict(connection.transport_config)
     runner.close()
     finish(trace, connection, passed=True)
 
@@ -268,6 +436,10 @@ def test_json_summary_written_on_success(tmp_path: Path) -> None:
     loaded = json.loads(trace.summary_path.read_text())
     assert summary["passed"] is True
     assert loaded["passed"] is True
+    assert loaded["diagnostics"]["counters"]["service_loops"] == connection.service_calls
+    assert "late_loops" in loaded["diagnostics"]["counters"]
+    assert "operation_budget_exhaustions" in loaded["diagnostics"]["counters"]
+    assert "max_service_gap_ms" in loaded["diagnostics"]
     assert trace.trace_path.exists()
 
 

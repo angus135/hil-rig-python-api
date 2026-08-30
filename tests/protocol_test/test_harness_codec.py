@@ -1,5 +1,3 @@
-import struct
-
 import pytest
 
 from hilrig.protocol_test.harness_codec import (
@@ -54,8 +52,46 @@ def test_status_request_has_empty_payload() -> None:
 
 
 def test_status_response_decoding() -> None:
-    payload = struct.pack("<BBH10I", 1, 2, 0, *range(10, 20))
-    assert decode_status_payload(payload) == StatusPayloadV1(1, 2, *range(10, 20))
+    payload = bytes.fromhex(
+        "01000000"
+        "02000000"
+        "44332211"
+        "88776655"
+        "04030201"
+        "0d0c0b0a"
+        "40302010"
+        "80706050"
+        "c0b0a090"
+        "3c2d1e0f"
+        "efcdab89"
+        "03000000"
+    )
+    assert decode_status_payload(payload) == StatusPayloadV1(
+        schema_version=1,
+        link_state=2,
+        link_generation=0x11223344,
+        transport_event_count=0x55667788,
+        usb_rx_bytes=0x01020304,
+        usb_tx_bytes=0x0A0B0C0D,
+        application_requests_received=0x10203040,
+        responses_submitted=0x50607080,
+        usb_tx_busy_retries=0x90A0B0C0,
+        invalid_harness_messages=0x0F1E2D3C,
+        maximum_service_gap_ms=0x89ABCDEF,
+        transport_session_state=3,
+    )
+
+
+@pytest.mark.parametrize("size", [44, 47, 49])
+def test_incorrect_status_payload_size_rejected(size: int) -> None:
+    with pytest.raises(HarnessCodecError, match="48 bytes"):
+        decode_status_payload(bytes(size))
+
+
+def test_unsupported_status_schema_version_rejected() -> None:
+    payload = b"\x02\x00\x00\x00" + bytes(44)
+    with pytest.raises(HarnessCodecError, match="schema version 2"):
+        decode_status_payload(payload)
 
 
 def test_invalid_magic_rejected() -> None:
@@ -119,11 +155,6 @@ def test_encode_rejects_unknown_flags() -> None:
             max_application_message_size=LIMIT,
             flags=1,
         )
-
-
-def test_status_reserved_field_must_be_zero() -> None:
-    with pytest.raises(HarnessCodecError, match="reserved"):
-        decode_status_payload(struct.pack("<BBH10I", 1, 1, 1, *([0] * 10)))
 
 
 def test_request_id_wrap_skips_zero_and_active_id() -> None:
