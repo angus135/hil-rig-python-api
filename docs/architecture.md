@@ -207,9 +207,10 @@ the same queue and waits for every older record to commit. A failed batch is rol
 as a unit and the failure is surfaced to the caller. Previously committed batches stay
 intact.
 
-`CapturedRunBuilder.from_compiled_test()` copies the test ID, name, tick period, and
-expected tick count directly from `CompiledTestIR`. This prevents the outgoing RIG
-configuration and incoming completion check from calculating different run lengths.
+`CapturedRunBuilder.from_compiled_test()` copies the test ID, name, tick period,
+expected tick count, compiled IR version, and assertion definitions directly from
+`CompiledTestIR`. This prevents the outgoing RIG configuration and incoming completion
+check from calculating different run lengths and preserves the host evaluation plan.
 
 Finalization checks that unique fixed results cover every tick from zero through
 `expected_tick_count - 1`. It automatically records `COMPLETE` or `INCOMPLETE`; the
@@ -221,9 +222,16 @@ future execution orchestrator can instead record `SESSION_LOST`, `PROTOCOL_ERROR
 The SQLite file is authoritative and schema-versioned:
 
 - `run_metadata` contains test/run IDs, timing, provenance, live tick counts, and state;
+- `assertion_sets` identifies versioned immutable assertion snapshots;
+- `assertion_definitions` stores compiled operations and JSON-encoded scalar arguments;
 - `tick_results` contains one wide row per tick rather than one row per channel;
 - `communication_results` contains sparse variable-size payload BLOBs;
 - `application_errors` contains recoverable/non-recoverable diagnostics.
+
+Adding assertion snapshots changes the captured-result IR schema from 1.0 to 1.1.
+Unsupported older databases are rejected explicitly rather than being interpreted using
+the wrong table layout; a migration can be added if preserving pre-1.1 development
+captures becomes necessary.
 
 Keeping fixed results wide limits a 100 kHz capture to 100,000 fixed rows per second,
 instead of multiplying that by the number of input channels. Payload BLOBs are separate
@@ -231,11 +239,14 @@ because they are sparse and variable length.
 
 ### Read-only logical IR
 
-`CapturedRunIR` validates and opens the database, then provides tick, digital, analogue,
-PWM, communication, and diagnostic queries. Range methods return streaming iterators.
-A future assertion evaluator therefore asks for channel samples instead of importing
-`sqlite3` or embedding SQL. This abstraction leaves room for another storage backend if
-measurements later show one is needed.
+`CapturedRunIR` validates and opens the database, then provides assertion-set, tick,
+digital, analogue, PWM, communication, and diagnostic queries. Range methods return
+streaming iterators. `original_assertion_set` reconstructs immutable
+`CompiledAssertion` objects, allowing an evaluator to rerun the exact definitions after
+the original Python process has ended. A future evaluator therefore asks this facade for
+assertion definitions and channel samples instead of importing `sqlite3` or embedding
+SQL. This abstraction leaves room for another storage backend if measurements later
+show one is needed.
 
 The IR derives optional review artifacts while keeping bulk values out of JSON:
 

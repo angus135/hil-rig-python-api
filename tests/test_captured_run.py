@@ -267,6 +267,11 @@ def test_manifest_and_csv_exports_are_derived_from_database(tmp_path: Path) -> N
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["capture"]["status"] == "complete"
+    assert manifest["assertions"] == {
+        "original_set_id": "original",
+        "compiled_ir_version": "1.1",
+        "count": 0,
+    }
     assert manifest["authoritative_data"] == "run.sqlite3"
     with fixed_path.open(encoding="utf-8", newline="") as stream:
         fixed_rows = list(csv.DictReader(stream))

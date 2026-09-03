@@ -49,7 +49,7 @@ class CompiledInstruction:
 
 @dataclass(frozen=True, slots=True)
 class CompiledAssertion:
-    """One host-side assertion retained for human-readable output."""
+    """One host-side assertion retained for review and captured-run evaluation."""
 
     assertion_id: int
     peripheral: str
@@ -62,9 +62,10 @@ class CompiledAssertion:
 class CompiledTestIR:
     """Immutable compiled snapshot from which files can be exported repeatedly.
 
-    Assertion definitions deliberately live only on this host-side snapshot and are
-    omitted from :meth:`to_dict`, :meth:`to_json`, and :meth:`write_json`. Their latest
-    tick can still extend ``expected_tick_count`` so the RIG captures enough evidence.
+    Assertion definitions remain host-side and are omitted from :meth:`to_dict`,
+    :meth:`to_json`, and :meth:`write_json`. They can be snapshotted into a captured-run
+    database for later evaluation, and their latest tick can extend
+    ``expected_tick_count`` so the RIG captures enough evidence.
     """
 
     test_id: int

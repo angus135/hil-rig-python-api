@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-RESULT_IR_SCHEMA_VERSION = "1.0"
+from hilrig.models.execution import CompiledAssertion
+
+RESULT_IR_SCHEMA_VERSION = "1.1"
+ORIGINAL_ASSERTION_SET_ID = "original"
 
 DIGITAL_INPUT_CHANNEL_COUNT = 10
 ANALOGUE_INPUT_CHANNEL_COUNT = 2
@@ -204,6 +207,22 @@ class CapturedRunMetadata:
     def missing_tick_count(self) -> int:
         """Return how many expected fixed tick rows have not been stored."""
         return max(0, self.expected_tick_count - self.received_tick_count)
+
+
+@dataclass(frozen=True, slots=True)
+class CapturedAssertionSet:
+    """Immutable compiled assertion snapshot stored with one captured run."""
+
+    assertion_set_id: str
+    name: str
+    compiled_ir_version: str
+    created_at: str
+    assertions: tuple[CompiledAssertion, ...]
+
+    @property
+    def assertion_count(self) -> int:
+        """Return the number of assertion definitions in this set."""
+        return len(self.assertions)
 
 
 @dataclass(frozen=True, slots=True)

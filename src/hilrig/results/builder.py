@@ -6,13 +6,14 @@ import queue
 import secrets
 import threading
 import time
+from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from hilrig.exceptions import CaptureStateError, CaptureStorageError
-from hilrig.models.execution import CompiledTestIR
+from hilrig.models.execution import IR_SCHEMA_VERSION, CompiledAssertion, CompiledTestIR
 from hilrig.results.models import (
     ApplicationErrorRecord,
     CaptureStatus,
@@ -70,6 +71,8 @@ class CapturedRunBuilder:
             test_name=compiled_test.name,
             tick_period_ns=compiled_test.tick_period_ns,
             expected_tick_count=compiled_test.expected_tick_count,
+            compiled_ir_version=compiled_test.schema_version,
+            compiled_assertions=compiled_test.assertions,
             run_id=run_id,
             application_protocol_version=application_protocol_version,
             firmware_version=firmware_version,
@@ -86,6 +89,8 @@ class CapturedRunBuilder:
         test_name: str,
         tick_period_ns: int,
         expected_tick_count: int,
+        compiled_ir_version: str = IR_SCHEMA_VERSION,
+        compiled_assertions: Sequence[CompiledAssertion] = (),
         run_id: int | None = None,
         application_protocol_version: str | None = None,
         firmware_version: str | None = None,
@@ -107,6 +112,11 @@ class CapturedRunBuilder:
             expected_tick_count,
             name="expected_tick_count",
         )
+        self._compiled_ir_version = _non_blank_text(
+            compiled_ir_version,
+            name="compiled_ir_version",
+        )
+        self._compiled_assertions = tuple(compiled_assertions)
         self._batch_size = _positive_int(batch_size, name="batch_size")
         if (
             not isinstance(flush_interval_s, (int, float))
@@ -124,6 +134,8 @@ class CapturedRunBuilder:
             test_name=self._test_name,
             tick_period_ns=self._tick_period_ns,
             expected_tick_count=self._expected_tick_count,
+            compiled_ir_version=self._compiled_ir_version,
+            compiled_assertions=self._compiled_assertions,
             application_protocol_version=_optional_text(
                 application_protocol_version,
                 name="application_protocol_version",
@@ -379,3 +391,10 @@ def _optional_text(value: object, *, name: str) -> str | None:
     if not value.strip():
         raise ValueError(f"{name} must not be blank")
     return value
+
+
+def _non_blank_text(value: object, *, name: str) -> str:
+    converted = _optional_text(value, name=name)
+    if converted is None:
+        raise TypeError(f"{name} must be a string")
+    return converted

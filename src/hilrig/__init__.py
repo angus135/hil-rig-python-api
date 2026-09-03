@@ -48,6 +48,7 @@ from hilrig.models.configuration import (
 from hilrig.models.execution import CompiledTestIR
 from hilrig.results import (
     ApplicationErrorRecord,
+    CapturedAssertionSet,
     CapturedRunBuilder,
     CapturedRunIR,
     CaptureStatus,
@@ -64,6 +65,7 @@ __all__ = [
     "AnalogueInputExpectation",
     "AnalogueOutput",
     "ApplicationErrorRecord",
+    "CapturedAssertionSet",
     "CapturedRunBuilder",
     "CapturedRunIR",
     "CaptureError",

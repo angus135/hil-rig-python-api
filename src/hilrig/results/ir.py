@@ -10,9 +10,11 @@ from pathlib import Path
 from hilrig.results.models import (
     ANALOGUE_INPUT_CHANNEL_COUNT,
     DIGITAL_INPUT_CHANNEL_COUNT,
+    ORIGINAL_ASSERTION_SET_ID,
     PWM_INPUT_CHANNEL_COUNT,
     AnalogueInputSample,
     CapturedApplicationError,
+    CapturedAssertionSet,
     CapturedRunMetadata,
     CapturedTickResult,
     CommunicationCapture,
@@ -24,9 +26,13 @@ from hilrig.results.sqlite_store import (
     iter_application_errors,
     iter_communications,
     iter_ticks,
+    read_assertion_set,
     read_metadata,
     read_tick,
     validate_capture_database,
+)
+from hilrig.results.sqlite_store import (
+    iter_assertion_sets as iter_stored_assertion_sets,
 )
 
 
@@ -59,6 +65,26 @@ class CapturedRunIR:
     def metadata(self) -> CapturedRunMetadata:
         """Read the latest immutable run summary."""
         return read_metadata(self._database_path)
+
+    @property
+    def original_assertion_set(self) -> CapturedAssertionSet:
+        """Return the assertions compiled with the test that produced this run."""
+        return self.assertion_set(ORIGINAL_ASSERTION_SET_ID)
+
+    def assertion_set(
+        self,
+        assertion_set_id: str = ORIGINAL_ASSERTION_SET_ID,
+    ) -> CapturedAssertionSet:
+        """Return one immutable stored assertion set by identifier."""
+        if not isinstance(assertion_set_id, str):
+            raise TypeError("assertion_set_id must be a string")
+        if not assertion_set_id.strip():
+            raise ValueError("assertion_set_id must not be blank")
+        return read_assertion_set(self._database_path, assertion_set_id)
+
+    def iter_assertion_sets(self) -> Iterator[CapturedAssertionSet]:
+        """Return all stored assertion sets in deterministic creation order."""
+        return iter_stored_assertion_sets(self._database_path)
 
     def tick_at(self, tick: int) -> CapturedTickResult | None:
         """Return one fixed result, or ``None`` when that tick was not received."""
@@ -124,6 +150,7 @@ class CapturedRunIR:
     def to_manifest_dict(self) -> dict[str, object]:
         """Return a small JSON-compatible summary; time-series data stays in SQLite."""
         metadata = self.metadata
+        assertion_set = self.original_assertion_set
         return {
             "result_ir_version": metadata.schema_version,
             "test_id": metadata.test_id_hex,
@@ -144,6 +171,11 @@ class CapturedRunIR:
             "rig": {
                 "application_protocol_version": metadata.application_protocol_version,
                 "firmware_version": metadata.firmware_version,
+            },
+            "assertions": {
+                "original_set_id": assertion_set.assertion_set_id,
+                "compiled_ir_version": assertion_set.compiled_ir_version,
+                "count": assertion_set.assertion_count,
             },
             "authoritative_data": self._database_path.name,
         }

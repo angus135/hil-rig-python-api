@@ -224,9 +224,9 @@ to exact integer microvolts in the internal model, matching captured analogue sa
 Values finer than one microvolt are rejected rather than rounded. Analogue input channel
 indices are limited to `0` and `1`, matching the two physical inputs.
 
-The assertion objects are only stored in the internal model. Result data and assertion
-evaluation are separate: captured result storage is implemented, while the assertion
-evaluator is deliberately not implemented yet.
+Assertion definitions are retained in the compiled host model and snapshotted into each
+captured-run database. Result data and assertion evaluation remain separate: captured
+result storage is implemented, while the evaluator is deliberately not implemented yet.
 
 ## Captured-run intermediate representation
 
@@ -256,6 +256,7 @@ builder.add_tick_result(
 
 captured_run = builder.finalize()
 sample = captured_run.digital_input(channel=0).sample_at(0)
+original_assertions = captured_run.original_assertion_set
 ```
 
 The fixed channel counts currently match the application-layer result shape: ten
@@ -274,6 +275,8 @@ Bulk evidence is separated by shape:
 - `tick_results` stores one wide fixed-size row per tick;
 - `communication_results` stores raw variable-length I2C, SPI, or UART payloads;
 - `application_errors` stores diagnostics;
+- `assertion_sets` identifies versioned host-side assertion snapshots;
+- `assertion_definitions` stores each compiled assertion and its scalar arguments;
 - `run_metadata` stores identifiers, timing, provenance, counts, and capture status.
 
 `CapturedRunIR` provides streaming channel and range queries, so future assertion code
@@ -281,9 +284,11 @@ does not contain SQL. It can also derive a small JSON manifest and separate CSV 
 for fixed results, communication captures, and application errors. SQLite remains the
 authoritative copy.
 
-The builder factory copies the test ID, test name, tick period, and expected tick count
-from the same compiled snapshot that is sent toward the RIG. The lower-level builder
-constructor remains available for tests and protocol-independent use.
+The builder factory copies the test ID, test name, tick period, expected tick count,
+compiled IR version, and host-only assertions from the same compiled snapshot used for
+the run. Assertions remain absent from the RIG-facing JSON. The lower-level builder
+constructor remains available for tests and protocol-independent use; it creates an
+empty original assertion set when no compiled definitions are supplied.
 
 `IncomingResultAdapter` contains documented skeleton methods for the future flow:
 
