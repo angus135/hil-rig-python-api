@@ -15,16 +15,25 @@ from hilrig.api import (
     PwmOutput,
     Test,
 )
+from hilrig.evaluation import (
+    AssertionEvaluator,
+    AssertionResult,
+    EvaluationReport,
+    EvaluationVerdict,
+    evaluate_assertions,
+)
 from hilrig.exceptions import (
     CaptureError,
     CaptureSchemaError,
     CaptureStateError,
     CaptureStorageError,
     ConfigurationError,
+    EvaluationError,
     FrozenTestError,
     HilRigError,
     PeripheralError,
     TimingError,
+    UnsupportedAssertionError,
     ValidationError,
 )
 from hilrig.models.configuration import (
@@ -65,6 +74,8 @@ __all__ = [
     "AnalogueInputExpectation",
     "AnalogueOutput",
     "ApplicationErrorRecord",
+    "AssertionEvaluator",
+    "AssertionResult",
     "CapturedAssertionSet",
     "CapturedRunBuilder",
     "CapturedRunIR",
@@ -81,6 +92,9 @@ __all__ = [
     "DigitalInputExpectation",
     "DigitalOutput",
     "DigitalState",
+    "EvaluationError",
+    "EvaluationReport",
+    "EvaluationVerdict",
     "FrequencyMode",
     "FrozenTestError",
     "HilRigError",
@@ -111,5 +125,7 @@ __all__ = [
     "UARTMode",
     "UARTParity",
     "UARTStopBits",
+    "UnsupportedAssertionError",
     "ValidationError",
+    "evaluate_assertions",
 ]

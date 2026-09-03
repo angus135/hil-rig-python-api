@@ -6,7 +6,8 @@ The implemented library constructs an in-memory description of a test and compil
 into a protocol-neutral intermediate representation. The returned-data side now has a
 protocol-neutral typed ingestion boundary and SQLite-backed captured-run IR. It still
 does not define how outgoing data becomes an IDC message, how bytes are transported,
-how final application-message objects are mapped, or how assertions are evaluated.
+or how final application-message objects are mapped. Host-side evaluation of the current
+digital, PWM, and analogue assertions is implemented against finalized captured runs.
 
 ```text
 User script
@@ -36,6 +37,9 @@ Future incoming protocol adapter:
                                   v
 Implemented stable boundary:
     typed result records -> batched CapturedRunBuilder -> SQLite -> CapturedRunIR
+                                                              |
+                                                              v
+                                          assertion evaluator -> JSON/Markdown report
 ```
 
 ## Test ownership
@@ -118,8 +122,9 @@ Assertions remain separate from stimulus instructions and are intended to be eva
 on the host against returned time-series data. Reusable `PointAssertion` and
 `RangeAssertion` bases hold the converted point tick or inclusive tick bounds. Concrete
 definitions currently cover digital states and transitions, PWM period/frequency/duty
-measurements, and analogue voltage targets, bands, and thresholds. Evaluation algorithms
-remain deliberately unimplemented.
+measurements, and analogue voltage targets, bands, and thresholds. Evaluator handlers are
+registered by the compiled `(peripheral, assertion)` operation pair, so adding a new
+assertion requires an explicit handler rather than a central conditional chain.
 
 Analogue assertion builders accept volts (`target_v`, `minimum_v`, and similar names)
 for user readability, then store signed integer microvolts (`target_uv`, `minimum_uv`,
@@ -215,7 +220,7 @@ check from calculating different run lengths and preserves the host evaluation p
 Finalization checks that unique fixed results cover every tick from zero through
 `expected_tick_count - 1`. It automatically records `COMPLETE` or `INCOMPLETE`; the
 future execution orchestrator can instead record `SESSION_LOST`, `PROTOCOL_ERROR`, or
-`ABORTED`. Capture status is deliberately separate from future assertion verdicts.
+`ABORTED`. Capture status is deliberately separate from assertion verdicts.
 
 ### SQLite representation
 
@@ -243,10 +248,10 @@ because they are sparse and variable length.
 digital, analogue, PWM, communication, and diagnostic queries. Range methods return
 streaming iterators. `original_assertion_set` reconstructs immutable
 `CompiledAssertion` objects, allowing an evaluator to rerun the exact definitions after
-the original Python process has ended. A future evaluator therefore asks this facade for
-assertion definitions and channel samples instead of importing `sqlite3` or embedding
-SQL. This abstraction leaves room for another storage backend if measurements later
-show one is needed.
+the original Python process has ended. The evaluator asks this facade for assertion
+definitions and channel samples instead of importing `sqlite3` or embedding SQL. This
+abstraction leaves room for another storage backend if measurements later show one is
+needed.
 
 The IR derives optional review artifacts while keeping bulk values out of JSON:
 
@@ -255,6 +260,41 @@ The IR derives optional review artifacts while keeping bulk values out of JSON:
 - a raw communication-results CSV;
 - an application-errors CSV.
 
+## Assertion evaluation
+
+`AssertionEvaluator` accepts a finalized `CapturedRunIR` and selects a stored assertion
+set (the immutable `original` set by default). It steps through the definitions in
+assertion-ID order. A registry maps each `(peripheral, assertion)` pair to a small handler
+for that operation. Shared query helpers provide point evidence or stream inclusive tick
+ranges while making missing ticks explicit.
+
+Each handler returns an immutable `AssertionResult` containing the verdict, expected
+arguments, a compact observed-value summary, sample and violation counts, the first
+known failure tick, and a human-readable explanation. The dispatcher combines those
+results into an `EvaluationReport` with one of three verdicts:
+
+- `PASS`: the available evidence proves the assertion;
+- `FAIL`: at least one valid measurement proves a violation;
+- `INCONCLUSIVE`: missing or invalid evidence prevents a reliable decision.
+
+For a range assertion, a known violation takes precedence over missing evidence: the
+assertion has definitely failed. If no violation is found, any missing or invalid tick
+makes the range inconclusive. Digital transitions require adjacent valid ticks, because
+a state on either side of a gap does not prove when the transition occurred. PWM
+frequency is derived from `period_ns`; a reported zero period means no measurable
+waveform and is a known failure rather than missing data.
+
+The report-level verdict is `FAIL` if any assertion fails. Otherwise it is
+`INCONCLUSIVE` if an assertion is inconclusive, the capture status is not `COMPLETE`, a
+non-recoverable application error was stored, or the selected assertion set is empty.
+This keeps measurement outcomes distinct from capture health while preventing a damaged
+run from being reported as an overall pass.
+
+Evaluation is read-only and returns the report object before creating files. The object
+can be inspected directly or exported as deterministic JSON for tools and Markdown for
+people. Reports are deliberately derived artifacts rather than database mutations, so
+the same captured evidence and assertion snapshot can be evaluated again later.
+
 ## Remaining planned boundaries
 
 Add these only after their designs are agreed:
@@ -262,8 +302,7 @@ Add these only after their designs are agreed:
 ```text
 src/hilrig/
 |-- idc/          Application-message serialization and parsing
-|-- transport/    USB CDC connection and byte transfer
-`-- assertions/   Evaluation of stored assertions against result series
+`-- transport/    USB CDC connection and byte transfer
 ```
 
 `results/adapter.py` reserves the incoming orchestration and mapping methods. They are
@@ -277,7 +316,10 @@ records.
 - API tests verify handles, configuration, automatic IDs, and removed behaviour.
 - Timing tests verify exact conversion and alignment errors.
 - Instruction tests verify each specified stimulus payload and I2C role rules.
-- Assertion tests verify only the currently specified digital-input definitions.
+- Assertion model tests verify the currently specified digital, PWM, and analogue-input
+  definitions and their compiler representation.
+- Evaluator tests cover every registered operation, verdict precedence, incomplete and
+  invalid evidence, transition gaps, application errors, and JSON/Markdown reports.
 - Captured-run tests verify batching barriers, transactional rollback, finalization,
   validity normalization, raw payload preservation, queries, and derived exports.
 - Future IDC and result-adapter tests should use agreed known message vectors.

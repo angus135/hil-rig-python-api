@@ -39,7 +39,7 @@ from hilrig.results.sqlite_store import (
 class CapturedRunIR:
     """Logical captured-run IR backed by an authoritative SQLite file.
 
-    Callers and future assertion evaluators use this object rather than writing SQL.
+    Callers and assertion evaluators use this object rather than writing SQL.
     Each iterator opens a read-only/query-only connection and streams rows, so large
     ranges do not need to be loaded into memory at once.
     """

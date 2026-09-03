@@ -39,3 +39,11 @@ class CaptureStorageError(CaptureError):
 
 class CaptureSchemaError(CaptureStorageError):
     """A capture database has an absent or unsupported schema."""
+
+
+class EvaluationError(HilRigError):
+    """A captured run could not be evaluated safely."""
+
+
+class UnsupportedAssertionError(EvaluationError):
+    """No evaluator is registered for a compiled assertion definition."""

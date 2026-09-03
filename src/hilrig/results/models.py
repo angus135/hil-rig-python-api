@@ -24,7 +24,7 @@ class TickCondition(str, Enum):
 
 
 class CaptureStatus(str, Enum):
-    """State of receiving a run, separate from future assertion pass/fail results."""
+    """State of receiving a run, separate from assertion pass/fail results."""
 
     IN_PROGRESS = "in_progress"
     COMPLETE = "complete"

@@ -6,9 +6,9 @@ test for the HIL-RIG.
 The current implementation covers test and peripheral configuration, stimulus
 instructions, exact user-time-to-tick conversion, digital, PWM, and analogue-input
 assertion definitions, protocol-neutral JSON and Excel intermediate representations,
-and persistent captured-run storage. It does not define an IDC representation,
-communicate over USB, translate the unfinished application-message interface, or execute
-assertions.
+persistent captured-run storage, and host-side assertion evaluation with JSON and
+Markdown reports. It does not define an IDC representation, communicate over USB, or
+translate the unfinished application-message interface.
 
 ## Requirements
 
@@ -225,8 +225,8 @@ Values finer than one microvolt are rejected rather than rounded. Analogue input
 indices are limited to `0` and `1`, matching the two physical inputs.
 
 Assertion definitions are retained in the compiled host model and snapshotted into each
-captured-run database. Result data and assertion evaluation remain separate: captured
-result storage is implemented, while the evaluator is deliberately not implemented yet.
+captured-run database. They can therefore be reevaluated later using only that database;
+the original user script and in-memory `Test` object are not required.
 
 ## Captured-run intermediate representation
 
@@ -279,9 +279,9 @@ Bulk evidence is separated by shape:
 - `assertion_definitions` stores each compiled assertion and its scalar arguments;
 - `run_metadata` stores identifiers, timing, provenance, counts, and capture status.
 
-`CapturedRunIR` provides streaming channel and range queries, so future assertion code
-does not contain SQL. It can also derive a small JSON manifest and separate CSV files
-for fixed results, communication captures, and application errors. SQLite remains the
+`CapturedRunIR` provides streaming channel and range queries, so assertion code does not
+contain SQL. It can also derive a small JSON manifest and separate CSV files for fixed
+results, communication captures, and application errors. SQLite remains the
 authoritative copy.
 
 The builder factory copies the test ID, test name, tick period, expected tick count,
@@ -298,6 +298,47 @@ USB bytes -> transport messages -> application messages -> typed builder records
 
 Those methods intentionally raise `NotImplementedError` until the transport/application
 Python interfaces and application-message field mapping are final.
+
+## Evaluate captured assertions
+
+Evaluation happens only after the builder has finalized the capture. The evaluator reads
+the immutable assertion snapshot from SQLite, dispatches each definition to its
+peripheral-specific handler, and returns an in-memory `EvaluationReport`:
+
+```python
+from hilrig import evaluate_assertions
+
+report = evaluate_assertions(captured_run)
+
+print(report.verdict)  # EvaluationVerdict.PASS, FAIL, or INCONCLUSIVE
+print(report.failed_count)
+report.write_json("results/report.json")
+report.write_markdown("results/report.md")
+```
+
+A complete hardware-free demonstration is available in
+`examples/assertion_evaluator.py`. Run it from the repository root:
+
+```powershell
+python examples/assertion_evaluator.py
+```
+
+It creates a uniquely named directory under `examples/build/` containing the SQLite
+capture, `evaluation-report.json`, and `evaluation-report.md`, then prints each assertion
+outcome and the exact output paths.
+
+The JSON report is useful for later tools and automation. The Markdown report contains a
+run summary, a compact assertion table, and detailed expected/observed evidence for each
+assertion. Generating a report does not modify the capture database, so evaluation can be
+rerun at any time.
+
+Point assertions are inconclusive when their tick is missing or invalid. Range
+assertions fail when any valid sample proves a violation; otherwise a gap or invalid
+sample makes them inconclusive instead of silently passing. Digital transitions require
+two adjacent valid ticks. A zero PWM period is treated as a valid report of no measurable
+waveform and fails a PWM assertion. Even when individual assertions pass, an incomplete
+capture, a non-recoverable application error, or an empty assertion set prevents an
+overall pass.
 
 ## Compile and export
 
@@ -369,6 +410,7 @@ python -m ruff format .
 |   |-- timing.py                  Exact conversion into ticks
 |   |-- compiler.py                Validation and immutable IR snapshot construction
 |   |-- exporters/                 JSON machine IR and human-readable Excel export
+|   |-- evaluation/                Assertion dispatch, handlers, and report export
 |   |-- exceptions.py              Library-specific exception hierarchy
 |   |-- results/                   Batched SQLite capture storage and query facade
 |   `-- models/                    Internal configuration/instruction/assertion data
