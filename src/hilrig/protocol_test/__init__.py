@@ -1,8 +1,8 @@
-"""Temporary DEV-138 Transport hardware-test harness.
+"""Temporary Transport and Application hardware-test harness.
 
-This package is intentionally not re-exported from :mod:`hilrig`.  It exercises
-opaque Transport Application messages only and is not the production HIL-RIG
-Application protocol.
+This package is intentionally not re-exported from :mod:`hilrig`. It exercises the
+shared Transport implementation plus the public fixed Application codec against the
+MCU hardware-test firmware. It is not the production-facing HIL-RIG execution API.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Command-line entry point for the temporary DEV-138 Transport hardware harness."""
+"""Command-line entry point for the temporary Transport/Application hardware harness."""
 
 from __future__ import annotations
 
@@ -81,16 +81,36 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="scenario", required=True)
-    for name in ("smoke", "status", "boundaries"):
+    for name in (
+        "smoke",
+        "status",
+        "boundaries",
+        "application-smoke",
+        "application-boundaries",
+        "application-negative",
+    ):
         sub = subparsers.add_parser(name)
         _add_common(sub)
     repeat = subparsers.add_parser("repeat")
     _add_common(repeat)
     repeat.add_argument("--count", type=int, required=True)
+    application_repeat = subparsers.add_parser("application-repeat")
+    _add_common(application_repeat)
+    application_repeat.add_argument("--count", type=int, required=True)
     reset = subparsers.add_parser("reset-reconnect")
     _add_common(reset)
     reset.add_argument("--cycles", type=int, default=1)
     reset.add_argument(
+        "--allow-unobserved-reset",
+        action="store_true",
+        help=(
+            "allow host-link recycle when no physical serial disconnect is observed; "
+            "this does not verify an MCU reset"
+        ),
+    )
+    application_reset = subparsers.add_parser("application-reset-reconnect")
+    _add_common(application_reset)
+    application_reset.add_argument(
         "--allow-unobserved-reset",
         action="store_true",
         help=(
@@ -176,6 +196,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.scenario == "reset-reconnect":
             result = runner.run_reset_reconnect(
                 args.cycles,
+                prompt=_prompt,
+                allow_unobserved_reset=args.allow_unobserved_reset,
+            )
+        elif args.scenario == "application-smoke":
+            result = runner.run_application_smoke()
+        elif args.scenario == "application-boundaries":
+            result = runner.run_application_boundaries()
+        elif args.scenario == "application-negative":
+            result = runner.run_application_negative()
+        elif args.scenario == "application-repeat":
+            result = runner.run_application_repeat(args.count)
+        elif args.scenario == "application-reset-reconnect":
+            result = runner.run_application_reset_reconnect(
                 prompt=_prompt,
                 allow_unobserved_reset=args.allow_unobserved_reset,
             )

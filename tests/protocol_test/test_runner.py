@@ -19,8 +19,14 @@ from hil_rig_protocol import (
     TransportStatus,
 )
 
+from hilrig.protocol_test.application_hardware import COMPATIBILITY_PROFILE_ID, PROTOCOL_VERSION
 from hilrig.protocol_test.connection import LinkDisconnectedError, hardware_test_transport_config
-from hilrig.protocol_test.harness_codec import Opcode, decode_message, encode_message
+from hilrig.protocol_test.harness_codec import (
+    ApplicationHarnessState,
+    Opcode,
+    decode_message,
+    encode_message,
+)
 from hilrig.protocol_test.models import (
     ConnectionEvent,
     ReceivedApplicationMessage,
@@ -142,18 +148,41 @@ class ScenarioConnection:
             },
         }
 
+    def _queue_event(self, event_type: EventType) -> None:
+        self.events.append(
+            ConnectionEvent(
+                event=TransportEvent(event_type, TransportStatus.OK, Failure.NONE, 0),
+                link_generation=self.link_generation,
+                monotonic_ms=0,
+            )
+        )
+
+    def _status_payload(self) -> bytes:
+        values = [0] * 32
+        values[0] = 2
+        values[1] = 1
+        values[2] = self.link_generation or 0
+        values[11] = int(SessionState.ESTABLISHED)
+        values[12] = COMPATIBILITY_PROFILE_ID
+        values[13:16] = list(PROTOCOL_VERSION)
+        values[16] = 1
+        values[17] = 0
+        values[25] = int(ApplicationHarnessState.WAITING_FOR_CONFIGURATION)
+        return struct.pack("<32I", *values)
+
     def submit_application_data(self, data: bytes) -> TransportStatus:
         self.submissions += 1
         if self.submit_statuses:
             status = self.submit_statuses.popleft()
             if status is not TransportStatus.OK:
                 return status
-        request = decode_message(data, max_application_message_size=512)
-        if self.behavior == "no_response":
-            return TransportStatus.OK
         if self.behavior == "disconnect":
             self.disconnect_on_service = True
             return TransportStatus.OK
+        self._queue_event(EventType.DELIVERY_CONFIRMED)
+        if self.behavior == "no_response":
+            return TransportStatus.OK
+        request = decode_message(data, max_application_message_size=512)
         request_id = request.request_id
         opcode = (
             Opcode.ECHO_RESPONSE
@@ -162,7 +191,7 @@ class ScenarioConnection:
         )
         payload = request.payload
         if request.opcode is Opcode.STATUS_REQUEST:
-            payload = struct.pack("<12I", 1, 1, *range(10))
+            payload = self._status_payload()
         if self.behavior == "wrong_id":
             request_id = (request_id + 1) & 0xFFFF_FFFF
         if self.behavior == "wrong_opcode":
@@ -184,6 +213,7 @@ class ScenarioConnection:
         if self.behavior == "duplicate":
             self.messages.append(ReceivedApplicationMessage(encoded, generation, 0))
         return TransportStatus.OK
+
 
 
 def make_runner(
@@ -267,12 +297,17 @@ def test_disconnect_during_request(tmp_path: Path) -> None:
 def test_status_request_and_typed_decode(tmp_path: Path) -> None:
     runner, connection, trace, _ = make_runner(tmp_path)
     status = runner.run_status()
-    assert status.schema_version == 1
-    assert status.link_generation == 0
-    assert status.transport_session_state == 9
+    assert status.schema_version == 2
+    assert status.link_generation == 1
+    assert status.compatibility_profile_id == COMPATIBILITY_PROFILE_ID
+    assert (
+        status.protocol_version_major,
+        status.protocol_version_minor,
+        status.protocol_version_patch,
+    ) == PROTOCOL_VERSION
     records = [json.loads(line) for line in trace.trace_path.read_text().splitlines()]
     raw = next(record for record in records if record["kind"] == "status_raw")
-    assert raw["payload_hex"] == struct.pack("<12I", 1, 1, *range(10)).hex()
+    assert len(bytes.fromhex(raw["payload_hex"])) == 128
     runner.close()
     finish(trace, connection, passed=True)
 
@@ -400,7 +435,7 @@ def test_request_response_event_and_failure_evidence_remains_available(tmp_path:
         passed=False, failure_reason="synthetic failure", diagnostics=connection.get_diagnostics()
     )
     kinds = [json.loads(line)["kind"] for line in trace.trace_path.read_text().splitlines()]
-    assert "request_submitted" in kinds
+    assert "payload_submitted" in kinds
     assert "response_received" in kinds
     assert "transport_event" in kinds
     assert "run_end" in kinds

@@ -15,13 +15,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .models import (
-    ENVELOPE_VERSION,
-    FIRMWARE_BRANCH,
-    FIRMWARE_COMMIT,
-    PROTOCOL_COMMIT,
-    PYTHON_API_BRANCH_POINT_COMMIT,
+from .application_hardware import (
+    APPLICATION_CODEC_CONFIG,
+    COMPATIBILITY_PROFILE_ID,
+    PROTOCOL_VERSION,
 )
+from .models import ENVELOPE_VERSION
 
 
 class CompatibilityError(RuntimeError):
@@ -95,31 +94,33 @@ def _default_source_root() -> Path:
 
 
 def collect_source_evidence(repo_root: Path | None = None) -> dict[str, object]:
-    """Collect expected compatibility revisions and separately observed Git revisions."""
+    """Collect observable source metadata without treating Git pins as compatibility gates."""
     root = _default_source_root() if repo_root is None else repo_root
+    protocol_root = root / "external" / "hil-rig-protocol"
     python_source = inspect_git_source(root)
-    protocol_source = inspect_git_source(root / "external" / "hil-rig-protocol")
+    protocol_source = inspect_git_source(protocol_root)
+    version_file = protocol_root / "VERSION"
+    declared_version: str | None = None
+    if version_file.is_file():
+        declared_version = version_file.read_text(encoding="utf-8").strip() or None
     return {
-        "python_api_expected_branch_point": PYTHON_API_BRANCH_POINT_COMMIT,
         "python_api_observed_commit": python_source.commit,
         "python_api_working_tree_dirty": python_source.dirty,
         "python_api_git_metadata_available": python_source.available,
-        "protocol_expected_commit": PROTOCOL_COMMIT,
         "protocol_observed_commit": protocol_source.commit,
         "protocol_working_tree_dirty": protocol_source.dirty,
         "protocol_git_metadata_available": protocol_source.available,
-        "firmware_expected_branch": FIRMWARE_BRANCH,
-        "firmware_expected_commit": FIRMWARE_COMMIT,
+        "protocol_declared_version": declared_version,
     }
 
 
 def validate_protocol_compatibility(source_evidence: dict[str, object]) -> None:
-    """Reject an observed protocol submodule revision that differs from the required pin."""
-    observed = source_evidence.get("protocol_observed_commit")
-    expected = source_evidence.get("protocol_expected_commit")
-    if observed is not None and observed != expected:
+    """Validate the protocol version declared by the files supplied with this checkout/ZIP."""
+    declared = source_evidence.get("protocol_declared_version")
+    expected = ".".join(str(value) for value in PROTOCOL_VERSION)
+    if declared is not None and declared != expected:
         raise CompatibilityError(
-            f"protocol submodule revision mismatch: expected {expected}, observed {observed}"
+            f"protocol VERSION mismatch: expected {expected}, supplied files declare {declared}"
         )
 
 
@@ -163,6 +164,9 @@ class TraceWriter:
             operating_system=platform.platform(),
             pyserial_version=package_version("pyserial"),
             test_envelope_version=ENVELOPE_VERSION,
+            application_codec_config=APPLICATION_CODEC_CONFIG,
+            protocol_version=PROTOCOL_VERSION,
+            compatibility_profile_id=COMPATIBILITY_PROFILE_ID,
         )
 
     def record(self, kind: str, **fields: Any) -> None:
@@ -195,6 +199,9 @@ class TraceWriter:
             "operating_system": platform.platform(),
             "pyserial_version": package_version("pyserial"),
             "test_envelope_version": ENVELOPE_VERSION,
+            "application_codec_config": _jsonable(APPLICATION_CODEC_CONFIG),
+            "protocol_version": list(PROTOCOL_VERSION),
+            "compatibility_profile_id": COMPATIBILITY_PROFILE_ID,
             "seed": self.seed,
             "diagnostics": diagnostics,
             "trace_file": self.trace_path.name,

@@ -1,3 +1,5 @@
+from dataclasses import fields
+
 import pytest
 
 from hilrig.protocol_test.harness_codec import (
@@ -6,7 +8,7 @@ from hilrig.protocol_test.harness_codec import (
     HarnessCodecError,
     Opcode,
     RequestIdAllocator,
-    StatusPayloadV1,
+    StatusPayloadV2,
     decode_message,
     decode_status_payload,
     encode_echo_request,
@@ -16,6 +18,43 @@ from hilrig.protocol_test.harness_codec import (
 )
 
 LIMIT = 512
+
+
+def test_status_v2_field_order_is_exact() -> None:
+    assert [field.name for field in fields(StatusPayloadV2)] == [
+        "schema_version",
+        "link_state",
+        "link_generation",
+        "transport_event_count",
+        "usb_rx_bytes",
+        "usb_tx_bytes",
+        "application_messages_received",
+        "responses_results_submitted",
+        "usb_tx_busy_retries",
+        "invalid_hrtp_messages",
+        "maximum_service_gap_ms",
+        "transport_session_state",
+        "compatibility_profile_id",
+        "protocol_version_major",
+        "protocol_version_minor",
+        "protocol_version_patch",
+        "application_codec_initialized",
+        "application_initialization_status",
+        "non_hrtp_application_messages_received",
+        "application_decode_failures",
+        "application_semantic_rejections",
+        "application_encode_failures",
+        "configurations_accepted",
+        "instructions_accepted",
+        "results_encoded",
+        "application_harness_state",
+        "next_expected_tick",
+        "active_expected_tick_count",
+        "last_application_status",
+        "last_decoded_application_message_type",
+        "configuration_digest",
+        "last_instruction_digest",
+    ]
 
 
 def test_fixed_little_endian_header_vector() -> None:
@@ -52,45 +91,33 @@ def test_status_request_has_empty_payload() -> None:
 
 
 def test_status_response_decoding() -> None:
-    payload = bytes.fromhex(
-        "01000000"
-        "02000000"
-        "44332211"
-        "88776655"
-        "04030201"
-        "0d0c0b0a"
-        "40302010"
-        "80706050"
-        "c0b0a090"
-        "3c2d1e0f"
-        "efcdab89"
-        "03000000"
+    import struct
+
+    payload = struct.pack("<32I", 2, *range(1, 32))
+    status = decode_status_payload(payload)
+    assert status == StatusPayloadV2(2, *range(1, 32))
+    assert len(payload) == 128
+
+    encoded = encode_message(
+        Opcode.STATUS_RESPONSE,
+        9,
+        payload,
+        max_application_message_size=LIMIT,
     )
-    assert decode_status_payload(payload) == StatusPayloadV1(
-        schema_version=1,
-        link_state=2,
-        link_generation=0x11223344,
-        transport_event_count=0x55667788,
-        usb_rx_bytes=0x01020304,
-        usb_tx_bytes=0x0A0B0C0D,
-        application_requests_received=0x10203040,
-        responses_submitted=0x50607080,
-        usb_tx_busy_retries=0x90A0B0C0,
-        invalid_harness_messages=0x0F1E2D3C,
-        maximum_service_gap_ms=0x89ABCDEF,
-        transport_session_state=3,
-    )
+    assert len(encoded) == 144
 
 
-@pytest.mark.parametrize("size", [44, 47, 49])
+@pytest.mark.parametrize("size", [124, 127, 129])
 def test_incorrect_status_payload_size_rejected(size: int) -> None:
-    with pytest.raises(HarnessCodecError, match="48 bytes"):
+    with pytest.raises(HarnessCodecError, match="128 bytes"):
         decode_status_payload(bytes(size))
 
 
 def test_unsupported_status_schema_version_rejected() -> None:
-    payload = b"\x02\x00\x00\x00" + bytes(44)
-    with pytest.raises(HarnessCodecError, match="schema version 2"):
+    import struct
+
+    payload = struct.pack("<32I", 1, *range(1, 32))
+    with pytest.raises(HarnessCodecError, match="schema version 1"):
         decode_status_payload(payload)
 
 

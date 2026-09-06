@@ -1,23 +1,23 @@
-# DEV-138 Transport hardware-test harness
+# Transport and Application hardware-test harness
 
-This document describes the temporary host-side hardware harness on branch
-`test/DEV-138--protocol-test`. The branch exists to exercise the shared Transport
-implementation against the MCU firmware. It is not intended to be merged directly into
-`main`. Reusable serial/connection pieces may later be extracted into focused production
-work, while the HRTP codec, scenarios, and CLI are disposable test infrastructure.
+This package is temporary test infrastructure for exercising the shared HIL-RIG protocol
+against the MCU over USB CDC. It retains the Transport hardware-test scenarios from PR #2
+and adds fixed Application Test Configuration, Test Instruction, and Test Result coverage.
+It is intentionally kept under `hilrig.protocol_test` and is not integrated into the
+production-facing `hilrig` execution API.
 
 ## Compatibility
 
-The shared protocol repository is a Git submodule at `external/hil-rig-protocol` and must
-be pinned to:
+The protocol source of truth is the submodule at `external/hil-rig-protocol`. For this
+checkout the required protocol version is **0.1.0** and the paired firmware advertises
+compatibility profile **`0x41505031`**. The harness fails STATUS compatibility checks if
+those runtime values do not match, if STATUS is not schema 2, or if the firmware reports
+that its Application codec failed to initialize.
 
-`a24fccc403007cbf6268ff7d0d21f50566a6b2de`
-
-The matching firmware test branch is `test/DEV-138--protocol-test` in
-`angus135/hil-rig-mcu-firmware`. See
-`docs/transport_hardware_test_compatibility.json` for the machine-readable compatibility
-manifest. The paired firmware revision for this compatibility snapshot is
-`c6c0af2af586108949c30fb4a12df54eb9dd2fda`.
+Git commits are evidence, not compatibility gates. A ZIP may contain no `.git` metadata.
+When Git metadata is observable, JSONL evidence records the Python and protocol commits
+and dirty state. Otherwise those fields are recorded as unavailable. Stale hard-coded
+firmware or submodule commit hashes are not used to accept or reject a run.
 
 A normal checkout/setup is:
 
@@ -27,272 +27,257 @@ python -m pip install -e external/hil-rig-protocol
 python -m pip install -e ".[dev,hardware-test]"
 ```
 
-To verify the submodule pin in a checkout, use:
-
-```sh
-git submodule update --init --recursive
-git -C external/hil-rig-protocol fetch origin
-git -C external/hil-rig-protocol checkout --detach a24fccc403007cbf6268ff7d0d21f50566a6b2de
-git add .gitmodules external/hil-rig-protocol
-git diff --cached --submodule
-```
-
-The staged gitlink must resolve to exactly
-`a24fccc403007cbf6268ff7d0d21f50566a6b2de` before the branch commit is created.
-
-This branch requires CPython 3.12 or later because the pinned protocol package requires
-Python 3.12 or later. CI covers 3.12 and 3.13.
-
-The protocol package contains a CFFI extension backed by the shared C Transport core.
-Building it from source requires a C11 compiler, CPython development headers, CMake 3.17
-or later, and the PEP 517 dependencies declared by the protocol repository. The Python
-API repository never imports `hil_rig_protocol._native` or defines its own CFFI layer.
+The protocol package contains a native extension backed by the shared C implementation.
+The Python API repository uses the public `hil_rig_protocol` package and does not define a
+private CFFI layer or a second Application wire codec.
 
 ## Architecture
 
-`hilrig.protocol_test.connection.ProtocolTestConnection` is the reusable boundary. It
-owns exactly one HOST-role public `hil_rig_protocol.Transport`, one serial handle, caller
-retained input, one staged output item and partial-write offset, bounded Application and
-event queues, link generation state, and service diagnostics. Every Transport call is
-made synchronously from the thread that created the connection. There is no internal
-worker thread.
+`hilrig.protocol_test.connection.ProtocolTestConnection` remains payload-agnostic. It
+owns one HOST-role public `hil_rig_protocol.Transport`, one serial handle, retained input,
+staged output, bounded event/Application queues, link-generation state, and service
+diagnostics. It only transports complete byte strings and public Transport events.
 
-The connection layer deals only with complete opaque Application byte strings. It has no
-dependency on HRTP, ECHO, STATUS, request IDs, test compilation, captured-run storage,
-exporters, or `results/adapter.py`.
-
-The temporary layers are:
+Scenario knowledge sits above that boundary:
 
 - `serial_port.py`: USB serial discovery, pyserial normalization, and deterministic fault
-  wrapping.
+  injection.
 - `connection.py`: caller-driven serial/Transport servicing.
-- `harness_codec.py`: the temporary HRTP ECHO/STATUS envelope.
-- `runner.py`: one-request-at-a-time scenario policy and request correlation.
-- `trace.py`: JSON Lines evidence and final JSON summaries.
-- `cli.py`: `argparse` command line entry point.
+- `harness_codec.py`: HRTP ECHO and STATUS diagnostics only.
+- `application_hardware.py`: public `ApplicationCodec` configuration, deterministic fixed
+  fixtures, result oracle, and semantic digest helpers.
+- `runner.py`: one-outbound-message-at-a-time scenario policy, HRTP/Application message
+  classification, delivery confirmation, result correlation, and reset/reconnect logic.
+- `trace.py`: JSONL evidence and final JSON summaries.
+- `cli.py`: command line entry point.
+
+Real Application messages are encoded and decoded only through
+`hil_rig_protocol.ApplicationCodec`. Encoded Application bytes are submitted directly as
+Transport Application payloads. They are never wrapped in HRTP. HRTP is retained only for
+ECHO and STATUS diagnostics.
 
 ## Transport configuration and servicing
 
-The harness uses the public `TransportConfig` API through the single
-`hardware_test_transport_config()` factory. Its default HOST test configuration matches
-the firmware hardware-test settings:
+The HOST Transport uses `hardware_test_transport_config()`:
 
 - maximum Application message size: 512 bytes;
 - maximum encoded frame size: 640 bytes;
-- HOST session seed: generated normally by the public Transport facade;
+- HOST session seed: generated by the public Transport facade;
 - initial reliable sequence: 0;
 - connection timeout: 0 ms;
 - retransmission timeout: 100 ms;
 - maximum retries: 5.
 
-Retransmission remains entirely inside the shared Transport implementation. The Python
-harness only supplies the configuration, which allows accepted-but-dropped or corrupted
-fault-injection writes to exercise Transport-level recovery. The effective configuration
-actually owned by the created Transport, including its generated HOST session seed, is
-recorded in each run.
+Retransmission remains entirely inside the shared Transport implementation. The service
+loop is bounded and caller-owned. Receive bytes are retained until the public Transport
+reports them consumed. Peeked output remains staged across partial writes and is committed
+exactly once after the serial writer accepts the complete output item.
 
-Transport time is always derived from monotonic time and wrapped to uint32 milliseconds.
-The service loop normally runs about every 1 ms. Each iteration is bounded and performs
-output retry, serial receive, prefix-aware `receive_bytes`, `process(NORMAL)`, event and
-Application draining, zero-byte receive when released capacity may unblock retained
-work, a bounded second process pass, and another output pass. `process()` is called even
-when no serial bytes arrived.
+The runner explicitly counts `DELIVERY_CONFIRMED`. Every reliable submission records the
+current count, retries submission only for `NOT_READY` or `CAPACITY_EXHAUSTED`, services
+until the next delivery confirmation, and fails on delivery failure, protocol error,
+session reset, or timeout. Transport confirmation proves byte delivery only. Application
+acceptance is checked separately with STATUS or a decoded Test Result.
 
-Caller receive bytes live in a bounded `bytearray`. Only the prefix reported by
-`ReceiveResult.bytes_consumed` is deleted. The exact suffix is offered again later.
-Zero-byte `receive_bytes(b"")` calls are used after queue draining, output commits, and
-other state changes that may release native capacity.
+## Application codec and deterministic fixtures
 
-Output follows the public `peek_output`/`commit_output` contract. A peeked immutable item
-is retained across partial or zero-byte serial writes. `commit_output(now_ms)` is called
-exactly once only after pyserial has accepted every byte. The staged Python state is
-cleared in a `finally` path even if commit raises or reports a non-OK status, so bytes
-already accepted by the external writer cannot be recommitted or immediately resent by
-Python.
+The hardware-test `ApplicationCodec` is constructed with:
 
-## Serial selection and permissions
+```text
+max_encoded_message_size = 512
+max_variable_data_size = 255
+max_variable_transfers_per_tick = 8
+max_expected_tick_count = 1,000,000
+```
 
-Use an explicit `--port` or one or more USB identity fields: `--vid`, `--pid`, and
-`--serial-number`. An explicit port has priority. Identity selection must match exactly
-one discovered device; ambiguity is a hard error that lists the candidates. The harness
-never chooses the first serial device automatically.
+The representative Test Configuration covers every fixed configuration family, including
+CAN receive `filter_id` and `filter_mask`. CAN termination is not present. Additional
+fixtures cover an all-disabled canonical configuration and the maximum 255-byte extension.
+Expected encoded sizes are:
 
-USB CDC is opened nonblocking with `timeout=0` and `write_timeout=0`. The default API baud
-argument is 115200, but USB CDC baud is only a host serial API setting and does not define
-Transport timing.
+| Message | Bytes |
+| --- | ---: |
+| All-disabled Test Configuration | 226 |
+| Representative Test Configuration | 242 |
+| Maximum-extension Test Configuration | 481 |
+| Fixed Test Instruction | 73 |
+| Fixed Test Result | 62 |
 
-On Linux, the current user needs permission to open the device, commonly through the
-system's serial-device group or an appropriate udev rule. On Windows, use the enumerated
-COM port or a stable USB serial-number selector where available.
+Semantic digests use unsigned 32-bit FNV-1a over explicitly typed values in protocol wire
+widths and little-endian order. Test IDs are deliberately excluded. Configuration golden
+digests are `0x98E57BA3`, `0xDF35534C`, and `0x60672F03` for all-disabled,
+representative, and maximum-extension fixtures respectively. The three representative
+instruction digests produced by that same serialization contract are `0x80089EF8`,
+`0x8DE22BBE`, and `0x6AC9DD7A`.
 
-## Temporary HRTP envelope
+The deterministic result oracle requires matching Test ID/tick, copies digital outputs to
+digital inputs and PWM outputs to PWM inputs, supplies the fixed analogue capture values,
+and requires `condition=OK` with `problem_detail=0`. Disabled captured channels use their
+canonical zero values.
 
-This is test-only and is not the future production Application protocol.
+## HRTP and STATUS schema 2
 
-Header size is 16 bytes, little-endian:
+HRTP remains a test-only diagnostic envelope. Its 16-byte little-endian header is:
 
 | Offset | Size | Field |
 | --- | ---: | --- |
 | 0 | 4 | ASCII `HRTP` |
-| 4 | 1 | envelope version, currently `1` |
+| 4 | 1 | envelope version `1` |
 | 5 | 1 | opcode |
-| 6 | 2 | flags, currently zero |
+| 6 | 2 | flags, zero |
 | 8 | 4 | request ID |
 | 12 | 4 | payload length |
 | 16 | N | payload |
 
 Opcodes are `0x01` ECHO request, `0x81` ECHO response, `0x02` STATUS request, and `0x82`
-STATUS response. ECHO responses preserve the request ID and payload exactly. STATUS
-requests have no payload.
-
-STATUS schema version 1 is exactly 48 bytes and contains twelve consecutive
-little-endian `uint32` values, matching firmware PR #63:
+STATUS response. STATUS schema 2 is exactly 128 bytes: 32 consecutive little-endian
+`uint32_t` fields. The complete HRTP STATUS response is therefore 144 bytes.
 
 | Index | Field |
 | ---: | --- |
-| 0 | `schema_version` (`1`) |
-| 1 | `link_state` |
-| 2 | `link_generation` |
-| 3 | `transport_event_count` |
-| 4 | `usb_rx_bytes` |
-| 5 | `usb_tx_bytes` |
-| 6 | `application_requests_received` |
-| 7 | `responses_submitted` |
-| 8 | `usb_tx_busy_retries` |
-| 9 | `invalid_harness_messages` |
-| 10 | `maximum_service_gap_ms` |
-| 11 | `transport_session_state` |
+| 0 | schema version = 2 |
+| 1 | link state |
+| 2 | link generation |
+| 3 | Transport event count |
+| 4 | USB RX bytes |
+| 5 | USB TX bytes |
+| 6 | total Transport Application messages received |
+| 7 | responses/results submitted to Transport |
+| 8 | USB busy retries |
+| 9 | invalid HRTP messages |
+| 10 | maximum service gap milliseconds |
+| 11 | Transport session state |
+| 12 | compatibility profile ID = `0x41505031` |
+| 13 | protocol version major = 0 |
+| 14 | protocol version minor = 1 |
+| 15 | protocol version patch = 0 |
+| 16 | Application codec initialized |
+| 17 | Application initialization status |
+| 18 | non-HRTP Application messages received |
+| 19 | Application decode failures |
+| 20 | Application semantic rejections |
+| 21 | Application encode failures |
+| 22 | configurations accepted |
+| 23 | instructions accepted |
+| 24 | results encoded |
+| 25 | Application harness state |
+| 26 | next expected tick |
+| 27 | active expected tick count |
+| 28 | last Application status |
+| 29 | last successfully decoded Application message type |
+| 30 | current/last configuration digest |
+| 31 | last instruction digest |
 
-There are no Python-only reserved bytes and no operation-budget counter in the firmware
-STATUS v1 wire payload. The exact raw STATUS payload is retained as hex, together with
-its hash and size, even if typed decoding fails.
+The runner does not dual-decode STATUS v1. A schema/version/profile mismatch is an explicit
+compatibility failure.
 
-The maximum ECHO test payload is derived from the effective Transport maximum
-Application message size minus the 16-byte HRTP header. It is never hardcoded separately.
+## Message classification and transaction rules
 
-## CLI
+Incoming current-generation Transport Application messages are queued as raw bytes first.
+Messages beginning with `HRTP` are eligible only for HRTP response waits. Non-HRTP
+messages are eligible only for Application decoding. Waiting for one family does not
+silently discard the other. Unexpected families fail the scenario with trace evidence.
+Messages tagged with an old physical link generation are rejected as stale.
 
-The installed entry point is `hilrig-protocol-test`:
+Fixed Test Results are correlated by Test ID and tick, and duplicate `(Test ID, tick)`
+results fail the scenario. Only one outbound reliable Application payload is active at a
+time.
+
+Configuration acceptance is not inferred from delivery. After delivery, STATUS must show
+that `configurations_accepted` increased, the configuration digest matches, state is
+`ACCEPTING_INSTRUCTIONS`, next tick is zero, and expected tick count is correct. After an
+instruction is delivered, exactly one non-HRTP message must decode as `TestResult` and
+match the deterministic oracle. The final result must leave the firmware state `COMPLETE`.
+Cumulative counters are checked with baseline/delta assertions.
+
+## CLI scenarios
+
+Existing Transport-only commands remain available:
 
 ```sh
 hilrig-protocol-test smoke --port /dev/ttyACM0
-hilrig-protocol-test status --vid 0x1234 --pid 0x5678 --serial-number ABC123
-hilrig-protocol-test boundaries --port COM7
+hilrig-protocol-test status --port /dev/ttyACM0
+hilrig-protocol-test boundaries --port /dev/ttyACM0
 hilrig-protocol-test repeat --port /dev/ttyACM0 --count 1000
-hilrig-protocol-test reset-reconnect --vid 0x1234 --pid 0x5678 --serial-number ABC123 --cycles 3
-hilrig-protocol-test soak --port /dev/ttyACM0 --duration-seconds 3600 --count 10000
+hilrig-protocol-test reset-reconnect --port /dev/ttyACM0 --cycles 3
+hilrig-protocol-test soak --port /dev/ttyACM0 --duration-seconds 3600
 ```
 
-Common timing/evidence options include `--poll-ms`, `--request-timeout-ms`,
-`--reconnect-timeout-ms`, `--output-dir`, `--seed`, and `--log-level`.
-
-### Scenarios
-
-`smoke` waits for a session, queries STATUS, then ECHOs empty, ASCII, zero-containing,
-framing-relevant binary, deterministic pseudorandom, and maximum-size payloads.
-
-`boundaries` covers payload sizes 0, 1, 15, 16, a size near the COBS encoded-frame block
-boundary, maximum minus one, maximum, and verifies that maximum plus one is rejected
-locally without submitting it to Transport.
-
-`repeat` performs a requested number of deterministic one-at-a-time ECHOs and requires
-exactly one matching response for each.
-
-`reset-reconnect` completes an ECHO, asks the operator to reset the board, and requires an
-observed physical serial disconnect by default. If no disconnect is observed before the
-observation deadline, the scenario fails and does not claim that the MCU reset occurred.
-For systems where USB disconnect is known to be unobservable, the explicit
-`--allow-unobserved-reset` option permits a host-link close/reopen fallback. That mode
-still allocates a new link generation, re-establishes a Transport session, and completes
-the post-reconnect ECHO, but its result is classified as a host-link recycle with
-`mcu_reset_verified=false`. A USB path may change on re-enumeration, so serial-number or
-VID/PID selection is preferred.
-
-`soak` supports both elapsed-time and transfer-count limits, deterministic payloads,
-periodic STATUS requests, progress evidence, and immediate trace flushing. Long soak
-runs are never part of CI.
-
-## Deterministic serial faults
-
-Fault shaping is disabled by default and wraps the serial abstraction rather than
-changing pyserial itself. Available CLI controls include maximum read chunks, maximum
-accepted write chunks, selected zero writes, selected delayed reads/writes, selected
-accepted-but-dropped writes, selected duplicate writes, and selected single-byte write
-corruption. Operation numbers are deterministic and 1-based. Accepted-but-dropped writes
-return the accepted count so retry/recovery is exercised by Transport, not by immediate
-Python retransmission.
-
-Examples:
+Application commands are:
 
 ```sh
-hilrig-protocol-test repeat --port /dev/ttyACM0 --count 20 --fault-max-write 3
-hilrig-protocol-test repeat --port /dev/ttyACM0 --count 20 --fault-zero-write 2,5
-hilrig-protocol-test repeat --port /dev/ttyACM0 --count 20 --fault-drop-write 4
-hilrig-protocol-test repeat --port /dev/ttyACM0 --count 20 --fault-corrupt-write 3:1
+hilrig-protocol-test application-smoke --port /dev/ttyACM0
+hilrig-protocol-test application-boundaries --port /dev/ttyACM0
+hilrig-protocol-test application-negative --port /dev/ttyACM0
+hilrig-protocol-test application-repeat --port /dev/ttyACM0 --count 100
+hilrig-protocol-test application-reset-reconnect --port /dev/ttyACM0
 ```
+
+`application-smoke` checks STATUS compatibility, accepts the representative configuration,
+sends ticks 0 to 2, validates all three deterministic results, and requires final state
+`COMPLETE`.
+
+`application-boundaries` independently completes the all-disabled configuration and the
+maximum-extension configuration, checks exact wire sizes/results, and proves an oversized
+Application message is rejected locally by a public `ApplicationCodec` configured below
+the known fixture size.
+
+`application-negative` sends a valid Application message mutated into malformed wire
+bytes, proves the decode-failure counter increments without changing the invalid-HRTP
+counter, follows with a valid configuration, rejects a wrong-Test-ID instruction, and
+then completes the valid transaction.
+
+`application-repeat` runs the requested number of complete one-tick transactions with
+fresh 16-byte Test IDs and records result latency/counter evidence.
+
+`application-reset-reconnect` completes one instruction, uses the existing physical reset
+observation flow, requires the Application state to return to `WAITING_FOR_CONFIGURATION`,
+proves an old-test instruction is rejected, then starts and completes a new transaction.
+`--allow-unobserved-reset` retains the existing host-link fallback classification and does
+not claim an MCU reset was physically observed.
+
+All commands retain the existing serial selectors, timeout options, evidence directory,
+seed, logging, and deterministic fault-injection controls.
 
 ## Evidence
 
-Every run creates one `<run-id>.jsonl` trace and one `<run-id>.summary.json` in the output
-directory. Evidence includes expected compatibility revisions and separately observed
-Git revisions when available, Python working-tree dirty state, Python and OS versions,
-pyserial version, selected device identity, effective Transport configuration, link
-generations, request IDs, payload sizes and SHA-256 hashes, timestamps/latencies, public
-Transport events, serial and service counters, disconnect/reconnect actions, fault
-injection, maximum service gap, and the final pass/failure reason. Large payload contents
-are not logged by default. Routine idle 1 ms service iterations are not written to JSONL.
-Budget exhaustion and late service gaps are written immediately, and final diagnostics
-retain total service-loop, late-loop, maximum-gap, and budget-exhaustion counts. The
-JSONL writer flushes every record that is retained.
+Every run writes a JSONL trace plus a final summary. In addition to Transport and serial
+information, Application runs record scenario, Test ID as hex, encoded message type and
+size, SHA-256 payload hash, configuration/instruction semantic digest, decoded result tick
+and condition, delivery-confirmation latency, STATUS v2 snapshots, expected versus actual
+result details on failures, Application codec configuration, protocol version, and
+compatibility profile ID. Git commit/dirty information is recorded when observable and is
+explicitly unavailable otherwise.
 
-## Pytest
+## Pytest and physical hardware
 
-Physical tests are under `tests/hardware/` and carry the `hardware` marker. The project
-pytest configuration excludes this marker by default. Explicit hardware collection/run
-uses:
+Physical tests are under `tests/hardware/` and use the `hardware` marker. They skip unless
+`HILRIG_TEST_PORT` or explicit USB identity variables are supplied. Application smoke,
+boundary, negative, and repeat tests use the same opt-in. Set
+`HILRIG_TEST_APPLICATION_REPEAT_COUNT` to change the default repeat count of 10.
 
-```sh
-python -m pytest -m hardware --collect-only
-python -m pytest -m hardware tests/hardware
-```
+Manual reset tests remain separately opt-in with `HILRIG_TEST_MANUAL_RESET=1`. Long soak
+runs remain opt-in with `HILRIG_TEST_SOAK=1`. `HILRIG_TEST_ALLOW_UNOBSERVED_RESET=1` enables
+the host-link fallback for reset scenarios when deliberately required.
 
-Hardware tests require `HILRIG_TEST_PORT` or an unambiguous combination of
-`HILRIG_TEST_VID`, `HILRIG_TEST_PID`, and `HILRIG_TEST_SERIAL_NUMBER`. Reset tests also
-require explicit manual-reset opt-in, and soak tests require an explicit soak opt-in.
-The manual reset test is strict by default. Set
-`HILRIG_TEST_ALLOW_UNOBSERVED_RESET=1` only when deliberately testing the host-link
-fallback classification rather than verifying an observed MCU reset.
+The protocol integration suite also includes an in-memory serial bridge with a real public
+HOST Transport and a real public RIG Transport. Its simulated firmware transaction logic
+uses the public `ApplicationCodec`; it does not implement a second Application wire codec.
 
 ## Known USB CDC limitations
 
-- A reset may remove and recreate the device and may change its path.
-- Host serial APIs can report that bytes were accepted before the physical link later
-  loses them. The connection therefore commits based on external acceptance and relies on
-  Transport for retry/recovery.
-- OS scheduling can introduce service gaps above the nominal 1 ms poll period. The harness
-  records current/max gaps and late-loop counts rather than assuming real-time scheduling.
-- `write_timeout=0` can surface immediate write timeouts on some pyserial backends; these
-  are treated as link failures and trigger a controlled disconnect.
+- A reset may remove and recreate the serial device and may change its path.
+- Host serial APIs can accept bytes before the physical link later loses them, so Transport
+  remains responsible for delivery retry/recovery.
+- OS scheduling can exceed the nominal 1 ms service period; service-gap evidence is
+  retained rather than assuming real-time host scheduling.
+- A physical MCU reset cannot be claimed when only the optional host-link fallback was
+  observed.
 
 ## Troubleshooting
 
-**Protocol/CFFI build fails:** confirm Python 3.12+, CPython development headers, a C11
-compiler, CMake 3.17+, CFFI, and the protocol repository's build requirements are
-installed. Install the protocol package before this repository.
-
-**`hil_rig_protocol` cannot be imported:** run
-`python -m pip install -e external/hil-rig-protocol` in the same environment used by the
-CLI.
-
-**pyserial is missing:** run `python -m pip install -e ".[hardware-test]"` or the full
-`.[dev,hardware-test]` setup command.
-
-**Permission denied:** grant the current user serial-device access or apply the platform's
-normal serial permission/driver setup. Do not run a broad privileged process as a normal
-workaround.
-
-**Device disappears during reset:** select by USB serial number when available, or by an
-unambiguous VID/PID pair, and allow `--reconnect-timeout-ms` to cover re-enumeration.
-
-**Ambiguous selector:** the CLI reports all matching candidates. Add `--serial-number`, a
-more specific VID/PID pair, or an explicit `--port`; the harness will not guess.
+If the protocol native extension cannot be built, verify Python 3.12+, CMake 3.17+, a C11
+compiler, CPython development headers, CFFI, and the protocol repository build
+requirements. If pyserial is missing, install `.[hardware-test]`. For serial permission or
+selection failures, use the platform's normal serial-device permissions and an explicit
+port or unambiguous VID/PID/serial-number selector.

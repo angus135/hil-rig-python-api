@@ -1,12 +1,9 @@
 {
-  "python_api_branch": "test/DEV-138--protocol-test",
-  "python_api_branch_point_commit": "1cd530dc1352c3b2a449eb8f0ab02684370c614b",
-  "python_review_zip_git_head": "ef26c04f425f3617075591d4ba4a4ce5d4b63a4f",
-  "python_runtime_revision_evidence": "Trace source_evidence records the observed Git commit and dirty state when Git metadata is available.",
   "protocol_submodule_path": "external/hil-rig-protocol",
-  "protocol_submodule_commit": "a24fccc403007cbf6268ff7d0d21f50566a6b2de",
-  "firmware_branch": "test/DEV-138--protocol-test",
-  "firmware_commit": "c6c0af2af586108949c30fb4a12df54eb9dd2fda",
+  "compatibility_authority": "Runtime STATUS compatibility profile/version and the protocol files supplied with the checkout or ZIP are authoritative. Git revisions are evidence only when observable.",
+  "protocol_version": "0.1.0",
+  "compatibility_profile_id": "0x41505031",
+  "observed_revision_evidence": "Trace source_evidence records Python/protocol Git commit and dirty state when Git metadata is available, otherwise records them as unavailable.",
   "python_versions": [
     "3.12",
     "3.13"
@@ -26,9 +23,23 @@
     "retransmit_timeout_ms": 100,
     "max_retries": 5
   },
+  "application_codec_configuration": {
+    "max_encoded_message_size": 512,
+    "max_variable_data_size": 255,
+    "max_variable_transfers_per_tick": 8,
+    "max_expected_tick_count": 1000000
+  },
+  "application_fixed_encoded_sizes": {
+    "all_disabled_configuration": 226,
+    "representative_configuration": 242,
+    "maximum_extension_configuration": 481,
+    "instruction": 73,
+    "result": 62
+  },
   "test_envelope_version": 1,
-  "status_schema_version": 1,
-  "status_payload_size_bytes": 48,
+  "status_schema_version": 2,
+  "status_payload_size_bytes": 128,
+  "status_response_size_bytes": 144,
   "expected_usb_identity": {
     "port": "runtime-selected",
     "vid": "project hardware value or explicit selector",

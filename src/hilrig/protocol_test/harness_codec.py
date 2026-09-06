@@ -11,7 +11,7 @@ from .models import ENVELOPE_VERSION, UINT32_MASK
 MAGIC = b"HRTP"
 HEADER = struct.Struct("<4sBBHII")
 HEADER_SIZE = HEADER.size
-STATUS_V1 = struct.Struct("<12I")
+STATUS_V2 = struct.Struct("<32I")
 SUPPORTED_FLAGS = 0
 
 
@@ -35,20 +35,49 @@ class HarnessMessage:
     payload: bytes
 
 
+class ApplicationHarnessState(IntEnum):
+    """Stable STATUS v2 state values shared with the MCU hardware harness."""
+
+    UNINITIALIZED = 0
+    WAITING_FOR_CONFIGURATION = 1
+    ACCEPTING_INSTRUCTIONS = 2
+    COMPLETE = 3
+
+
 @dataclass(frozen=True, slots=True)
-class StatusPayloadV1:
+class StatusPayloadV2:
     schema_version: int
     link_state: int
     link_generation: int
     transport_event_count: int
     usb_rx_bytes: int
     usb_tx_bytes: int
-    application_requests_received: int
-    responses_submitted: int
+    application_messages_received: int
+    responses_results_submitted: int
     usb_tx_busy_retries: int
-    invalid_harness_messages: int
+    invalid_hrtp_messages: int
     maximum_service_gap_ms: int
     transport_session_state: int
+    compatibility_profile_id: int
+    protocol_version_major: int
+    protocol_version_minor: int
+    protocol_version_patch: int
+    application_codec_initialized: int
+    application_initialization_status: int
+    non_hrtp_application_messages_received: int
+    application_decode_failures: int
+    application_semantic_rejections: int
+    application_encode_failures: int
+    configurations_accepted: int
+    instructions_accepted: int
+    results_encoded: int
+    application_harness_state: int
+    next_expected_tick: int
+    active_expected_tick_count: int
+    last_application_status: int
+    last_decoded_application_message_type: int
+    configuration_digest: int
+    last_instruction_digest: int
 
 
 class RequestIdAllocator:
@@ -155,13 +184,13 @@ def encode_status_request(request_id: int, *, max_application_message_size: int)
     )
 
 
-def decode_status_payload(payload: bytes) -> StatusPayloadV1:
-    if len(payload) != STATUS_V1.size:
+def decode_status_payload(payload: bytes) -> StatusPayloadV2:
+    if len(payload) != STATUS_V2.size:
         raise HarnessCodecError(
-            f"STATUS v1 payload must be {STATUS_V1.size} bytes, received {len(payload)}"
+            f"STATUS v2 payload must be {STATUS_V2.size} bytes, received {len(payload)}"
         )
-    values = STATUS_V1.unpack(payload)
+    values = STATUS_V2.unpack(payload)
     version = values[0]
-    if version != 1:
+    if version != 2:
         raise HarnessCodecError(f"unsupported STATUS schema version {version}")
-    return StatusPayloadV1(*values)
+    return StatusPayloadV2(*values)

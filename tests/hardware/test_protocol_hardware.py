@@ -41,3 +41,35 @@ def test_hardware_soak(hardware_runner) -> None:
     duration = float(os.getenv("HILRIG_TEST_SOAK_SECONDS", "3600"))
     count = int(os.getenv("HILRIG_TEST_SOAK_COUNT", "10000"))
     runner.run_soak(duration_seconds=duration, count=count)
+
+
+def test_hardware_application_smoke(hardware_runner) -> None:
+    runner, _ = hardware_runner
+    runner.run_application_smoke()
+
+
+def test_hardware_application_boundaries(hardware_runner) -> None:
+    runner, _ = hardware_runner
+    runner.run_application_boundaries()
+
+
+def test_hardware_application_negative(hardware_runner) -> None:
+    runner, _ = hardware_runner
+    runner.run_application_negative()
+
+
+def test_hardware_application_repeat(hardware_runner) -> None:
+    runner, _ = hardware_runner
+    count = int(os.getenv("HILRIG_TEST_APPLICATION_REPEAT_COUNT", "10"))
+    runner.run_application_repeat(count)
+
+
+def test_hardware_application_reset_reconnect(hardware_runner) -> None:
+    if os.getenv("HILRIG_TEST_MANUAL_RESET") != "1":
+        pytest.skip("set HILRIG_TEST_MANUAL_RESET=1 for the manual reset test")
+    runner, _ = hardware_runner
+    allow_unobserved_reset = os.getenv("HILRIG_TEST_ALLOW_UNOBSERVED_RESET") == "1"
+    runner.run_application_reset_reconnect(
+        prompt=lambda message: input(f"{message}: "),
+        allow_unobserved_reset=allow_unobserved_reset,
+    )

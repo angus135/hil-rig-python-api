@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from hilrig.protocol_test.models import PROTOCOL_COMMIT
 from hilrig.protocol_test.trace import (
     CompatibilityError,
     TraceWriter,
+    collect_source_evidence,
     inspect_git_source,
     validate_protocol_compatibility,
 )
@@ -44,19 +45,38 @@ def test_git_source_metadata_has_explicit_unavailable_fallback(
     assert metadata.dirty is None
 
 
-def test_protocol_revision_mismatch_is_rejected_before_trace_creation(tmp_path: Path) -> None:
-    evidence = {
-        "protocol_expected_commit": PROTOCOL_COMMIT,
-        "protocol_observed_commit": "deadbeef",
-    }
-    with pytest.raises(CompatibilityError, match="revision mismatch"):
+def test_protocol_version_declared_by_supplied_files_is_compatibility_gate(tmp_path: Path) -> None:
+    evidence = {"protocol_declared_version": "9.9.9", "protocol_observed_commit": "anything"}
+    with pytest.raises(CompatibilityError, match="VERSION mismatch"):
         TraceWriter(tmp_path, "unit", seed=1, source_evidence=evidence)
     assert not list(tmp_path.glob("*.jsonl"))
 
 
-def test_unavailable_protocol_revision_does_not_claim_observed_commit() -> None:
-    evidence = {
-        "protocol_expected_commit": PROTOCOL_COMMIT,
-        "protocol_observed_commit": None,
-    }
-    validate_protocol_compatibility(evidence)
+def test_observed_protocol_commit_is_evidence_not_a_gate() -> None:
+    validate_protocol_compatibility(
+        {"protocol_declared_version": "0.1.0", "protocol_observed_commit": "deadbeef"}
+    )
+
+
+def test_zip_without_git_metadata_records_protocol_version_from_files(tmp_path: Path) -> None:
+    protocol = tmp_path / "external" / "hil-rig-protocol"
+    protocol.mkdir(parents=True)
+    (protocol / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    evidence = collect_source_evidence(tmp_path)
+    assert evidence["protocol_declared_version"] == "0.1.0"
+    assert evidence["protocol_git_metadata_available"] is False
+    assert evidence["protocol_observed_commit"] is None
+
+
+def test_trace_summary_contains_application_compatibility_metadata(tmp_path: Path) -> None:
+    trace = TraceWriter(
+        tmp_path,
+        "unit",
+        seed=1,
+        source_evidence={"protocol_declared_version": "0.1.0"},
+    )
+    trace.finish(passed=True, failure_reason=None, diagnostics={})
+    summary = json.loads(trace.summary_path.read_text(encoding="utf-8"))
+    assert summary["protocol_version"] == [0, 1, 0]
+    assert summary["compatibility_profile_id"] == 0x41505031
+    assert summary["application_codec_config"]["max_encoded_message_size"] == 512
