@@ -72,6 +72,41 @@ def test_channel_argument_is_explicitly_keyword_only() -> None:
     assert test.digital_output(channel=0).channel == 0
 
 
+@pytest.mark.parametrize(
+    ("accessor", "last_valid_channel"),
+    [
+        ("digital_input", 9),
+        ("digital_output", 9),
+        ("pwm_input", 1),
+        ("pwm_output", 1),
+        ("analogue_input", 1),
+        ("analogue_output", 5),
+        ("i2c", 1),
+        ("spi", 1),
+        ("uart", 1),
+    ],
+)
+def test_channel_accessors_enforce_physical_ranges(
+    accessor: str,
+    last_valid_channel: int,
+) -> None:
+    test = HilRigTest(name="Physical channel ranges")
+    channel_factory = getattr(test, accessor)
+
+    assert channel_factory(channel=last_valid_channel).channel == last_valid_channel
+    with pytest.raises(ValueError, match=rf"0.*{last_valid_channel}"):
+        channel_factory(channel=last_valid_channel + 1)
+
+
+@pytest.mark.parametrize("channel", [-1, True, 1.5, "0"])
+def test_channel_accessors_reject_invalid_index_values(channel: object) -> None:
+    test = HilRigTest(name="Invalid channel index")
+
+    expected_error = ValueError if channel == -1 else TypeError
+    with pytest.raises(expected_error):
+        test.digital_input(channel=channel)  # type: ignore[arg-type]
+
+
 def test_handles_are_reused_and_share_channel_identity() -> None:
     test = HilRigTest(name="Stable handles")
 

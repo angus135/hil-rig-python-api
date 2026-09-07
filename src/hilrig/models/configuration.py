@@ -9,7 +9,7 @@ from types import MappingProxyType
 from typing import TypeAlias
 
 from hilrig.exceptions import ConfigurationError
-from hilrig.models.channels import Channel
+from hilrig.models.channels import Channel, validate_channel_index
 
 
 class FrequencyMode(Enum):
@@ -280,6 +280,9 @@ class Configuration:
         channel: Channel,
         configuration: PeripheralConfiguration,
     ) -> None:
+        if not isinstance(channel, Channel):
+            raise TypeError("channel must be a Channel")
+        validate_channel_index(channel.kind, channel.index)
         if channel in self._channel_configurations:
             raise ConfigurationError(
                 f"{channel.kind.value} channel {channel.index} is already configured"

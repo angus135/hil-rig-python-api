@@ -25,6 +25,7 @@ from hilrig.models.assertions import (
     PwmInputWaveformNearAssertion,
     RangeAssertion,
 )
+from hilrig.models.channels import Channel, validate_channel_index
 from hilrig.models.configuration import Configuration
 from hilrig.models.execution import (
     CompiledAssertion,
@@ -95,6 +96,7 @@ def compile_test(
     assertions: AssertionList,
 ) -> CompiledTestIR:
     """Validate and copy a test definition into an immutable intermediate form."""
+    _validate_configuration_channels(configuration)
     _validate_instructions(instructions)
     _validate_assertions(assertions)
 
@@ -246,6 +248,7 @@ def _validate_instructions(instructions: InstructionList) -> None:
     for expected_id, instruction in enumerate(instructions):
         if instruction.instruction_id != expected_id:
             raise ValidationError("Instruction IDs must be sequential from zero")
+        _validate_model_channel(instruction.channel, label="Instruction")
         _validate_tick(instruction.timestamp, label="Instruction timestamp")
 
 
@@ -253,6 +256,7 @@ def _validate_assertions(assertions: AssertionList) -> None:
     for expected_id, assertion in enumerate(assertions):
         if assertion.assertion_id != expected_id:
             raise ValidationError("Assertion IDs must be sequential from zero")
+        _validate_model_channel(assertion.channel, label="Assertion")
         if type(assertion) not in _ASSERTION_OPERATIONS:
             raise ValidationError(f"Unsupported assertion type: {type(assertion).__name__}")
         if isinstance(assertion, PointAssertion):
@@ -264,6 +268,20 @@ def _validate_assertions(assertions: AssertionList) -> None:
                 raise TimingError("Assertion start tick must not be after its end tick")
         else:
             raise ValidationError(f"Unsupported assertion type: {type(assertion).__name__}")
+
+
+def _validate_configuration_channels(configuration: Configuration) -> None:
+    for channel in configuration.channel_configurations:
+        _validate_model_channel(channel, label="Configuration")
+
+
+def _validate_model_channel(channel: object, *, label: str) -> None:
+    if not isinstance(channel, Channel):
+        raise ValidationError(f"{label} channel must be a Channel")
+    try:
+        validate_channel_index(channel.kind, channel.index)
+    except (TypeError, ValueError) as error:
+        raise ValidationError(f"{label} uses an invalid channel: {error}") from error
 
 
 def _validate_tick(tick: object, *, label: str) -> None:

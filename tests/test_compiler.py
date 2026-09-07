@@ -1,6 +1,6 @@
 import pytest
 
-from hilrig import FrequencyMode, FrozenTestError, StartMode
+from hilrig import FrequencyMode, FrozenTestError, StartMode, ValidationError
 from hilrig import Test as HilRigTest
 from hilrig.models.instructions import DigitalOutputAction
 
@@ -97,3 +97,17 @@ def test_successful_preliminary_compilation_freezes_all_model_changes() -> None:
 
     with pytest.raises(FrozenTestError):
         test.digital_output(channel=1)
+
+
+def test_compiler_rejects_a_corrupted_out_of_range_channel() -> None:
+    test = HilRigTest(name="Malformed internal channel")
+    output = test.digital_output(channel=9)
+    output.high(at_tick=0)
+
+    object.__setattr__(output.identity, "index", 10)
+
+    with pytest.raises(
+        ValidationError,
+        match="Instruction uses an invalid channel: digital_output channel must be between 0 and 9",
+    ):
+        test.compile()

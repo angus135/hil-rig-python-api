@@ -29,7 +29,7 @@ from hilrig.models.assertions import (
     PwmInputPeriodNearAssertion,
     PwmInputWaveformNearAssertion,
 )
-from hilrig.models.channels import Channel, ChannelKind
+from hilrig.models.channels import Channel, ChannelKind, validate_channel_index
 from hilrig.models.configuration import (
     AnalogueInputConfiguration,
     AnalogueOutputConfiguration,
@@ -1236,15 +1236,10 @@ class Test:
 
     def pwm_output(self, *, channel: int) -> PwmOutput:
         """Return one of the two PWM output handles."""
-        if channel not in (0, 1):
-            raise ValueError("PWM output channel must be 0 (LV) or 1 (HV)")
         return self._handle(ChannelKind.PWM_OUTPUT, channel, PwmOutput)
 
     def analogue_input(self, *, channel: int) -> AnalogueInput:
         """Return one of the two analogue input handles."""
-        _channel_index(channel)
-        if channel not in (0, 1):
-            raise ValueError("Analogue input channel must be 0 or 1")
         return self._handle(ChannelKind.ANALOGUE_INPUT, channel, AnalogueInput)
 
     def analogue_output(self, *, channel: int) -> AnalogueOutput:
@@ -1308,7 +1303,7 @@ class Test:
         channel: int,
         handle_type: type[_ChannelHandle],
     ):
-        _channel_index(channel)
+        validate_channel_index(kind, channel)
         key = (kind, channel)
         if key not in self._handles:
             self._ensure_mutable()
@@ -1371,14 +1366,6 @@ class Test:
 def _require_enum(value: object, enum_type: type[object], *, name: str) -> None:
     if not isinstance(value, enum_type):
         raise TypeError(f"{name} must be a {enum_type.__name__}")
-
-
-def _channel_index(channel: int) -> int:
-    if not isinstance(channel, int) or isinstance(channel, bool):
-        raise TypeError("channel must be an integer")
-    if channel < 0:
-        raise ValueError("channel must be non-negative")
-    return channel
 
 
 def _number(value: int | float, *, name: str) -> float:

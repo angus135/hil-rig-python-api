@@ -122,6 +122,11 @@ expectation.to_transition(
 There is no per-channel recording or measurement-enable configuration. The model
 assumes the rig records all channels.
 
+Channel indices are checked against the physical protocol layout: digital inputs and
+outputs use `0..9`, analogue outputs use `0..5`, and analogue inputs, PWM inputs and
+outputs, I2C, SPI, and UART use `0..1`. Invalid indices are rejected when a handle is
+requested and checked again during compilation.
+
 Analogue channels have nothing electrical to configure, but they are declared explicitly
 so they appear in the internal model and compiled IR:
 
