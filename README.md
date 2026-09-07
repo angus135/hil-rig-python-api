@@ -12,7 +12,7 @@ translate the unfinished application-message interface.
 
 ## Requirements
 
-- Python 3.10 or newer
+- Python 3.12 or newer
 - Git
 
 ## Set up a development environment
@@ -430,8 +430,8 @@ See [docs/architecture.md](docs/architecture.md) for the current model boundarie
 ## Continuous integration
 
 GitHub Actions runs automatically for every pull request and pushes to `main`. It runs
-unit tests on Python 3.10 through 3.13 and separately checks linting, formatting, and
-package building.
+unit tests on supported Python versions starting with Python 3.12 and separately checks
+linting, formatting, and package building.
 
 ## Contributing
 
