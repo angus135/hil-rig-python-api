@@ -114,7 +114,7 @@ expectation.to_transition(
 - Digital output logic voltage and initial state
 - PWM input logic voltage
 - PWM output voltage, initial frequency, initial duty cycle, and initial enable state
-- Analogue input and output usage declarations with no hardware parameters
+- Analogue input usage declarations and analogue output initial voltage
 - I2C role, speed, logic voltage, pull-up value, and slave address
 - SPI role, supported baud rate, frame size, mode, and bit order
 - UART electrical mode, baud rate, parity, word length, and stop bits
@@ -127,18 +127,21 @@ outputs use `0..9`, analogue outputs use `0..5`, and analogue inputs, PWM inputs
 outputs, I2C, SPI, and UART use `0..1`. Invalid indices are rejected when a handle is
 requested and checked again during compilation.
 
-Analogue channels have nothing electrical to configure, but they are declared explicitly
-so they appear in the internal model and compiled IR:
+Analogue channels are declared explicitly so they appear in the internal model and
+compiled IR. Analogue outputs also accept an initial voltage in volts, which defaults
+to `0.0`:
 
 ```python
 analogue_input = test.analogue_input(channel=0).configure()
-analogue_output = test.analogue_output(channel=0).configure()
+analogue_output = test.analogue_output(channel=0).configure(initial_voltage=1.25)
 
 analogue_output.set_voltage(3.3, at_ms=100)
 ```
 
-Their compiled configuration has an empty `parameters` object. An analogue output must
-be configured before voltage stimuli can be scheduled.
+An analogue input's compiled configuration has an empty `parameters` object. An analogue
+output's compiled parameters include `initial_voltage`, and it must be configured before
+voltage stimuli can be scheduled. Initial and scheduled analogue output voltages must be
+finite and within the inclusive hardware range of `0.0` to `20.0` V.
 
 ## Implemented stimuli
 

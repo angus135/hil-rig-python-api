@@ -79,6 +79,28 @@ def test_analogue_output_stimulus_stores_voltage() -> None:
     assert instruction.voltage == 18.4
 
 
+def test_analogue_output_stimulus_accepts_maximum_voltage() -> None:
+    test = HilRigTest(name="Maximum analogue action")
+    analogue_output = test.analogue_output(channel=1).configure()
+
+    analogue_output.set_voltage(20, at_tick=0)
+
+    instruction = tuple(test.instructions)[0]
+    assert isinstance(instruction, AnalogueOutputInstruction)
+    assert instruction.voltage == 20.0
+
+
+@pytest.mark.parametrize("voltage", [-0.1, 20.000001])
+def test_analogue_output_stimulus_rejects_voltage_outside_supported_range(
+    voltage: float,
+) -> None:
+    test = HilRigTest(name="Invalid analogue action")
+    analogue_output = test.analogue_output(channel=0).configure()
+
+    with pytest.raises(ValueError, match="between 0 and 20 V"):
+        analogue_output.set_voltage(voltage, at_tick=0)
+
+
 def test_analogue_output_stimulus_requires_configuration() -> None:
     test = HilRigTest(name="Unconfigured analogue output")
 

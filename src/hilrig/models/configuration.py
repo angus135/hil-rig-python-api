@@ -185,7 +185,9 @@ class AnalogueInputConfiguration:
 
 @dataclass(frozen=True, slots=True)
 class AnalogueOutputConfiguration:
-    """Marker declaring that an analogue output channel is used by the test."""
+    """Static configuration for an analogue output channel."""
+
+    initial_voltage: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

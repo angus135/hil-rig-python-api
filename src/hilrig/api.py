@@ -79,6 +79,7 @@ from hilrig.timing import TimeRange, TimeValue, resolve_time_range, resolve_time
 
 InstructionType = TypeVar("InstructionType", bound=Instruction)
 AssertionType = TypeVar("AssertionType", bound=Assertion)
+_MAX_ANALOGUE_OUTPUT_VOLTAGE = 20.0
 
 
 class _ChannelHandle:
@@ -340,9 +341,13 @@ class AnalogueInput(_ChannelHandle):
 class AnalogueOutput(_ChannelHandle):
     """A reusable handle for one analogue output channel."""
 
-    def configure(self) -> AnalogueOutput:
-        """Declare that this analogue output is part of the test."""
-        self._test._configure_channel(self._identity, AnalogueOutputConfiguration())
+    def configure(self, *, initial_voltage: int | float = 0.0) -> AnalogueOutput:
+        """Configure the analogue output's initial voltage in volts."""
+        voltage = _analogue_output_voltage(initial_voltage, name="initial_voltage")
+        self._test._configure_channel(
+            self._identity,
+            AnalogueOutputConfiguration(initial_voltage=voltage),
+        )
         return self
 
     def set_voltage(
@@ -359,7 +364,7 @@ class AnalogueOutput(_ChannelHandle):
             raise ConfigurationError(
                 f"analogue_output channel {self.channel} must be configured before adding stimuli"
             )
-        requested_voltage = _non_negative_number(voltage, name="voltage")
+        requested_voltage = _analogue_output_voltage(voltage, name="voltage")
         timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
         self._test._schedule(
             lambda instruction_id: AnalogueOutputInstruction(
@@ -1388,6 +1393,13 @@ def _positive_number(value: int | float, *, name: str) -> float:
     converted = _number(value, name=name)
     if converted <= 0:
         raise ValueError(f"{name} must be greater than zero")
+    return converted
+
+
+def _analogue_output_voltage(value: int | float, *, name: str) -> float:
+    converted = _number(value, name=name)
+    if not 0.0 <= converted <= _MAX_ANALOGUE_OUTPUT_VOLTAGE:
+        raise ValueError(f"{name} must be between 0 and 20 V")
     return converted
 
 

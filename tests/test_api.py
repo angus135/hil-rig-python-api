@@ -248,7 +248,7 @@ def test_full_analogue_output_name_is_exposed() -> None:
     assert not hasattr(test, "analogue_out")
 
 
-def test_analogue_channels_use_no_argument_configuration_markers() -> None:
+def test_analogue_input_and_default_analogue_output_configuration() -> None:
     test = HilRigTest(name="Analogue declarations")
     analogue_input = test.analogue_input(channel=0)
     analogue_output = test.analogue_output(channel=1)
@@ -256,7 +256,40 @@ def test_analogue_channels_use_no_argument_configuration_markers() -> None:
     assert analogue_input.configure() is analogue_input
     assert analogue_output.configure() is analogue_output
     assert test.configuration.for_channel(analogue_input.identity) == AnalogueInputConfiguration()
-    assert test.configuration.for_channel(analogue_output.identity) == AnalogueOutputConfiguration()
+    assert test.configuration.for_channel(analogue_output.identity) == AnalogueOutputConfiguration(
+        initial_voltage=0.0
+    )
+
+
+def test_analogue_output_configuration_stores_initial_voltage() -> None:
+    test = HilRigTest(name="Initial analogue voltage")
+    analogue_output = test.analogue_output(channel=2)
+
+    analogue_output.configure(initial_voltage=20)
+
+    assert test.configuration.for_channel(analogue_output.identity) == AnalogueOutputConfiguration(
+        initial_voltage=20.0
+    )
+
+
+@pytest.mark.parametrize(
+    "initial_voltage",
+    [-0.1, 20.000001, float("inf"), float("nan")],
+)
+def test_analogue_output_configuration_rejects_invalid_initial_voltage(
+    initial_voltage: float,
+) -> None:
+    test = HilRigTest(name="Invalid initial analogue voltage")
+
+    with pytest.raises(ValueError):
+        test.analogue_output(channel=0).configure(initial_voltage=initial_voltage)
+
+
+def test_analogue_output_configuration_rejects_non_numeric_initial_voltage() -> None:
+    test = HilRigTest(name="Non-numeric initial analogue voltage")
+
+    with pytest.raises(TypeError, match="initial_voltage must be a number"):
+        test.analogue_output(channel=0).configure(initial_voltage="3.3")  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("name", ["", "   ", None])
