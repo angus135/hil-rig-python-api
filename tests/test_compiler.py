@@ -83,6 +83,28 @@ def test_expected_tick_count_uses_latest_stimulus_when_it_is_later() -> None:
     assert plan.expected_tick_count == 181
 
 
+def test_expected_tick_count_immediately_below_protocol_limit_is_accepted() -> None:
+    test = HilRigTest(name="Maximum protocol-compatible duration")
+    test.configure(frequency_mode=FrequencyMode.HZ_100, start_mode=StartMode.IMMEDIATE)
+    test.digital_output(channel=0).high(at_tick=999_898)
+
+    plan = test.compile()
+
+    assert plan.expected_tick_count == 999_999
+
+
+def test_expected_tick_count_at_protocol_limit_is_rejected() -> None:
+    test = HilRigTest(name="Protocol-incompatible duration")
+    test.configure(frequency_mode=FrequencyMode.HZ_100, start_mode=StartMode.IMMEDIATE)
+    test.digital_output(channel=0).high(at_tick=999_899)
+
+    with pytest.raises(
+        ValidationError,
+        match="Expected tick count must be less than 1000000",
+    ):
+        test.compile()
+
+
 def test_successful_preliminary_compilation_freezes_all_model_changes() -> None:
     test = HilRigTest(name="Frozen test")
     output = test.digital_output(channel=0)

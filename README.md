@@ -376,7 +376,9 @@ max(latest stimulus tick, latest assertion tick/range end, 0)
 For example, a final event at tick 750 in 1 kHz mode produces 1,751 expected application
 results, covering ticks `0..1750`. An observation-only test in that mode produces 1,001
 results covering ticks `0..1000`. This keeps the RIG capturing long enough for host-side
-assertions even though their definitions are not transmitted.
+assertions even though their definitions are not transmitted. Compilation rejects an
+expected tick count of 1,000,000 or greater so the complete test remains within the
+protocol-compatible limit.
 
 The Excel workbook contains four sheets:
 

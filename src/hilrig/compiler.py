@@ -85,6 +85,7 @@ _ASSERTION_OPERATIONS: dict[type[Assertion], str] = {
 }
 
 _POST_TEST_SETTLING_SECONDS = 1
+_MAX_EXPECTED_TICK_COUNT_EXCLUSIVE = 1_000_000
 
 
 def compile_test(
@@ -122,6 +123,10 @@ def compile_test(
         assertions=assertions,
         frequency_hz=configuration.frequency_mode.hertz,
     )
+    if expected_tick_count >= _MAX_EXPECTED_TICK_COUNT_EXCLUSIVE:
+        raise ValidationError(
+            "Expected tick count must be less than 1000000 for protocol compatibility"
+        )
 
     return CompiledTestIR(
         test_id=test_id,
