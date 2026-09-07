@@ -7,6 +7,7 @@ from pathlib import Path
 
 import hil_rig_protocol as protocol
 import pytest
+from firmware_results import firmware_result
 from hil_rig_protocol import (
     EventType,
     Failure,
@@ -25,11 +26,9 @@ from hilrig.protocol_test.application_hardware import (
     PROTOCOL_VERSION,
     REPRESENTATIVE_CONFIGURATION_DIGEST,
     configuration_semantic_digest,
-    expected_result,
     instruction_semantic_digest,
     make_application_codec,
     representative_configuration,
-    representative_instructions,
 )
 from hilrig.protocol_test.connection import LinkDisconnectedError, hardware_test_transport_config
 from hilrig.protocol_test.harness_codec import (
@@ -271,7 +270,7 @@ class ApplicationFirmwareConnection:
                 return
             self.instructions_accepted += 1
             self.last_instruction_digest = instruction_semantic_digest(message)
-            result = expected_result(self.active_configuration, message)
+            result = firmware_result(self.active_configuration, message)
             try:
                 encoded = self.codec.encode(result)
             except protocol.ApplicationEncodeError:
@@ -438,7 +437,9 @@ def test_application_reset_reconnect_clears_old_transaction_and_completes_new_on
 
     result = runner.run_application_reset_reconnect(prompt=prompt)
     assert result["physical_disconnect_observed"] is True
-    assert result["mcu_reset_verified"] is True
+    assert "mcu_reset_verified" not in result
+    assert result["new_transport_session_established"] is True
+    assert result["post_reconnect_transaction_succeeded"] is True
     assert result["old_test_id_hex"] != result["new_test_id_hex"]
     assert result["final_status"].application_harness_state == int(ApplicationHarnessState.COMPLETE)
     close(runner, trace, connection)
@@ -450,8 +451,7 @@ def test_application_trace_contains_message_result_delivery_and_status_evidence(
     runner, connection, trace = make_runner(tmp_path)
     runner.run_application_smoke()
     records = [
-        json.loads(line)
-        for line in trace.trace_path.read_text(encoding="utf-8").splitlines()
+        json.loads(line) for line in trace.trace_path.read_text(encoding="utf-8").splitlines()
     ]
     kinds = {record["kind"] for record in records}
     assert "application_message_encoded" in kinds
@@ -492,8 +492,7 @@ def test_stale_application_payload_is_rejected_before_raw_delivery(tmp_path: Pat
     assert received.link_generation == generation
     assert received.data == application_wire
     records = [
-        json.loads(line)
-        for line in trace.trace_path.read_text(encoding="utf-8").splitlines()
+        json.loads(line) for line in trace.trace_path.read_text(encoding="utf-8").splitlines()
     ]
     assert any(record["kind"] == "stale_application_message" for record in records)
     close(runner, trace, connection)
@@ -517,3 +516,20 @@ def test_application_summary_contains_compatibility_and_semantic_evidence(tmp_pa
     assert summary["result"]["test_id_hex"]
     assert summary["result"]["configuration_digest"] == REPRESENTATIVE_CONFIGURATION_DIGEST
     assert summary["result"]["instruction_digests"] == list(INSTRUCTION_DIGESTS)
+
+
+def test_firmware_response_detects_production_oracle_regression(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, connection, trace = make_runner(tmp_path)
+    monkeypatch.setattr(
+        "hilrig.protocol_test.runner.expected_result",
+        lambda configuration, instruction: protocol.TestResult(
+            test_id=instruction.test_id, tick_number=instruction.tick_number
+        ),
+    )
+    try:
+        with pytest.raises(ScenarioFailure, match="did not match deterministic oracle"):
+            runner.run_application_smoke()
+    finally:
+        close(runner, trace, connection)

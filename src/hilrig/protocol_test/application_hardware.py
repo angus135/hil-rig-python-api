@@ -32,8 +32,6 @@ INSTRUCTION_DIGESTS = (0x80089EF8, 0x8DE22BBE, 0x6AC9DD7A)
 REPRESENTATIVE_EXTENSION = bytes.fromhex("00 01 7E 7F 80 FE FF 48 52 54 50 00 A5 5A C3 3C")
 MAX_EXTENSION = bytes((index * 37) & 0xFF for index in range(255))
 
-_ANALOG_INPUT_0 = 4_813_713
-_ANALOG_INPUT_1 = (2_756_764, 8_777_843, 5_704_255)
 _FNV_OFFSET = 2_166_136_261
 _FNV_PRIME = 16_777_619
 _UINT32_MASK = 0xFFFF_FFFF
@@ -237,7 +235,10 @@ def expected_result(
         )
         for index, item in enumerate(configuration.digital_in)
     )
-    analog_values = (_ANALOG_INPUT_0, _ANALOG_INPUT_1[tick] if tick < len(_ANALOG_INPUT_1) else 0)
+    analog_values = (
+        configuration_semantic_digest(configuration) % 20_000_001,
+        instruction_semantic_digest(instruction) % 20_000_001,
+    )
     analog_inputs = tuple(
         protocol.AnalogInputValue(analog_values[index] if item.enabled else 0)
         for index, item in enumerate(configuration.analog_in)

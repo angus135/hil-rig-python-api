@@ -16,7 +16,9 @@ that its Application codec failed to initialize.
 
 Git commits are evidence, not compatibility gates. A ZIP may contain no `.git` metadata.
 When Git metadata is observable, JSONL evidence records the Python and protocol commits
-and dirty state. Otherwise those fields are recorded as unavailable. Stale hard-coded
+and dirty state only when `git rev-parse --show-toplevel` resolves to the requested
+repository root. Nested ordinary directories and protocol directories without independent
+Git metadata report revision evidence as unavailable. Stale hard-coded
 firmware or submodule commit hashes are not used to accept or reject a run.
 
 A normal checkout/setup is:
@@ -111,8 +113,15 @@ instruction digests produced by that same serialization contract are `0x80089EF8
 `0x8DE22BBE`, and `0x6AC9DD7A`.
 
 The deterministic result oracle requires matching Test ID/tick, copies digital outputs to
-digital inputs and PWM outputs to PWM inputs, supplies the fixed analogue capture values,
-and requires `condition=OK` with `problem_detail=0`. Disabled captured channels use their
+digital inputs and PWM outputs to PWM inputs, and requires `condition=OK` with
+`problem_detail=0`. Enabled analogue channels use these exact formulas (in microvolts):
+
+- analogue input 0: `configuration_semantic_digest(configuration) % 20_000_001`;
+- analogue input 1: `instruction_semantic_digest(instruction) % 20_000_001`.
+
+Representative analogue input 0 is `4_813_713`; analogue input 1 values for ticks 0 to 2
+are `8_048_525`, `409_671`, and `11_614_241`. Maximum-extension analogue input 0 is
+`17_374_899`. Disabled captured channels, including both analogue inputs, use their
 canonical zero values.
 
 ## HRTP and STATUS schema 2
@@ -233,8 +242,12 @@ fresh 16-byte Test IDs and records result latency/counter evidence.
 `application-reset-reconnect` completes one instruction, uses the existing physical reset
 observation flow, requires the Application state to return to `WAITING_FOR_CONFIGURATION`,
 proves an old-test instruction is rejected, then starts and completes a new transaction.
-`--allow-unobserved-reset` retains the existing host-link fallback classification and does
-not claim an MCU reset was physically observed.
+Reset evidence records `physical_disconnect_observed` for the observed serial disconnection,
+`new_transport_session_established` after the new Transport session succeeds, and
+`post_reconnect_transaction_succeeded` after the post-reconnect ECHO or complete Application
+transaction succeeds. These observations do not conclusively verify an MCU reboot.
+`--allow-unobserved-reset` retains the existing host-link fallback classification and records
+that no serial disconnection was observed.
 
 All commands retain the existing serial selectors, timeout options, evidence directory,
 seed, logging, and deterministic fault-injection controls.
@@ -271,8 +284,8 @@ uses the public `ApplicationCodec`; it does not implement a second Application w
   remains responsible for delivery retry/recovery.
 - OS scheduling can exceed the nominal 1 ms service period; service-gap evidence is
   retained rather than assuming real-time host scheduling.
-- A physical MCU reset cannot be claimed when only the optional host-link fallback was
-  observed.
+- A serial disconnection can have causes other than an MCU reboot. Neither it nor the
+  optional host-link fallback conclusively verifies a physical MCU reset.
 
 ## Troubleshooting
 

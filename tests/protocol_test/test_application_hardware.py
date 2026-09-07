@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import fields
+from dataclasses import fields, replace
 
 import hil_rig_protocol as protocol
 
@@ -30,11 +30,14 @@ TEST_ID = protocol.TestId(bytes(range(16)))
 
 
 def test_application_codec_configuration_matches_hardware_profile() -> None:
-    assert APPLICATION_CODEC_CONFIG == protocol.ApplicationConfig(
-        max_encoded_message_size=512,
-        max_variable_data_size=255,
-        max_variable_transfers_per_tick=8,
-        max_expected_tick_count=1_000_000,
+    assert (
+        protocol.ApplicationConfig(
+            max_encoded_message_size=512,
+            max_variable_data_size=255,
+            max_variable_transfers_per_tick=8,
+            max_expected_tick_count=1_000_000,
+        )
+        == APPLICATION_CODEC_CONFIG
     )
 
 
@@ -126,9 +129,9 @@ def test_expected_result_oracle_matches_deterministic_values() -> None:
     ]
     assert [item.analog_inputs[0].microvolts for item in results] == [4_813_713] * 3
     assert [item.analog_inputs[1].microvolts for item in results] == [
-        2_756_764,
-        8_777_843,
-        5_704_255,
+        8_048_525,
+        409_671,
+        11_614_241,
     ]
 
 
@@ -398,14 +401,45 @@ def test_representative_instruction_values_match_required_ticks() -> None:
         0,
     )
     assert tuple(
-        (item.period_nanoseconds, item.duty_cycle_permyriad)
-        for item in instructions[0].pwm_outputs
+        (item.period_nanoseconds, item.duty_cycle_permyriad) for item in instructions[0].pwm_outputs
     ) == ((1_000_000, 2_500), (2_000_000, 7_500))
     assert tuple(
-        (item.period_nanoseconds, item.duty_cycle_permyriad)
-        for item in instructions[1].pwm_outputs
+        (item.period_nanoseconds, item.duty_cycle_permyriad) for item in instructions[1].pwm_outputs
     ) == ((500_000, 5_000), (4_000_000, 1_000))
     assert tuple(
-        (item.period_nanoseconds, item.duty_cycle_permyriad)
-        for item in instructions[2].pwm_outputs
+        (item.period_nanoseconds, item.duty_cycle_permyriad) for item in instructions[2].pwm_outputs
     ) == ((10_000_000, 0), (1_000_000, 10_000))
+
+
+def test_maximum_extension_result_uses_configuration_digest() -> None:
+    result = expected_result(
+        maximum_extension_configuration(TEST_ID), representative_instructions(TEST_ID)[0]
+    )
+    assert result.analog_inputs[0].microvolts == 17_374_899
+
+
+def test_non_golden_instruction_result_uses_semantics_at_same_and_later_tick() -> None:
+    configuration = representative_configuration(TEST_ID)
+    original = representative_instructions(TEST_ID)[0]
+    modified = replace(original, analog_outputs=(protocol.AnalogOutputValue(1234),) * 6)
+    assert modified.tick_number == original.tick_number
+    assert (
+        expected_result(configuration, modified).analog_inputs[1]
+        != expected_result(configuration, original).analog_inputs[1]
+    )
+    for instruction in (modified, replace(modified, tick_number=17)):
+        result = expected_result(configuration, instruction)
+        assert (
+            result.analog_inputs[1].microvolts
+            == instruction_semantic_digest(instruction) % 20_000_001
+        )
+        assert result.analog_inputs[1].microvolts != 0
+
+
+def test_disabled_analogue_inputs_ignore_nonzero_instruction_digest() -> None:
+    configuration = replace(
+        representative_configuration(TEST_ID),
+        analog_in=(protocol.AnalogInputConfig(False),) * 2,
+    )
+    result = expected_result(configuration, representative_instructions(TEST_ID)[1])
+    assert [item.microvolts for item in result.analog_inputs] == [0, 0]

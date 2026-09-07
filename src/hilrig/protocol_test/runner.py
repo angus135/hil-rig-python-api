@@ -1001,10 +1001,11 @@ class ProtocolTestRunner:
             )
             if not allow_unobserved_reset:
                 raise ScenarioFailure(
-                    "MCU reset was not verified because no physical serial disconnect was observed",
+                    "no physical serial disconnect was observed during the reset window",
                     details={
                         "physical_disconnect_observed": False,
-                        "mcu_reset_verified": False,
+                        "new_transport_session_established": False,
+                        "post_reconnect_transaction_succeeded": False,
                         "host_link_fallback_used": False,
                         "old_link_generation": old_generation,
                         "new_link_generation": None,
@@ -1014,7 +1015,7 @@ class ProtocolTestRunner:
             self.trace.record(
                 "reset_host_link_fallback",
                 link_generation=old_generation,
-                classification="host-link recycle; MCU reset not verified",
+                classification="host-link recycle; serial disconnect not observed",
             )
             self.connection.close_link()
             self._pending_messages.clear()
@@ -1037,7 +1038,8 @@ class ProtocolTestRunner:
             self._wait_for_session(self._deadline(self.request_timeout_ms))
             return {
                 "physical_disconnect_observed": disconnected,
-                "mcu_reset_verified": disconnected,
+                "new_transport_session_established": True,
+                "post_reconnect_transaction_succeeded": False,
                 "host_link_fallback_used": fallback_used,
                 "old_link_generation": old_generation,
                 "new_link_generation": generation,
@@ -1065,7 +1067,11 @@ class ProtocolTestRunner:
                 self.run_echo(f"after-reset-{cycle}".encode())
             except ScenarioFailure as exc:
                 raise ScenarioFailure(f"post-reconnect ECHO failed: {exc}", details=result) from exc
-            cycle_result = {"cycle": cycle + 1, **result}
+            cycle_result = {
+                "cycle": cycle + 1,
+                **result,
+                "post_reconnect_transaction_succeeded": True,
+            }
             cycle_results.append(cycle_result)
             self.trace.record("reset_cycle_complete", **cycle_result)
         return {
@@ -1073,8 +1079,11 @@ class ProtocolTestRunner:
             "physical_disconnect_observed": all(
                 bool(result["physical_disconnect_observed"]) for result in cycle_results
             ),
-            "mcu_reset_verified": all(
-                bool(result["mcu_reset_verified"]) for result in cycle_results
+            "new_transport_session_established": all(
+                bool(result["new_transport_session_established"]) for result in cycle_results
+            ),
+            "post_reconnect_transaction_succeeded": all(
+                bool(result["post_reconnect_transaction_succeeded"]) for result in cycle_results
             ),
             "host_link_fallback_used": any(
                 bool(result["host_link_fallback_used"]) for result in cycle_results
@@ -1151,6 +1160,7 @@ class ProtocolTestRunner:
             "new_configuration_digest": ALL_DISABLED_CONFIGURATION_DIGEST,
             "new_instruction_digest": instruction_semantic_digest(zero_instruction(new_id)),
             **reconnect,
+            "post_reconnect_transaction_succeeded": True,
             "final_status": status,
         }
 

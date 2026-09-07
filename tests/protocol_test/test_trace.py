@@ -19,6 +19,8 @@ def test_git_source_metadata_records_commit_and_dirty_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def fake_run(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        if args[-2:] == ["rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(args, 0, str(tmp_path.resolve()) + "\n", "")
         if args[-2:] == ["rev-parse", "HEAD"]:
             return subprocess.CompletedProcess(args, 0, "abc123\n", "")
         if args[-2:] == ["status", "--porcelain"]:
@@ -80,3 +82,40 @@ def test_trace_summary_contains_application_compatibility_metadata(tmp_path: Pat
     assert summary["protocol_version"] == [0, 1, 0]
     assert summary["compatibility_profile_id"] == 0x41505031
     assert summary["application_codec_config"]["max_encoded_message_size"] == 512
+
+
+@pytest.mark.parametrize("nested_path", ["ordinary", "external/hil-rig-protocol"])
+def test_nested_directory_cannot_borrow_parent_revision(tmp_path: Path, nested_path: str) -> None:
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Initial",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    nested = tmp_path / nested_path
+    nested.mkdir(parents=True)
+    assert inspect_git_source(tmp_path).available is True
+    metadata = inspect_git_source(nested)
+    assert metadata.available is False
+    assert metadata.commit is None
+    assert metadata.dirty is None
+    if nested_path == "external/hil-rig-protocol":
+        (nested / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+        evidence = collect_source_evidence(tmp_path)
+        assert evidence["python_api_git_metadata_available"] is True
+        assert evidence["protocol_git_metadata_available"] is False
+        assert evidence["protocol_observed_commit"] is None
+        assert evidence["protocol_working_tree_dirty"] is None
+        assert evidence["protocol_declared_version"] == "0.1.0"

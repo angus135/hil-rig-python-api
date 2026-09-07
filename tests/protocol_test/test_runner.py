@@ -215,7 +215,6 @@ class ScenarioConnection:
         return TransportStatus.OK
 
 
-
 def make_runner(
     tmp_path: Path, behavior: str = "success"
 ) -> tuple[ProtocolTestRunner, ScenarioConnection, TraceWriter, FakeTime]:
@@ -312,7 +311,7 @@ def test_status_request_and_typed_decode(tmp_path: Path) -> None:
     finish(trace, connection, passed=True)
 
 
-def test_reset_reconnect_observed_disconnect_is_verified(tmp_path: Path) -> None:
+def test_reset_reconnect_records_disconnect_session_and_transaction(tmp_path: Path) -> None:
     runner, connection, trace, _ = make_runner(tmp_path)
 
     def prompt(_: str) -> None:
@@ -320,7 +319,9 @@ def test_reset_reconnect_observed_disconnect_is_verified(tmp_path: Path) -> None
 
     result = runner.run_reset_reconnect(1, prompt=prompt)
     assert result["physical_disconnect_observed"] is True
-    assert result["mcu_reset_verified"] is True
+    assert "mcu_reset_verified" not in result
+    assert result["new_transport_session_established"] is True
+    assert result["post_reconnect_transaction_succeeded"] is True
     assert result["host_link_fallback_used"] is False
     assert result["old_link_generation"] == 1
     assert result["new_link_generation"] == 2
@@ -335,7 +336,9 @@ def test_reset_reconnect_strict_mode_fails_without_observed_disconnect(tmp_path:
         runner.run_reset_reconnect(1, prompt=lambda _: None)
     assert exc_info.value.details is not None
     assert exc_info.value.details["physical_disconnect_observed"] is False
-    assert exc_info.value.details["mcu_reset_verified"] is False
+    assert "mcu_reset_verified" not in exc_info.value.details
+    assert exc_info.value.details["new_transport_session_established"] is False
+    assert exc_info.value.details["post_reconnect_transaction_succeeded"] is False
     assert exc_info.value.details["host_link_fallback_used"] is False
     assert connection._generation == 1
     runner.close()
@@ -352,7 +355,9 @@ def test_reset_reconnect_explicit_host_link_fallback_is_not_reset_verification(
         allow_unobserved_reset=True,
     )
     assert result["physical_disconnect_observed"] is False
-    assert result["mcu_reset_verified"] is False
+    assert "mcu_reset_verified" not in result
+    assert result["new_transport_session_established"] is True
+    assert result["post_reconnect_transaction_succeeded"] is True
     assert result["host_link_fallback_used"] is True
     assert result["old_link_generation"] == 1
     assert result["new_link_generation"] == 2
@@ -487,3 +492,28 @@ def test_json_summary_written_on_failure(tmp_path: Path) -> None:
     loaded = json.loads(trace.summary_path.read_text())
     assert loaded["passed"] is False
     assert loaded["failure_reason"] == "mismatch"
+
+
+def test_reset_reconnect_failed_transaction_preserves_session_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, connection, trace, _ = make_runner(tmp_path)
+
+    def prompt(_: str) -> None:
+        connection.disconnect_on_service = True
+
+        def fail_echo(payload: bytes) -> None:
+            raise ScenarioFailure("simulated transaction failure")
+
+        monkeypatch.setattr(runner, "run_echo", fail_echo)
+
+    try:
+        with pytest.raises(ScenarioFailure, match="post-reconnect ECHO failed") as exc_info:
+            runner.run_reset_reconnect(1, prompt=prompt)
+        assert exc_info.value.details["physical_disconnect_observed"] is True
+        assert exc_info.value.details["new_transport_session_established"] is True
+        assert exc_info.value.details["post_reconnect_transaction_succeeded"] is False
+        assert "mcu_reset_verified" not in exc_info.value.details
+    finally:
+        runner.close()
+        finish(trace, connection, passed=False)

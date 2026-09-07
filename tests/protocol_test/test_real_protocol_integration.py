@@ -6,6 +6,7 @@ from collections import deque
 import pytest
 
 protocol = pytest.importorskip("hil_rig_protocol")
+from firmware_results import firmware_result  # noqa: E402
 from hil_rig_protocol import (  # noqa: E402
     EventType,
     LinkState,
@@ -21,7 +22,6 @@ from hilrig.protocol_test.application_hardware import (  # noqa: E402
     COMPATIBILITY_PROFILE_ID,
     PROTOCOL_VERSION,
     configuration_semantic_digest,
-    expected_result,
     instruction_semantic_digest,
     make_application_codec,
 )
@@ -33,7 +33,7 @@ from hilrig.protocol_test.harness_codec import (  # noqa: E402
     encode_message,
 )
 from hilrig.protocol_test.models import SerialDevice, SerialSelector  # noqa: E402
-from hilrig.protocol_test.runner import ProtocolTestRunner  # noqa: E402
+from hilrig.protocol_test.runner import ProtocolTestRunner, ScenarioFailure  # noqa: E402
 from hilrig.protocol_test.trace import TraceWriter  # noqa: E402
 
 pytestmark = pytest.mark.protocol_integration
@@ -261,7 +261,7 @@ class ApplicationRigBehavior:
                 return None
             self.instructions_accepted += 1
             self.last_instruction_digest = instruction_semantic_digest(message)
-            result = expected_result(self.active_configuration, message)
+            result = firmware_result(self.active_configuration, message)
             try:
                 encoded = self.codec.encode(result)
             except protocol.ApplicationEncodeError:
@@ -401,10 +401,11 @@ def test_real_protocol_disconnect_and_reconnect_uses_new_generation() -> None:
         "application-boundaries",
         "application-negative",
         "application-repeat",
+        "oracle-regression",
     ],
 )
 def test_real_protocol_application_runner_over_both_transport_endpoints(
-    tmp_path, scenario: str
+    tmp_path, scenario: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     provider = InMemoryProvider(application_behavior=True)
     connection = ProtocolTestConnection(provider, SerialSelector(port="memory-rig"))
@@ -417,7 +418,16 @@ def test_real_protocol_application_runner_over_both_transport_endpoints(
     runner = ProtocolTestRunner(connection, trace, request_timeout_ms=1000)
     try:
         runner.open()
-        if scenario == "application-smoke":
+        if scenario == "oracle-regression":
+            monkeypatch.setattr(
+                "hilrig.protocol_test.runner.expected_result",
+                lambda configuration, instruction: protocol.TestResult(
+                    test_id=instruction.test_id, tick_number=instruction.tick_number
+                ),
+            )
+            with pytest.raises(ScenarioFailure, match="did not match deterministic oracle"):
+                runner.run_application_smoke()
+        elif scenario == "application-smoke":
             result = runner.run_application_smoke()
             assert result["final_status"].application_harness_state == int(
                 ApplicationHarnessState.COMPLETE

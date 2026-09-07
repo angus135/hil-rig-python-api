@@ -63,6 +63,18 @@ def inspect_git_source(path: Path) -> GitSourceMetadata:
     if not path.exists():
         return GitSourceMetadata(None, None, False)
     try:
+        root_result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if (
+            root_result.returncode != 0
+            or not root_result.stdout.strip()
+            or Path(root_result.stdout.strip()).resolve() != path.resolve()
+        ):
+            return GitSourceMetadata(None, None, False)
         commit_result = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "HEAD"],
             capture_output=True,
