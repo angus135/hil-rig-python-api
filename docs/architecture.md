@@ -214,10 +214,19 @@ the same queue and waits for every older record to commit. A failed batch is rol
 as a unit and the failure is surfaced to the caller. Previously committed batches stay
 intact.
 
-`CapturedRunBuilder.from_compiled_test()` copies the test ID, name, tick period,
+`CompiledTestIR.test_id` is the immutable logical identity of a compiled definition.
+`CompiledTestIR.new_upload_attempt()` creates an `UploadAttempt` with a separate random
+Application Test ID for the protocol. Calling `UploadAttempt.restart()` retains the
+definition ID but produces a fresh Application Test ID, as required when a rejected or
+interrupted upload transaction is restarted.
+
+`CapturedRunBuilder.from_compiled_test()` copies the definition ID, name, tick period,
 expected tick count, compiled IR version, and assertion definitions directly from
-`CompiledTestIR`. This prevents the outgoing RIG configuration and incoming completion
-check from calculating different run lengths and preserves the host evaluation plan.
+`CompiledTestIR`. It accepts the `UploadAttempt` used for the wire transfer (or creates
+one when omitted) and stores its Application Test ID. This prevents the outgoing RIG
+configuration and incoming completion check from calculating different run lengths,
+preserves the host evaluation plan, and records the mapping from the wire transaction
+back to the logical definition.
 
 Finalization checks that unique fixed results cover every tick from zero through
 `expected_tick_count - 1`. It automatically records `COMPLETE` or `INCOMPLETE`; the
@@ -228,17 +237,19 @@ future execution orchestrator can instead record `SESSION_LOST`, `PROTOCOL_ERROR
 
 The SQLite file is authoritative and schema-versioned:
 
-- `run_metadata` contains test/run IDs, timing, provenance, live tick counts, and state;
+- `run_metadata` contains the logical test ID, Application Test ID, run ID, timing,
+  provenance, live tick counts, and state;
 - `assertion_sets` identifies versioned immutable assertion snapshots;
 - `assertion_definitions` stores compiled operations and JSON-encoded scalar arguments;
 - `tick_results` contains one wide row per tick rather than one row per channel;
 - `communication_results` contains sparse variable-size payload BLOBs;
 - `application_errors` contains recoverable/non-recoverable diagnostics.
 
-Adding assertion snapshots changes the captured-result IR schema from 1.0 to 1.1.
-Unsupported older databases are rejected explicitly rather than being interpreted using
-the wrong table layout; a migration can be added if preserving pre-1.1 development
-captures becomes necessary.
+Adding assertion snapshots changed the captured-result IR schema from 1.0 to 1.1.
+Persisting the per-upload Application Test ID changes it from 1.1 to 1.2. Unsupported
+older databases are rejected explicitly rather than being interpreted using the wrong
+table layout; a migration can be added if preserving pre-1.2 development captures
+becomes necessary.
 
 Keeping fixed results wide limits a 100 kHz capture to 100,000 fixed rows per second,
 instead of multiplying that by the number of input channels. Payload BLOBs are separate

@@ -21,6 +21,7 @@ from hilrig import (
     StartMode,
     TickCondition,
     TickResult,
+    UploadAttempt,
 )
 from hilrig import Test as HilRigTest
 
@@ -42,6 +43,7 @@ def _builder(path: Path, *, expected_tick_count: int = 3, **kwargs: object) -> C
     return CapturedRunBuilder(
         path,
         test_id=0x1234,
+        application_test_id=0x9ABC,
         run_id=0x5678,
         test_name="Captured test",
         tick_period_ns=100_000,
@@ -61,6 +63,8 @@ def test_builder_persists_complete_run_and_channel_queries(tmp_path: Path) -> No
     assert isinstance(run, CapturedRunIR)
     assert run.metadata.status is CaptureStatus.COMPLETE
     assert run.metadata.test_id == 0x1234
+    assert run.metadata.application_test_id == 0x9ABC
+    assert run.metadata.application_test_id_hex == "00000000000000000000000000009abc"
     assert run.metadata.run_id == 0x5678
     assert run.metadata.expected_tick_count == 3
     assert run.metadata.received_tick_count == 3
@@ -91,20 +95,45 @@ def test_builder_can_reuse_identity_and_timing_from_compiled_test(tmp_path: Path
     digital_output.configure(voltage=LogicVoltage.V3_3, initial_state=DigitalState.LOW)
     digital_output.high(at_tick=25)
     compiled = test.compile()
+    upload_attempt = UploadAttempt(
+        definition_test_id=compiled.test_id,
+        application_test_id=0xDCBA,
+    )
 
     builder = CapturedRunBuilder.from_compiled_test(
         tmp_path / "run.sqlite3",
         compiled,
+        upload_attempt=upload_attempt,
         run_id=0xABCD,
     )
     live_run = CapturedRunIR.open(builder.database_path)
 
     assert live_run.metadata.test_id == compiled.test_id
+    assert live_run.metadata.application_test_id == upload_attempt.application_test_id
+    assert builder.application_test_id == upload_attempt.application_test_id
     assert live_run.metadata.test_name == compiled.name
     assert live_run.metadata.run_id == 0xABCD
     assert live_run.metadata.tick_period_ns == compiled.tick_period_ns == 100_000
     assert live_run.metadata.expected_tick_count == compiled.expected_tick_count == 10_026
     builder.abort()
+
+
+def test_capture_rejects_upload_attempt_for_another_definition(tmp_path: Path) -> None:
+    compiled = HilRigTest(name="Correct definition").compile()
+    other_attempt = UploadAttempt(
+        definition_test_id=compiled.test_id ^ 1,
+        application_test_id=0xDCBA,
+    )
+    path = tmp_path / "run.sqlite3"
+
+    with pytest.raises(ValueError, match="different compiled test"):
+        CapturedRunBuilder.from_compiled_test(
+            path,
+            compiled,
+            upload_attempt=other_attempt,
+        )
+
+    assert not path.exists()
 
 
 def test_flush_is_a_barrier_that_makes_pending_rows_visible(tmp_path: Path) -> None:
@@ -270,6 +299,8 @@ def test_manifest_and_csv_exports_are_derived_from_database(tmp_path: Path) -> N
     errors_path = run.write_application_errors_csv(tmp_path / "errors.csv")
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["test_id"] == "00000000000000000000000000001234"
+    assert manifest["application_test_id"] == "00000000000000000000000000009abc"
     assert manifest["capture"]["status"] == "complete"
     assert manifest["assertions"] == {
         "original_set_id": "original",

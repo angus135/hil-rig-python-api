@@ -18,6 +18,7 @@ def as_evaluation_report(report: EvaluationReport) -> dict[str, object]:
             "name": report.test_name,
         },
         "run": {
+            "application_test_id": report.application_test_id_hex,
             "run_id": report.run_id_hex,
             "capture_database": report.capture_database,
             "capture_status": report.capture_status.value,
@@ -84,6 +85,7 @@ def render_evaluation_report_markdown(report: EvaluationReport) -> str:
         f"**Overall verdict:** `{report.verdict.value.upper()}`  ",
         f"**Capture status:** `{report.capture_status.value.upper()}`  ",
         f"**Test ID:** `{report.test_id_hex}`  ",
+        f"**Application Test ID:** `{report.application_test_id_hex}`  ",
         f"**Run ID:** `{report.run_id_hex}`  ",
         f"**Capture database:** `{report.capture_database}`  ",
         f"**Evaluated at:** `{report.evaluated_at}`",

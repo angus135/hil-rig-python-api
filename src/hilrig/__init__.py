@@ -55,6 +55,7 @@ from hilrig.models.configuration import (
     UARTStopBits,
 )
 from hilrig.models.execution import CompiledTestIR
+from hilrig.models.identifiers import UploadAttempt
 from hilrig.results import (
     ApplicationErrorRecord,
     CapturedAssertionSet,
@@ -126,6 +127,7 @@ __all__ = [
     "UARTParity",
     "UARTStopBits",
     "UnsupportedAssertionError",
+    "UploadAttempt",
     "ValidationError",
     "evaluate_assertions",
 ]

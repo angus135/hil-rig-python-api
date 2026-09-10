@@ -154,6 +154,7 @@ class CapturedRunIR:
         return {
             "result_ir_version": metadata.schema_version,
             "test_id": metadata.test_id_hex,
+            "application_test_id": metadata.application_test_id_hex,
             "run_id": metadata.run_id_hex,
             "test_name": metadata.test_name,
             "timing": {

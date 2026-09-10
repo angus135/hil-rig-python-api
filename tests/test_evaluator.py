@@ -50,6 +50,7 @@ def _capture(
     builder = CapturedRunBuilder(
         path,
         test_id=compiled.test_id,
+        application_test_id=0xD00D,
         run_id=0xCAFE,
         test_name=compiled.name,
         tick_period_ns=compiled.tick_period_ns,
@@ -402,11 +403,13 @@ def test_evaluation_report_exports_json_and_markdown(tmp_path: Path) -> None:
     document = json.loads(json_path.read_text(encoding="utf-8"))
     markdown = markdown_path.read_text(encoding="utf-8")
 
-    assert document["evaluation_report_version"] == "1.0"
+    assert document["evaluation_report_version"] == "1.1"
+    assert document["run"]["application_test_id"] == ("0000000000000000000000000000d00d")
     assert document["evaluation"]["verdict"] == "pass"
     assert document["assertions"][0]["expected"]["target_uv"] == 5_000_000
     assert "# HIL-RIG Test Report: Report export" in markdown
     assert "**Overall verdict:** `PASS`" in markdown
+    assert "**Application Test ID:** `0000000000000000000000000000d00d`" in markdown
     assert "5 V (5000000 µV)" in markdown
     assert report.to_dict() == document
     assert report.to_json().endswith("\n")

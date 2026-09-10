@@ -56,6 +56,7 @@ class AssertionEvaluator:
         )
         return EvaluationReport(
             test_id=metadata.test_id,
+            application_test_id=metadata.application_test_id,
             run_id=metadata.run_id,
             test_name=metadata.test_name,
             capture_database=captured_run.database_path.name,

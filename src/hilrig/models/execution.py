@@ -7,6 +7,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TypeAlias
 
+from hilrig.models.identifiers import UploadAttempt
 from hilrig.models.instructions import Instruction
 
 IR_SCHEMA_VERSION = "1.1"
@@ -89,6 +90,10 @@ class CompiledTestIR:
     def tick_period_ns(self) -> int:
         """Return the duration of one configured execution tick in nanoseconds."""
         return 1_000_000_000 // self.frequency_hz
+
+    def new_upload_attempt(self) -> UploadAttempt:
+        """Allocate a fresh Application Test ID for uploading this definition."""
+        return UploadAttempt.create(definition_test_id=self.test_id)
 
     def to_dict(self) -> dict[str, object]:
         """Return the JSON-compatible, RIG-facing intermediate representation."""

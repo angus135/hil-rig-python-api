@@ -66,6 +66,9 @@ class IncomingResultAdapter:
         * Any communication bytes bundled into that message become separate raw
           ``CommunicationResult`` rows. Do not clean or decode payload bytes here.
         * Application ERROR-like messages become ``ApplicationErrorRecord`` rows.
+        * Every result-bearing message must have a Test ID equal to
+          ``builder.application_test_id`` before any contained records are accepted.
+          The database stores that wire ID alongside the immutable definition ID.
         * Completion/session-loss handling calls ``builder.finalize`` with the
           corresponding ``CaptureStatus`` once the final protocol defines that signal.
 

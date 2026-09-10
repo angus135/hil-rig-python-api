@@ -14,12 +14,12 @@ from typing import TYPE_CHECKING
 
 from hilrig.exceptions import CaptureStateError, CaptureStorageError
 from hilrig.models.execution import IR_SCHEMA_VERSION, CompiledAssertion, CompiledTestIR
+from hilrig.models.identifiers import UploadAttempt, validate_uint128
 from hilrig.results.models import (
     ApplicationErrorRecord,
     CaptureStatus,
     CommunicationResult,
     TickResult,
-    validate_uint128,
 )
 from hilrig.results.sqlite_store import SQLiteCaptureWriter, initialize_capture_database
 
@@ -55,6 +55,7 @@ class CapturedRunBuilder:
         database_path: str | Path,
         compiled_test: CompiledTestIR,
         *,
+        upload_attempt: UploadAttempt | None = None,
         run_id: int | None = None,
         application_protocol_version: str | None = None,
         firmware_version: str | None = None,
@@ -62,12 +63,19 @@ class CapturedRunBuilder:
         flush_interval_s: float = 0.025,
         queue_capacity: int = 20_000,
     ) -> CapturedRunBuilder:
-        """Create a capture using timing and identity from one compiled outgoing IR."""
+        """Create a capture for one upload attempt of a compiled test."""
         if not isinstance(compiled_test, CompiledTestIR):
             raise TypeError("compiled_test must be a CompiledTestIR")
+        if upload_attempt is None:
+            upload_attempt = compiled_test.new_upload_attempt()
+        elif not isinstance(upload_attempt, UploadAttempt):
+            raise TypeError("upload_attempt must be an UploadAttempt or None")
+        if upload_attempt.definition_test_id != compiled_test.test_id:
+            raise ValueError("upload_attempt belongs to a different compiled test")
         return cls(
             database_path,
             test_id=compiled_test.test_id,
+            application_test_id=upload_attempt.application_test_id,
             test_name=compiled_test.name,
             tick_period_ns=compiled_test.tick_period_ns,
             expected_tick_count=compiled_test.expected_tick_count,
@@ -86,6 +94,7 @@ class CapturedRunBuilder:
         database_path: str | Path,
         *,
         test_id: int,
+        application_test_id: int | None = None,
         test_name: str,
         tick_period_ns: int,
         expected_tick_count: int,
@@ -100,6 +109,14 @@ class CapturedRunBuilder:
     ) -> None:
         self._database_path = Path(database_path).expanduser().resolve()
         self._test_id = validate_uint128(test_id, name="test_id")
+        self._application_test_id = validate_uint128(
+            (
+                UploadAttempt.create(definition_test_id=self._test_id).application_test_id
+                if application_test_id is None
+                else application_test_id
+            ),
+            name="application_test_id",
+        )
         self._run_id = validate_uint128(
             secrets.randbits(128) if run_id is None else run_id,
             name="run_id",
@@ -130,6 +147,7 @@ class CapturedRunBuilder:
         initialize_capture_database(
             self._database_path,
             test_id=self._test_id,
+            application_test_id=self._application_test_id,
             run_id=self._run_id,
             test_name=self._test_name,
             tick_period_ns=self._tick_period_ns,
@@ -161,7 +179,13 @@ class CapturedRunBuilder:
 
     @property
     def test_id(self) -> int:
+        """Return the immutable test-definition ID."""
         return self._test_id
+
+    @property
+    def application_test_id(self) -> int:
+        """Return the Application Test ID used by this upload attempt."""
+        return self._application_test_id
 
     @property
     def run_id(self) -> int:

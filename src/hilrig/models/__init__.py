@@ -58,6 +58,7 @@ from hilrig.models.execution import (
     ExecutionPlan,
     TimeSlot,
 )
+from hilrig.models.identifiers import UploadAttempt
 from hilrig.models.instructions import (
     AnalogueOutputInstruction,
     DigitalOutputAction,
@@ -143,4 +144,5 @@ __all__ = [
     "UARTParity",
     "UARTStopBits",
     "UARTWriteInstruction",
+    "UploadAttempt",
 ]

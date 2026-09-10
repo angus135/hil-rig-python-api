@@ -10,7 +10,7 @@ from typing import TypeAlias
 
 from hilrig.results.models import CaptureStatus
 
-EVALUATION_REPORT_SCHEMA_VERSION = "1.0"
+EVALUATION_REPORT_SCHEMA_VERSION = "1.1"
 EvaluationScalar: TypeAlias = str | int | float | bool | None
 
 
@@ -55,6 +55,7 @@ class EvaluationReport:
     """Complete, reusable evaluation result for one captured run and assertion set."""
 
     test_id: int
+    application_test_id: int
     run_id: int
     test_name: str
     capture_database: str
@@ -72,6 +73,10 @@ class EvaluationReport:
     @property
     def test_id_hex(self) -> str:
         return f"{self.test_id:032x}"
+
+    @property
+    def application_test_id_hex(self) -> str:
+        return f"{self.application_test_id:032x}"
 
     @property
     def run_id_hex(self) -> str:

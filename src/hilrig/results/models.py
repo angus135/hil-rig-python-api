@@ -7,7 +7,7 @@ from enum import Enum
 
 from hilrig.models.execution import CompiledAssertion
 
-RESULT_IR_SCHEMA_VERSION = "1.1"
+RESULT_IR_SCHEMA_VERSION = "1.2"
 ORIGINAL_ASSERTION_SET_ID = "original"
 
 DIGITAL_INPUT_CHANNEL_COUNT = 10
@@ -180,6 +180,7 @@ class CapturedRunMetadata:
 
     schema_version: str
     test_id: int
+    application_test_id: int
     run_id: int
     test_name: str
     tick_period_ns: int
@@ -195,8 +196,13 @@ class CapturedRunMetadata:
 
     @property
     def test_id_hex(self) -> str:
-        """Return the 128-bit test identifier as fixed-width hexadecimal."""
+        """Return the immutable definition identifier as fixed-width hexadecimal."""
         return f"{self.test_id:032x}"
+
+    @property
+    def application_test_id_hex(self) -> str:
+        """Return the upload's Application Test ID as fixed-width hexadecimal."""
+        return f"{self.application_test_id:032x}"
 
     @property
     def run_id_hex(self) -> str:
@@ -314,15 +320,6 @@ class CapturedApplicationError:
     recoverable: bool
     tick: int | None
     diagnostic_data: bytes
-
-
-def validate_uint128(value: object, *, name: str) -> int:
-    """Validate and return an unsigned 128-bit integer identifier."""
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise TypeError(f"{name} must be an integer")
-    if not 0 <= value < 2**128:
-        raise ValueError(f"{name} must be an unsigned 128-bit integer")
-    return value
 
 
 def _non_negative_int(value: object, *, name: str) -> int:

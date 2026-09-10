@@ -38,6 +38,7 @@ CREATE TABLE result_ir_schema (
 CREATE TABLE run_metadata (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     test_id_hex TEXT NOT NULL CHECK (length(test_id_hex) = 32),
+    application_test_id_hex TEXT NOT NULL CHECK (length(application_test_id_hex) = 32),
     run_id_hex TEXT NOT NULL CHECK (length(run_id_hex) = 32),
     test_name TEXT NOT NULL,
     tick_period_ns INTEGER NOT NULL CHECK (tick_period_ns > 0),
@@ -172,6 +173,7 @@ def initialize_capture_database(
     path: Path,
     *,
     test_id: int,
+    application_test_id: int,
     run_id: int,
     test_name: str,
     tick_period_ns: int,
@@ -201,13 +203,15 @@ def initialize_capture_database(
         connection.execute(
             """
             INSERT INTO run_metadata (
-                singleton, test_id_hex, run_id_hex, test_name, tick_period_ns,
+                singleton, test_id_hex, application_test_id_hex, run_id_hex,
+                test_name, tick_period_ns,
                 expected_tick_count, status, created_at,
                 application_protocol_version, firmware_version
-            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 f"{test_id:032x}",
+                f"{application_test_id:032x}",
                 f"{run_id:032x}",
                 test_name,
                 tick_period_ns,
@@ -385,6 +389,7 @@ def read_metadata(path: Path) -> CapturedRunMetadata:
             SELECT
                 s.schema_version,
                 m.test_id_hex,
+                m.application_test_id_hex,
                 m.run_id_hex,
                 m.test_name,
                 m.tick_period_ns,
@@ -407,18 +412,19 @@ def read_metadata(path: Path) -> CapturedRunMetadata:
     return CapturedRunMetadata(
         schema_version=row[0],
         test_id=int(row[1], 16),
-        run_id=int(row[2], 16),
-        test_name=row[3],
-        tick_period_ns=row[4],
-        expected_tick_count=row[5],
-        received_tick_count=row[6],
-        first_tick=row[7],
-        last_tick=row[8],
-        status=CaptureStatus(row[9]),
-        created_at=row[10],
-        finalized_at=row[11],
-        application_protocol_version=row[12],
-        firmware_version=row[13],
+        application_test_id=int(row[2], 16),
+        run_id=int(row[3], 16),
+        test_name=row[4],
+        tick_period_ns=row[5],
+        expected_tick_count=row[6],
+        received_tick_count=row[7],
+        first_tick=row[8],
+        last_tick=row[9],
+        status=CaptureStatus(row[10]),
+        created_at=row[11],
+        finalized_at=row[12],
+        application_protocol_version=row[13],
+        firmware_version=row[14],
     )
 
 

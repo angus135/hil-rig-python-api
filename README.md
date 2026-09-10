@@ -66,11 +66,24 @@ compiled.write_json("motor-controller-startup.json")
 compiled.write_excel("motor-controller-startup.xlsx")
 ```
 
-Every `Test` receives a random 128-bit integer `test_id`. Every stimulus instruction
-receives a sequential integer `instruction_id`, starting at zero. These identifiers are
-created by the API rather than supplied by the user. Host-side assertions independently
-receive sequential `assertion_id` values starting at zero, which are retained for future
-evaluation reports but are not sent to the RIG.
+Every `Test` receives a random 128-bit integer `test_id`. This is the immutable logical
+identity of the test definition, not the Application Test ID sent on the wire. Each
+upload gets a separate random Application Test ID, and a restarted upload gets a fresh
+one while continuing to refer to the same logical test:
+
+```python
+upload_attempt = compiled.new_upload_attempt()
+# Send upload_attempt.application_test_id in Application-layer messages.
+
+retry_attempt = upload_attempt.restart()
+assert retry_attempt.definition_test_id == compiled.test_id
+assert retry_attempt.application_test_id != upload_attempt.application_test_id
+```
+
+Every stimulus instruction receives a sequential integer `instruction_id`, starting at
+zero. These identifiers are created by the API rather than supplied by the user.
+Host-side assertions independently receive sequential `assertion_id` values starting
+at zero, which are retained for future evaluation reports but are not sent to the RIG.
 
 Every peripheral channel must be explicitly configured before it can be referenced by a
 stimulus or assertion command. Compilation checks this relationship again so malformed
@@ -250,9 +263,12 @@ database without holding an entire run in memory:
 ```python
 from hilrig import CapturedRunBuilder, PWMMeasurement, TickResult
 
+upload_attempt = compiled.new_upload_attempt()
+
 builder = CapturedRunBuilder.from_compiled_test(
     "results/run.sqlite3",
     compiled,
+    upload_attempt=upload_attempt,
 )
 
 builder.add_tick_result(
@@ -290,18 +306,21 @@ Bulk evidence is separated by shape:
 - `application_errors` stores diagnostics;
 - `assertion_sets` identifies versioned host-side assertion snapshots;
 - `assertion_definitions` stores each compiled assertion and its scalar arguments;
-- `run_metadata` stores identifiers, timing, provenance, counts, and capture status.
+- `run_metadata` stores the logical test ID, actual Application Test ID, run ID,
+  timing, provenance, counts, and capture status.
 
 `CapturedRunIR` provides streaming channel and range queries, so assertion code does not
 contain SQL. It can also derive a small JSON manifest and separate CSV files for fixed
 results, communication captures, and application errors. SQLite remains the
 authoritative copy.
 
-The builder factory copies the test ID, test name, tick period, expected tick count,
-compiled IR version, and host-only assertions from the same compiled snapshot used for
-the run. Assertions remain absent from the RIG-facing JSON. The lower-level builder
-constructor remains available for tests and protocol-independent use; it creates an
-empty original assertion set when no compiled definitions are supplied.
+The builder factory copies the logical test ID, test name, tick period, expected tick
+count, compiled IR version, and host-only assertions from the same compiled snapshot
+used for the run. It also accepts the exact `UploadAttempt` used for the wire transfer
+and persists its Application Test ID. If omitted, the factory creates a new attempt.
+Assertions remain absent from the RIG-facing JSON. The lower-level builder constructor
+remains available for tests and protocol-independent use; it creates an empty original
+assertion set when no compiled definitions are supplied.
 
 `IncomingResultAdapter` contains documented skeleton methods for the future flow:
 
@@ -310,7 +329,10 @@ USB bytes -> transport messages -> application messages -> typed builder records
 ```
 
 Those methods intentionally raise `NotImplementedError` until the transport/application
-Python interfaces and application-message field mapping are final.
+Python interfaces and application-message field mapping are final. That mapping must
+reject result messages whose Test ID differs from `builder.application_test_id`; the
+capture database then links accepted wire results back to the immutable logical
+`test_id`.
 
 ## Evaluate captured assertions
 
@@ -369,8 +391,10 @@ compiled.write_excel("build/my-test.xlsx")  # human-readable review workbook
 ```
 
 The versioned JSON document contains the test summary, peripheral configurations, and
-chronological stimulus instructions. Test IDs are written as 32 hexadecimal digits,
-enum members use their stable symbolic names, and byte strings use `0x`-prefixed hex.
+chronological stimulus instructions. The logical test-definition IDs are written as 32
+hexadecimal digits, enum members use their stable symbolic names, and byte strings use
+`0x`-prefixed hex. The per-upload Application Test ID is deliberately absent because it
+is created only when an upload attempt starts.
 Assertions are deliberately excluded because they are evaluated on the host rather
 than sent to the RIG. The JSON test summary does include `expected_tick_count`, which is
 calculated as:
