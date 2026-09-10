@@ -1,6 +1,6 @@
 import pytest
 
-from hilrig import DigitalState, FrequencyMode, StartMode
+from hilrig import DigitalState, FrequencyMode, LogicVoltage, StartMode
 from hilrig import Test as HilRigTest
 from hilrig.models.assertions import (
     DigitalInputPointAssertion,
@@ -11,7 +11,7 @@ from hilrig.models.assertions import (
 
 def test_point_assertions_store_high_and_low_at_converted_ticks() -> None:
     test = HilRigTest(name="Point assertions")
-    digital_input = test.digital_input(channel=0)
+    digital_input = test.digital_input(channel=0).configure(voltage=LogicVoltage.V3_3)
 
     test.expect(digital_input).high(at_ms=100)
     test.expect(digital_input).low(at_s=0.2)
@@ -30,7 +30,7 @@ def test_point_assertions_store_high_and_low_at_converted_ticks() -> None:
 
 def test_remain_high_supports_tick_millisecond_and_second_ranges() -> None:
     test = HilRigTest(name="Range assertions")
-    digital_input = test.digital_input(channel=0)
+    digital_input = test.digital_input(channel=0).configure(voltage=LogicVoltage.V3_3)
 
     test.expect(digital_input).remain_high(from_tick=10, until_tick=20)
     test.expect(digital_input).remain_high(from_ms=30, until_ms=40)
@@ -52,7 +52,7 @@ def test_transition_assertion_stores_states_and_converted_range() -> None:
         frequency_mode=FrequencyMode.HZ_10K,
         start_mode=StartMode.IMMEDIATE,
     )
-    digital_input = test.digital_input(channel=0)
+    digital_input = test.digital_input(channel=0).configure(voltage=LogicVoltage.V3_3)
 
     test.expect(digital_input).to_transition(
         from_state=False,
@@ -92,6 +92,8 @@ def test_assertion_ids_are_sequential_and_independent_of_instruction_ids() -> No
     test = HilRigTest(name="Independent IDs")
     digital_input = test.digital_input(channel=0)
     digital_output = test.digital_output(channel=0)
+    digital_input.configure(voltage=LogicVoltage.V3_3)
+    digital_output.configure(voltage=LogicVoltage.V3_3, initial_state=DigitalState.LOW)
 
     digital_output.high(at_tick=0)
     test.expect(digital_input).high(at_tick=0)

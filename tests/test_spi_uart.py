@@ -186,8 +186,16 @@ def test_uart_rejects_invalid_baud_rates(baud_hz) -> None:
 
 def test_uart_write_stores_raw_bytes() -> None:
     test = HilRigTest(name="UART bytes")
+    uart = test.uart(channel=0)
+    uart.configure(
+        mode=UARTMode.TTL_3V3,
+        baud_hz=115_200,
+        parity=UARTParity.NONE,
+        length=UARTLengthBits.EIGHT,
+        stop=UARTStopBits.ONE,
+    )
 
-    test.uart(channel=0).write(data=b"START\r\n", at_ms=100)
+    uart.write(data=b"START\r\n", at_ms=100)
 
     instruction = tuple(test.instructions)[0]
     assert isinstance(instruction, UARTWriteInstruction)
@@ -197,12 +205,27 @@ def test_uart_write_stores_raw_bytes() -> None:
 
 def test_uart_write_text_encodes_and_stores_bytes() -> None:
     test = HilRigTest(name="UART text")
+    uart = test.uart(channel=0)
+    uart.configure(
+        mode=UARTMode.TTL_3V3,
+        baud_hz=115_200,
+        parity=UARTParity.NONE,
+        length=UARTLengthBits.EIGHT,
+        stop=UARTStopBits.ONE,
+    )
 
-    test.uart(channel=0).write_text(data="START\r\n", encoding="ascii", at_tick=100)
+    uart.write_text(data="START\r\n", encoding="ascii", at_tick=100)
 
     instruction = tuple(test.instructions)[0]
     assert isinstance(instruction, UARTWriteInstruction)
     assert instruction.data == b"START\r\n"
+
+
+def test_uart_write_requires_configuration() -> None:
+    test = HilRigTest(name="Unconfigured UART")
+
+    with pytest.raises(ConfigurationError, match="must be configured"):
+        test.uart(channel=0).write(data=b"START\r\n", at_tick=0)
 
 
 def test_uart_write_text_rejects_unknown_encoding() -> None:

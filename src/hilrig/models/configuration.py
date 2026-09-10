@@ -9,7 +9,7 @@ from types import MappingProxyType
 from typing import TypeAlias
 
 from hilrig.exceptions import ConfigurationError
-from hilrig.models.channels import Channel, validate_channel_index
+from hilrig.models.channels import Channel, ChannelKind, validate_channel_index
 
 
 class FrequencyMode(Enum):
@@ -235,6 +235,25 @@ PeripheralConfiguration: TypeAlias = (
     | UARTConfiguration
 )
 
+_CONFIGURATION_TYPES: dict[ChannelKind, type[object]] = {
+    ChannelKind.DIGITAL_INPUT: DigitalInputConfiguration,
+    ChannelKind.DIGITAL_OUTPUT: DigitalOutputConfiguration,
+    ChannelKind.PWM_INPUT: PwmInputConfiguration,
+    ChannelKind.PWM_OUTPUT: PwmOutputConfiguration,
+    ChannelKind.ANALOGUE_INPUT: AnalogueInputConfiguration,
+    ChannelKind.ANALOGUE_OUTPUT: AnalogueOutputConfiguration,
+    ChannelKind.I2C: I2CConfiguration,
+    ChannelKind.SPI: SPIConfiguration,
+    ChannelKind.UART: UARTConfiguration,
+}
+
+
+def configuration_type_for(kind: ChannelKind) -> type[object]:
+    """Return the configuration model required by one peripheral kind."""
+    if not isinstance(kind, ChannelKind):
+        raise TypeError("kind must be a ChannelKind")
+    return _CONFIGURATION_TYPES[kind]
+
 
 class Configuration:
     """Test-level settings and per-channel static configurations."""
@@ -285,6 +304,9 @@ class Configuration:
         if not isinstance(channel, Channel):
             raise TypeError("channel must be a Channel")
         validate_channel_index(channel.kind, channel.index)
+        expected_type = configuration_type_for(channel.kind)
+        if not isinstance(configuration, expected_type):
+            raise TypeError(f"{channel.kind.value} channel requires {expected_type.__name__}")
         if channel in self._channel_configurations:
             raise ConfigurationError(
                 f"{channel.kind.value} channel {channel.index} is already configured"

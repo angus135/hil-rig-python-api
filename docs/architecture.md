@@ -69,6 +69,7 @@ User-facing handles translate readable operations into data objects. For example
 
 ```python
 led = test.digital_output(channel=0)
+led.configure(voltage=LogicVoltage.V3_3, initial_state=DigitalState.LOW)
 led.high(at_ms=100)
 ```
 
@@ -77,6 +78,8 @@ shared channel identity, and `HIGH` action. It does not communicate with hardwar
 
 All channel accessors require the explicit keyword `channel=`. Handles are cached, so
 asking for the same peripheral kind and channel index returns the same object.
+Every instruction and assertion is checked against the configuration mapping before it
+is stored, and compilation repeats that check as a defensive validation boundary.
 
 ## Configuration model
 
@@ -87,12 +90,11 @@ only be configured once.
 No recording-enable setting exists. Recording is treated as rig-wide behaviour rather
 than user-selected channel configuration.
 
-Analogue inputs and outputs use zero-field configuration marker objects. Calling
-`configure()` has no electrical effect; it explicitly declares that the channel belongs
-to the test, produces an empty `parameters` object in the compiled IR, and gives later
-validation and assertion features a stable channel identity. Analogue output stimuli
-require this declaration first. Analogue input handles are limited to physical channels
-0 and 1.
+Analogue inputs use zero-field configuration marker objects. Calling `configure()`
+explicitly declares that the input belongs to the test and produces an empty
+`parameters` object in the compiled IR. Analogue output configuration additionally
+stores its initial voltage, defaulting to 0 V. Analogue input handles are limited to
+physical channels 0 and 1.
 
 ## Time model
 

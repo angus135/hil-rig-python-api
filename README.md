@@ -72,6 +72,11 @@ created by the API rather than supplied by the user. Host-side assertions indepe
 receive sequential `assertion_id` values starting at zero, which are retained for future
 evaluation reports but are not sent to the RIG.
 
+Every peripheral channel must be explicitly configured before it can be referenced by a
+stimulus or assertion command. Compilation checks this relationship again so malformed
+or manually altered internal models cannot describe an enabled operation on a disabled
+protocol channel.
+
 ## Time arguments
 
 Every point stimulus and point assertion accepts exactly one of:
@@ -211,7 +216,7 @@ The following assertion definitions are implemented:
 For example:
 
 ```python
-pwm = test.pwm_input(channel=0)
+pwm = test.pwm_input(channel=0).configure(voltage=LogicVoltage.V3_3)
 test.expect(pwm).frequency_near(
     frequency_hz=50_000,
     tolerance_hz=500,

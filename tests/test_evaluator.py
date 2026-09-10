@@ -10,6 +10,7 @@ from hilrig import (
     CaptureStatus,
     EvaluationError,
     EvaluationVerdict,
+    LogicVoltage,
     PWMMeasurement,
     TickResult,
     UnsupportedAssertionError,
@@ -65,10 +66,10 @@ def _capture(
 
 def _all_passing_assertions() -> CompiledTestIR:
     test = HilRigTest(name="All evaluator operations")
-    digital_0 = test.digital_input(channel=0)
-    digital_1 = test.digital_input(channel=1)
-    pwm = test.pwm_input(channel=0)
-    analogue = test.analogue_input(channel=0)
+    digital_0 = test.digital_input(channel=0).configure(voltage=LogicVoltage.V3_3)
+    digital_1 = test.digital_input(channel=1).configure(voltage=LogicVoltage.V3_3)
+    pwm = test.pwm_input(channel=0).configure(voltage=LogicVoltage.V3_3)
+    analogue = test.analogue_input(channel=0).configure()
 
     test.expect(digital_0).low(at_tick=0)
     test.expect(digital_0).high(at_tick=1)
@@ -150,13 +151,16 @@ def test_evaluator_dispatches_every_current_assertion_and_passes(tmp_path: Path)
 
 def test_point_failures_include_observed_values_and_failure_ticks(tmp_path: Path) -> None:
     test = HilRigTest(name="Point failures")
-    test.expect(test.digital_input(channel=0)).low(at_tick=0)
-    test.expect(test.analogue_input(channel=0)).near(
+    digital_input = test.digital_input(channel=0).configure(voltage=LogicVoltage.V3_3)
+    analogue_input = test.analogue_input(channel=0).configure()
+    pwm_input = test.pwm_input(channel=0).configure(voltage=LogicVoltage.V3_3)
+    test.expect(digital_input).low(at_tick=0)
+    test.expect(analogue_input).near(
         target_v=3.3,
         tolerance_v=0.01,
         at_tick=0,
     )
-    test.expect(test.pwm_input(channel=0)).frequency_near(
+    test.expect(pwm_input).frequency_near(
         frequency_hz=50_000,
         tolerance_hz=10,
         at_tick=0,
@@ -190,7 +194,8 @@ def test_range_without_violations_is_inconclusive_when_evidence_has_gaps(
     tmp_path: Path,
 ) -> None:
     test = HilRigTest(name="Incomplete range")
-    test.expect(test.analogue_input(channel=0)).remain_within(
+    analogue_input = test.analogue_input(channel=0).configure()
+    test.expect(analogue_input).remain_within(
         minimum_v=4.9,
         maximum_v=5.1,
         from_tick=0,
@@ -224,7 +229,8 @@ def test_range_without_violations_is_inconclusive_when_evidence_has_gaps(
 
 def test_known_range_violation_fails_even_when_other_ticks_are_missing(tmp_path: Path) -> None:
     test = HilRigTest(name="Violation beats gap")
-    test.expect(test.digital_input(channel=0)).remain_high(from_tick=0, until_tick=2)
+    digital_input = test.digital_input(channel=0).configure(voltage=LogicVoltage.V3_3)
+    test.expect(digital_input).remain_high(from_tick=0, until_tick=2)
     compiled = test.compile()
     run = _capture(
         tmp_path / "violation.sqlite3",
@@ -243,7 +249,8 @@ def test_known_range_violation_fails_even_when_other_ticks_are_missing(tmp_path:
 
 def test_transition_requires_adjacent_valid_ticks(tmp_path: Path) -> None:
     test = HilRigTest(name="Transition gap")
-    test.expect(test.digital_input(channel=0)).to_transition(
+    digital_input = test.digital_input(channel=0).configure(voltage=LogicVoltage.V3_3)
+    test.expect(digital_input).to_transition(
         from_state=False,
         to_state=True,
         between_ticks=(0, 2),
@@ -265,7 +272,8 @@ def test_transition_requires_adjacent_valid_ticks(tmp_path: Path) -> None:
 
 def test_incomplete_capture_keeps_passing_assertion_but_not_overall_pass(tmp_path: Path) -> None:
     test = HilRigTest(name="Early assertion")
-    test.expect(test.digital_input(channel=0)).high(at_tick=0)
+    digital_input = test.digital_input(channel=0).configure(voltage=LogicVoltage.V3_3)
+    test.expect(digital_input).high(at_tick=0)
     compiled = test.compile()
     run = _capture(
         tmp_path / "incomplete-overall.sqlite3",
@@ -284,7 +292,8 @@ def test_incomplete_capture_keeps_passing_assertion_but_not_overall_pass(tmp_pat
 
 def test_non_recoverable_application_error_prevents_overall_pass(tmp_path: Path) -> None:
     test = HilRigTest(name="Application error")
-    test.expect(test.digital_input(channel=0)).high(at_tick=0)
+    digital_input = test.digital_input(channel=0).configure(voltage=LogicVoltage.V3_3)
+    test.expect(digital_input).high(at_tick=0)
     compiled = test.compile()
     run = _capture(
         tmp_path / "application-error.sqlite3",
@@ -373,7 +382,8 @@ def test_unknown_stored_assertion_requires_a_registered_handler(tmp_path: Path) 
 
 def test_evaluation_report_exports_json_and_markdown(tmp_path: Path) -> None:
     test = HilRigTest(name="Report export")
-    test.expect(test.analogue_input(channel=0)).near(
+    analogue_input = test.analogue_input(channel=0).configure()
+    test.expect(analogue_input).near(
         target_v=5,
         tolerance_v=0.005,
         at_tick=0,

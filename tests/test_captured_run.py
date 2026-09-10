@@ -13,8 +13,10 @@ from hilrig import (
     CaptureStorageError,
     CommunicationPeripheral,
     CommunicationResult,
+    DigitalState,
     FrequencyMode,
     IncomingResultAdapter,
+    LogicVoltage,
     PWMMeasurement,
     StartMode,
     TickCondition,
@@ -85,7 +87,9 @@ def test_builder_persists_complete_run_and_channel_queries(tmp_path: Path) -> No
 def test_builder_can_reuse_identity_and_timing_from_compiled_test(tmp_path: Path) -> None:
     test = HilRigTest(name="Compiled capture")
     test.configure(frequency_mode=FrequencyMode.HZ_10K, start_mode=StartMode.IMMEDIATE)
-    test.digital_output(channel=0).high(at_tick=25)
+    digital_output = test.digital_output(channel=0)
+    digital_output.configure(voltage=LogicVoltage.V3_3, initial_state=DigitalState.LOW)
+    digital_output.high(at_tick=25)
     compiled = test.compile()
 
     builder = CapturedRunBuilder.from_compiled_test(

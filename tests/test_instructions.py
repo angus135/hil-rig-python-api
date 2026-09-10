@@ -1,6 +1,6 @@
 import pytest
 
-from hilrig import I2CRole, I2CSpeed, LogicVoltage, Pullup
+from hilrig import DigitalState, I2CRole, I2CSpeed, LogicVoltage, Pullup
 from hilrig import Test as HilRigTest
 from hilrig.exceptions import ConfigurationError, PeripheralError
 from hilrig.models.instructions import (
@@ -20,8 +20,17 @@ from hilrig.models.instructions import (
 def test_instruction_ids_increment_across_peripheral_types() -> None:
     test = HilRigTest(name="Instruction IDs")
 
-    test.digital_output(channel=0).high(at_tick=0)
-    test.pwm_output(channel=0).enable(at_tick=1)
+    digital_output = test.digital_output(channel=0)
+    digital_output.configure(voltage=LogicVoltage.V3_3, initial_state=DigitalState.LOW)
+    digital_output.high(at_tick=0)
+    pwm_output = test.pwm_output(channel=0)
+    pwm_output.configure(
+        voltage=LogicVoltage.V3_3,
+        initial_frequency_hz=1_000,
+        initial_duty_cycle=0.5,
+        initially_enabled=False,
+    )
+    pwm_output.enable(at_tick=1)
     analogue_output = test.analogue_output(channel=0)
     analogue_output.configure()
     analogue_output.set_voltage(3.2, at_tick=2)
@@ -32,6 +41,7 @@ def test_instruction_ids_increment_across_peripheral_types() -> None:
 def test_digital_output_stimuli_create_expected_actions() -> None:
     test = HilRigTest(name="Digital actions")
     output = test.digital_output(channel=0)
+    output.configure(voltage=LogicVoltage.V3_3, initial_state=DigitalState.LOW)
 
     output.high(at_tick=1).low(at_ms=2).toggle(at_s=0.003)
 
@@ -48,6 +58,12 @@ def test_digital_output_stimuli_create_expected_actions() -> None:
 def test_pwm_stimuli_preserve_atomic_and_individual_updates() -> None:
     test = HilRigTest(name="PWM actions")
     pwm = test.pwm_output(channel=1)
+    pwm.configure(
+        voltage=LogicVoltage.V12,
+        initial_frequency_hz=1_000,
+        initial_duty_cycle=0.5,
+        initially_enabled=False,
+    )
 
     pwm.enable(at_tick=10)
     pwm.disable(at_tick=20)
@@ -106,6 +122,20 @@ def test_analogue_output_stimulus_requires_configuration() -> None:
 
     with pytest.raises(ConfigurationError, match="must be configured"):
         test.analogue_output(channel=0).set_voltage(3.3, at_tick=0)
+
+
+def test_digital_output_stimulus_requires_configuration() -> None:
+    test = HilRigTest(name="Unconfigured digital output")
+
+    with pytest.raises(ConfigurationError, match="must be configured"):
+        test.digital_output(channel=0).high(at_tick=0)
+
+
+def test_pwm_output_stimulus_requires_configuration() -> None:
+    test = HilRigTest(name="Unconfigured PWM output")
+
+    with pytest.raises(ConfigurationError, match="must be configured"):
+        test.pwm_output(channel=0).enable(at_tick=0)
 
 
 def test_i2c_master_write_and_read_are_stored() -> None:

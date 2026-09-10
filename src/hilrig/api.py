@@ -57,6 +57,7 @@ from hilrig.models.configuration import (
     UARTMode,
     UARTParity,
     UARTStopBits,
+    configuration_type_for,
 )
 from hilrig.models.execution import CompiledTestIR
 from hilrig.models.instructions import (
@@ -1352,6 +1353,7 @@ class Test:
     def _schedule(self, factory: Callable[[int], InstructionType]) -> InstructionType:
         self._ensure_mutable()
         instruction = factory(self._next_instruction_id)
+        self._require_configured_channel(instruction.channel, usage="stimuli")
         self._instructions._append(instruction)
         self._next_instruction_id += 1
         return instruction
@@ -1359,9 +1361,19 @@ class Test:
     def _add_assertion(self, factory: Callable[[int], AssertionType]) -> AssertionType:
         self._ensure_mutable()
         assertion = factory(self._next_assertion_id)
+        self._require_configured_channel(assertion.channel, usage="assertions")
         self._assertions._append(assertion)
         self._next_assertion_id += 1
         return assertion
+
+    def _require_configured_channel(self, channel: Channel, *, usage: str) -> None:
+        configuration = self._configuration.for_channel(channel)
+        expected_type = configuration_type_for(channel.kind)
+        if not isinstance(configuration, expected_type):
+            raise ConfigurationError(
+                f"{channel.kind.value} channel {channel.index} must be configured "
+                f"before adding {usage}"
+            )
 
     def _ensure_mutable(self) -> None:
         if self.is_compiled:

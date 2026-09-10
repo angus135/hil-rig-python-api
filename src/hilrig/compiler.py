@@ -26,7 +26,7 @@ from hilrig.models.assertions import (
     RangeAssertion,
 )
 from hilrig.models.channels import Channel, validate_channel_index
-from hilrig.models.configuration import Configuration
+from hilrig.models.configuration import Configuration, configuration_type_for
 from hilrig.models.execution import (
     CompiledAssertion,
     CompiledConfiguration,
@@ -98,8 +98,8 @@ def compile_test(
 ) -> CompiledTestIR:
     """Validate and copy a test definition into an immutable intermediate form."""
     _validate_configuration_channels(configuration)
-    _validate_instructions(instructions)
-    _validate_assertions(assertions)
+    _validate_instructions(instructions, configuration=configuration)
+    _validate_assertions(assertions, configuration=configuration)
 
     ordered_instructions = tuple(
         sorted(
@@ -249,19 +249,37 @@ def _ir_value(value: object) -> IRScalar:
     raise ValidationError(f"Unsupported intermediate-representation value: {type(value).__name__}")
 
 
-def _validate_instructions(instructions: InstructionList) -> None:
+def _validate_instructions(
+    instructions: InstructionList,
+    *,
+    configuration: Configuration,
+) -> None:
     for expected_id, instruction in enumerate(instructions):
         if instruction.instruction_id != expected_id:
             raise ValidationError("Instruction IDs must be sequential from zero")
         _validate_model_channel(instruction.channel, label="Instruction")
+        _validate_channel_is_configured(
+            instruction.channel,
+            configuration=configuration,
+            label="Instruction",
+        )
         _validate_tick(instruction.timestamp, label="Instruction timestamp")
 
 
-def _validate_assertions(assertions: AssertionList) -> None:
+def _validate_assertions(
+    assertions: AssertionList,
+    *,
+    configuration: Configuration,
+) -> None:
     for expected_id, assertion in enumerate(assertions):
         if assertion.assertion_id != expected_id:
             raise ValidationError("Assertion IDs must be sequential from zero")
         _validate_model_channel(assertion.channel, label="Assertion")
+        _validate_channel_is_configured(
+            assertion.channel,
+            configuration=configuration,
+            label="Assertion",
+        )
         if type(assertion) not in _ASSERTION_OPERATIONS:
             raise ValidationError(f"Unsupported assertion type: {type(assertion).__name__}")
         if isinstance(assertion, PointAssertion):
@@ -287,6 +305,20 @@ def _validate_model_channel(channel: object, *, label: str) -> None:
         validate_channel_index(channel.kind, channel.index)
     except (TypeError, ValueError) as error:
         raise ValidationError(f"{label} uses an invalid channel: {error}") from error
+
+
+def _validate_channel_is_configured(
+    channel: Channel,
+    *,
+    configuration: Configuration,
+    label: str,
+) -> None:
+    channel_configuration = configuration.for_channel(channel)
+    expected_type = configuration_type_for(channel.kind)
+    if not isinstance(channel_configuration, expected_type):
+        raise ValidationError(
+            f"{label} references unconfigured {channel.kind.value} channel {channel.index}"
+        )
 
 
 def _validate_tick(tick: object, *, label: str) -> None:

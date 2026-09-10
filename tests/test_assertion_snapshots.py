@@ -8,6 +8,7 @@ from hilrig import (
     CapturedRunIR,
     CaptureSchemaError,
     FrequencyMode,
+    LogicVoltage,
     StartMode,
 )
 from hilrig import Test as HilRigTest
@@ -20,9 +21,9 @@ def test_compiled_assertions_are_snapshotted_and_restored_for_evaluation(
 ) -> None:
     test = HilRigTest(name="Reusable assertion snapshot")
     test.configure(frequency_mode=FrequencyMode.HZ_10K, start_mode=StartMode.IMMEDIATE)
-    digital_input = test.digital_input(channel=0)
-    pwm_input = test.pwm_input(channel=1)
-    analogue_input = test.analogue_input(channel=0)
+    digital_input = test.digital_input(channel=0).configure(voltage=LogicVoltage.V3_3)
+    pwm_input = test.pwm_input(channel=1).configure(voltage=LogicVoltage.V5)
+    analogue_input = test.analogue_input(channel=0).configure()
     test.expect(digital_input).remain_high(from_tick=10, until_tick=20)
     test.expect(pwm_input).frequency_near(
         frequency_hz=50_000,
@@ -98,7 +99,8 @@ def test_unknown_assertion_set_is_reported_clearly(tmp_path: Path) -> None:
 
 def test_corrupt_assertion_arguments_are_rejected_when_loaded(tmp_path: Path) -> None:
     test = HilRigTest(name="Corrupt assertion snapshot")
-    test.expect(test.digital_input(channel=0)).high(at_tick=0)
+    digital_input = test.digital_input(channel=0).configure(voltage=LogicVoltage.V3_3)
+    test.expect(digital_input).high(at_tick=0)
     builder = CapturedRunBuilder.from_compiled_test(tmp_path / "run.sqlite3", test.compile())
     builder.abort()
 

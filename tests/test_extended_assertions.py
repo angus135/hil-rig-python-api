@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from hilrig import FrequencyMode, StartMode
+from hilrig import ConfigurationError, FrequencyMode, LogicVoltage, StartMode
 from hilrig import Test as HilRigTest
 from hilrig.models.assertions import (
     AnalogueInputNearAssertion,
@@ -24,7 +24,7 @@ from hilrig.models.assertions import (
 
 def test_digital_remain_low_supports_all_time_units() -> None:
     test = HilRigTest(name="Remain low")
-    digital_input = test.digital_input(channel=0)
+    digital_input = test.digital_input(channel=0).configure(voltage=LogicVoltage.V3_3)
 
     test.expect(digital_input).remain_low(from_tick=10, until_tick=20)
     test.expect(digital_input).remain_low(from_ms=30, until_ms=40)
@@ -42,7 +42,7 @@ def test_digital_remain_low_supports_all_time_units() -> None:
 def test_pwm_point_assertions_store_validated_values_and_converted_ticks() -> None:
     test = HilRigTest(name="PWM point assertions")
     test.configure(frequency_mode=FrequencyMode.HZ_10K, start_mode=StartMode.IMMEDIATE)
-    pwm_input = test.pwm_input(channel=0)
+    pwm_input = test.pwm_input(channel=0).configure(voltage=LogicVoltage.V3_3)
 
     test.expect(pwm_input).period_near(period_ns=20_000, tolerance_ns=200, at_tick=100)
     test.expect(pwm_input).frequency_near(
@@ -82,7 +82,7 @@ def test_pwm_point_assertions_store_validated_values_and_converted_ticks() -> No
 def test_pwm_range_assertions_support_converted_ranges() -> None:
     test = HilRigTest(name="PWM range assertions")
     test.configure(frequency_mode=FrequencyMode.HZ_10K, start_mode=StartMode.IMMEDIATE)
-    pwm_input = test.pwm_input(channel=0)
+    pwm_input = test.pwm_input(channel=0).configure(voltage=LogicVoltage.V3_3)
 
     test.expect(pwm_input).frequency_remain_within(
         minimum_hz=49_500,
@@ -210,10 +210,45 @@ def test_analogue_assertions_reject_invalid_voltage_values() -> None:
         expectation.within(minimum_v=5, maximum_v=4, at_tick=0)
 
 
+@pytest.mark.parametrize(
+    ("input_handle", "add_assertion"),
+    [
+        (
+            lambda test: test.digital_input(channel=0),
+            lambda expectation: expectation.high(at_tick=0),
+        ),
+        (
+            lambda test: test.pwm_input(channel=0),
+            lambda expectation: expectation.period_near(
+                period_ns=20_000,
+                tolerance_ns=100,
+                at_tick=0,
+            ),
+        ),
+        (
+            lambda test: test.analogue_input(channel=0),
+            lambda expectation: expectation.near(
+                target_v=5,
+                tolerance_v=0.1,
+                at_tick=0,
+            ),
+        ),
+    ],
+)
+def test_all_supported_assertion_families_require_explicit_configuration(
+    input_handle,
+    add_assertion,
+) -> None:
+    test = HilRigTest(name="Unconfigured assertion input")
+
+    with pytest.raises(ConfigurationError, match="must be configured before adding assertions"):
+        add_assertion(test.expect(input_handle(test)))
+
+
 def test_compiler_represents_new_assertions_and_uses_latest_range_end() -> None:
     test = HilRigTest(name="Compiled extended assertions")
-    analogue_input = test.analogue_input(channel=1)
-    pwm_input = test.pwm_input(channel=0)
+    analogue_input = test.analogue_input(channel=1).configure()
+    pwm_input = test.pwm_input(channel=0).configure(voltage=LogicVoltage.V3_3)
     test.expect(pwm_input).period_near(period_ns=20_000, tolerance_ns=200, at_tick=100)
     test.expect(analogue_input).remain_within(
         minimum_v=4.9,
@@ -241,7 +276,7 @@ def test_compiler_represents_new_assertions_and_uses_latest_range_end() -> None:
 
 def test_new_assertions_are_written_to_the_human_excel_view(tmp_path: Path) -> None:
     test = HilRigTest(name="Extended assertion workbook")
-    analogue_input = test.analogue_input(channel=0)
+    analogue_input = test.analogue_input(channel=0).configure()
     test.expect(analogue_input).near(target_v=5, tolerance_v=0.005, at_tick=20)
 
     workbook_path = test.compile().write_excel(tmp_path / "assertions.xlsx")
