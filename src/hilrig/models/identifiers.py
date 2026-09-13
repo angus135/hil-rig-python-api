@@ -15,6 +15,21 @@ def validate_uint128(value: object, *, name: str) -> int:
     return value
 
 
+def application_test_id_to_bytes(application_test_id: int) -> bytes:
+    """Encode an Application Test ID in stable big-endian byte order."""
+    validated = validate_uint128(application_test_id, name="application_test_id")
+    return validated.to_bytes(16, byteorder="big")
+
+
+def application_test_id_from_bytes(value: bytes) -> int:
+    """Decode a stable big-endian 16-byte Application Test ID."""
+    if not isinstance(value, bytes):
+        raise TypeError("Application Test ID must be bytes")
+    if len(value) != 16:
+        raise ValueError("Application Test ID must contain exactly 16 bytes")
+    return int.from_bytes(value, byteorder="big")
+
+
 @dataclass(frozen=True, slots=True)
 class UploadAttempt:
     """Bind one immutable test definition to one Application Test ID."""

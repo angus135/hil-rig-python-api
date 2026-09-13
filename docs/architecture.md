@@ -4,10 +4,11 @@
 
 The implemented library constructs an in-memory description of a test and compiles it
 into a protocol-neutral intermediate representation. The returned-data side now has a
-protocol-neutral typed ingestion boundary and SQLite-backed captured-run IR. It still
-does not define how outgoing data becomes an IDC message, how bytes are transported,
-or how final application-message objects are mapped. Host-side evaluation of the current
-digital, PWM, and analogue assertions is implemented against finalized captured runs.
+protocol-neutral typed ingestion boundary and SQLite-backed captured-run IR. Fixed
+Digital, Analogue, and PWM data is lowered through the public Application wrapper and
+its Transport is serviced over USB CDC. Host-side evaluation of the current digital,
+PWM, and analogue assertions is implemented against finalized captured runs. Variable
+communication messages and Application Response/Execution Control remain deferred.
 
 ```text
 User script
@@ -26,16 +27,12 @@ Internal model
     v
 Immutable CompiledTestIR
     |-- versioned machine JSON (summary, configurations, instructions)
-    `-- human Excel workbook (also includes assertions)
+    |-- human Excel workbook (also includes assertions)
+    `-- fixed-I/O state expander -> ApplicationCodec -> Transport -> USB CDC
 
-Future outgoing, intentionally undecided:
-    IDC lowering/serialization -> transport
-
-Future incoming protocol adapter:
-    USB bytes -> transport -> application message
-                                  |
-                                  v
-Implemented stable boundary:
+USB CDC -> Transport -> ApplicationCodec -> fixed TestResult adapter
+                                              |
+                                              v
     typed result records -> batched CapturedRunBuilder -> SQLite -> CapturedRunIR
                                                               |
                                                               v
@@ -94,7 +91,9 @@ Analogue inputs use zero-field configuration marker objects. Calling `configure(
 explicitly declares that the input belongs to the test and produces an empty
 `parameters` object in the compiled IR. Analogue output configuration additionally
 stores its initial voltage, defaulting to 0 V. Analogue input handles are limited to
-physical channels 0 and 1.
+physical channels 0 and 1. Analogue output values must be exactly representable in
+whole microvolts. PWM output duty values must be exact permyriads, and their frequencies
+must produce a whole-nanosecond period in the protocol's unsigned 32-bit range.
 
 ## Time model
 
@@ -170,19 +169,56 @@ The human-readable `.xlsx` view contains `Test Summary`, `Configurations`,
 `Instructions`, and `Assertions` sheets. It is generated from the same compiled
 snapshot, so it cannot disagree with the JSON about rig-facing data.
 
-Neither representation defines an IDC package, wire format, instruction opcode, USB
-transport, or returned-result format. The future IDC layer will lower the machine IR
-into the eventual transport representation without changing the user-facing test API.
+Neither exported representation is itself a wire format. The separate protocol adapter
+lowers the compiled snapshot into the teammate-owned public Application values without
+changing the user-facing test API.
 
 An observation-only test may contain assertions without stimulus instructions, because
 the rig is expected to record all channels.
 
+## Fixed-I/O protocol boundary
+
+`FixedIOProtocolAdapter` depends only on `CompiledTestIR`, `UploadAttempt`, and the
+public `hil_rig_protocol` module. It builds the complete fixed configuration arrays,
+leaving every unconfigured and communication record canonical-disabled. The logical
+definition ID never appears on the wire: the adapter encodes the upload attempt's
+128-bit Application Test ID as 16 big-endian bytes in configuration, instruction, and
+result correlation.
+
+The outgoing iterator is a state expander rather than a tick counter. It initializes
+Digital and PWM output state from configuration, separately retains the requested PWM
+period/duty and enabled flag, then groups fixed-output IR instructions by their existing
+sparse ticks. Every group is applied in instruction-ID order and produces one complete
+fixed `TestInstruction`. A disabled PWM produces protocol period/duty `0/0`; changing
+its frequency or duty updates retained state so a later enable restores the requested
+waveform. Analogue initial voltage is absent from the protocol configuration, so any
+configured Analogue output inserts tick zero into the sparse sequence. A real tick-zero
+stimulus wins within that single tick-zero state.
+
+`FixedIOProtocolConnection` composes four replaceable pieces:
+
+- exact-name COM discovery and a pySerial byte stream;
+- one host-role protocol `Transport` owned and serviced on the creating thread;
+- the stateless Application codec and fixed-I/O state adapter; and
+- an optional `IncomingResultAdapter` bound to a `CapturedRunBuilder`.
+
+The caller repeatedly invokes non-blocking `service()`. The connection retains partial
+Transport input and serial output, advances Transport with monotonic wrapped
+milliseconds, drains events/application data, and submits at most one reliable
+Application message at a time. A queued upload is considered delivered only when its
+last Transport delivery is confirmed; this deliberately does not claim Application
+acceptance. `_application_response_pending()` is the narrow scaffold that will enforce
+configuration/tick Response stop-and-wait once that public wrapper exists. Execution
+Control can be added to the same outgoing queue without changing serial or state
+expansion.
+
 ## Captured-run boundary
 
-The incoming protocol is isolated from result storage. The final adapter will turn one
-complete application message into one `TickResult`, zero or more raw
-`CommunicationResult` values, or an `ApplicationErrorRecord`. These typed records have
-no dependency on a C binding, USB framing, application union layout, or IDC opcodes.
+The incoming protocol is isolated from result storage. The implemented fixed adapter
+turns one complete Application `TestResult` into one `TickResult`. Future public
+variable result and Error wrappers will add raw `CommunicationResult` values and
+`ApplicationErrorRecord` values at the same boundary. These typed storage records have
+no dependency on CFFI objects or USB framing.
 
 `TickResult` currently mirrors the stable semantic content identified in the
 application design:
@@ -310,19 +346,11 @@ the same captured evidence and assertion snapshot can be evaluated again later.
 
 ## Remaining planned boundaries
 
-Add these only after their designs are agreed:
-
-```text
-src/hilrig/
-|-- idc/          Application-message serialization and parsing
-`-- transport/    USB CDC connection and byte transfer
-```
-
-`results/adapter.py` reserves the incoming orchestration and mapping methods. They are
-documented stubs because inventing a Python representation for
-`HIL_Application_Message_T` before the binding is final would create the wrong
-dependency. The implemented builder can already be tested with fabricated typed
-records.
+When the protocol exposes them publicly, add Response and Execution Control handling to
+the existing connection workflow, then add variable communication configuration,
+instruction, result, and Error mappings beside the fixed mappings. Serial discovery,
+Transport servicing, upload identity, capture storage, and fixed state expansion do not
+need to change for those additions.
 
 ## Testing approach
 
@@ -335,7 +363,9 @@ records.
   invalid evidence, transition gaps, application errors, and JSON/Markdown reports.
 - Captured-run tests verify batching barriers, transactional rollback, finalization,
   validity normalization, raw payload preservation, queries, and derived exports.
-- Future IDC and result-adapter tests should use agreed known message vectors.
+- Protocol adapter tests verify full-array configuration, sparse state retention,
+  PWM disable/restore behavior, tick-zero Analogue initialization, result mapping,
+  exact COM discovery, and partial serial writes.
 - Future hardware tests should be a separate, explicitly selected test category.
 
 The default CI workflow runs deterministic tests that require no connected rig.

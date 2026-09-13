@@ -117,6 +117,29 @@ def test_analogue_output_stimulus_rejects_voltage_outside_supported_range(
         analogue_output.set_voltage(voltage, at_tick=0)
 
 
+def test_analogue_output_stimulus_requires_whole_microvolts() -> None:
+    test = HilRigTest(name="Unrepresentable analogue action")
+    analogue_output = test.analogue_output(channel=0).configure()
+
+    with pytest.raises(ValueError, match="whole microvolt"):
+        analogue_output.set_voltage(1.0000001, at_tick=0)
+
+
+def test_pwm_stimulus_requires_protocol_representable_values() -> None:
+    test = HilRigTest(name="Unrepresentable PWM actions")
+    pwm = test.pwm_output(channel=0).configure(
+        voltage=LogicVoltage.V3_3,
+        initial_frequency_hz=1_000,
+        initial_duty_cycle=0.5,
+        initially_enabled=True,
+    )
+
+    with pytest.raises(ValueError, match="whole-nanosecond"):
+        pwm.set_frequency(frequency_hz=3, at_tick=0)
+    with pytest.raises(ValueError, match="one permyriad"):
+        pwm.set_duty_cycle(duty_cycle=0.33333, at_tick=0)
+
+
 def test_analogue_output_stimulus_requires_configuration() -> None:
     test = HilRigTest(name="Unconfigured analogue output")
 

@@ -32,6 +32,10 @@ from hilrig.exceptions import (
     FrozenTestError,
     HilRigError,
     PeripheralError,
+    ProtocolDependencyError,
+    ProtocolIntegrationError,
+    ProtocolSessionError,
+    SerialDiscoveryError,
     TimingError,
     UnsupportedAssertionError,
     ValidationError,
@@ -56,6 +60,14 @@ from hilrig.models.configuration import (
 )
 from hilrig.models.execution import CompiledTestIR
 from hilrig.models.identifiers import UploadAttempt
+from hilrig.protocol import (
+    FixedIOProtocolAdapter,
+    FixedIOProtocolConnection,
+    FixedIOUploadMessages,
+    ProtocolServiceReport,
+    SerialConnectionSettings,
+    discover_serial_port,
+)
 from hilrig.results import (
     ApplicationErrorRecord,
     CapturedAssertionSet,
@@ -97,6 +109,9 @@ __all__ = [
     "EvaluationReport",
     "EvaluationVerdict",
     "FrequencyMode",
+    "FixedIOProtocolAdapter",
+    "FixedIOProtocolConnection",
+    "FixedIOUploadMessages",
     "FrozenTestError",
     "HilRigError",
     "I2C",
@@ -105,6 +120,10 @@ __all__ = [
     "IncomingResultAdapter",
     "LogicVoltage",
     "PeripheralError",
+    "ProtocolDependencyError",
+    "ProtocolIntegrationError",
+    "ProtocolServiceReport",
+    "ProtocolSessionError",
     "Pullup",
     "PwmInput",
     "PwmInputExpectation",
@@ -117,6 +136,8 @@ __all__ = [
     "SPIRole",
     "SPISize",
     "StartMode",
+    "SerialConnectionSettings",
+    "SerialDiscoveryError",
     "Test",
     "TimingError",
     "TickCondition",
@@ -130,4 +151,5 @@ __all__ = [
     "UploadAttempt",
     "ValidationError",
     "evaluate_assertions",
+    "discover_serial_port",
 ]

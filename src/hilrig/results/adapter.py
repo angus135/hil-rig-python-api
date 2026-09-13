@@ -1,80 +1,97 @@
-"""Future USB/transport/application adapter boundary.
-
-The protocol repositories do not yet expose their final Python interfaces. This file
-therefore documents and reserves the composition boundary without guessing field names
-or encoding rules that would become accidental public API.
-"""
+"""Translate decoded protocol result messages into the captured-run IR."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from importlib import import_module
+from types import ModuleType
+from typing import Any
 
+from hilrig.exceptions import ProtocolDependencyError, ProtocolSessionError
+from hilrig.models.identifiers import application_test_id_from_bytes
 from hilrig.results.builder import CapturedRunBuilder
+from hilrig.results.models import PWMMeasurement, TickCondition, TickResult
+
+
+def _load_protocol_module() -> ModuleType:
+    try:
+        return import_module("hil_rig_protocol")
+    except ImportError as error:
+        raise ProtocolDependencyError(
+            "Incoming protocol results require the hil-rig-protocol package"
+        ) from error
 
 
 class IncomingResultAdapter:
-    """Skeleton that will translate protocol output into typed builder records.
+    """Convert fixed Application Test Results and queue them for SQLite storage."""
 
-    The stable downstream target is already implemented: once a complete application
-    message is available, an adapter should construct ``TickResult``, zero or more
-    ``CommunicationResult`` records, or ``ApplicationErrorRecord`` and submit them to
-    ``self.builder``.
-    """
-
-    def __init__(self, builder: CapturedRunBuilder) -> None:
+    def __init__(
+        self,
+        builder: CapturedRunBuilder,
+        *,
+        protocol_module: ModuleType | Any | None = None,
+    ) -> None:
         if not isinstance(builder, CapturedRunBuilder):
             raise TypeError("builder must be a CapturedRunBuilder")
         self.builder = builder
+        self.protocol = protocol_module or _load_protocol_module()
 
     def receive_usb_bytes(self, data: bytes) -> None:
-        """Feed bytes through the future transport and application interfaces.
-
-        Intended flow once the interfaces exist::
-
-            for transport_message in self.decode_transport_bytes(data):
-                for application_message in self.decode_application_messages(
-                    transport_message
-                ):
-                    self.ingest_application_message(application_message)
-
-        The two decoder calls may instead become teammate-provided callbacks. This
-        method remains deliberately unusable until that ownership and API are final.
-        """
+        """Reject unframed bytes; the serial Transport connection owns this step."""
         if not isinstance(data, bytes):
             raise TypeError("data must be bytes")
-        raise NotImplementedError(
-            "USB/transport/application integration awaits the final Python interfaces"
+        raise ProtocolSessionError(
+            "Raw USB bytes must be supplied to FixedIOProtocolConnection.service()"
         )
 
-    def decode_transport_bytes(self, data: bytes) -> Iterable[object]:
-        """Return complete transport messages from a USB byte chunk (future stub)."""
-        raise NotImplementedError("Transport-layer Python interface is not defined")
+    def ingest_application_message(self, application_message: object) -> TickResult:
+        """Validate and persist one decoded fixed Test Result message."""
+        p = self.protocol
+        if type(application_message) is not p.TestResult:
+            raise ProtocolSessionError(
+                f"Expected TestResult, received {type(application_message).__name__}"
+            )
 
-    def decode_application_messages(self, transport_message: object) -> Iterable[object]:
-        """Return complete application messages from one transport message (future stub)."""
-        raise NotImplementedError("Application-layer Python interface is not defined")
+        received_test_id = application_test_id_from_bytes(application_message.test_id.bytes)
+        if received_test_id != self.builder.application_test_id:
+            raise ProtocolSessionError(
+                "Received TestResult has an Application Test ID that does not match "
+                "the active captured run"
+            )
 
-    def ingest_application_message(self, application_message: object) -> None:
-        """Parse one complete application message into stable typed result records.
+        condition = {
+            p.ResultCondition.OK: TickCondition.OK,
+            p.ResultCondition.PARTIAL: TickCondition.PARTIAL,
+            p.ResultCondition.EXECUTION_PROBLEM: TickCondition.EXECUTION_PROBLEM,
+        }.get(application_message.condition)
+        if condition is None:
+            raise ProtocolSessionError(
+                f"Unsupported TestResult condition: {application_message.condition!r}"
+            )
 
-        Future implementation notes:
+        if condition is TickCondition.EXECUTION_PROBLEM:
+            result = TickResult.execution_problem(
+                tick=application_message.tick_number,
+                problem_detail=application_message.problem_detail,
+            )
+        else:
+            result = TickResult(
+                tick=application_message.tick_number,
+                digital_inputs=tuple(value.high for value in application_message.digital_inputs),
+                analogue_inputs_uv=tuple(
+                    value.microvolts for value in application_message.analog_inputs
+                ),
+                pwm_inputs=tuple(
+                    PWMMeasurement(
+                        period_ns=value.period_nanoseconds,
+                        duty_permyriad=value.duty_cycle_permyriad,
+                    )
+                    for value in application_message.pwm_inputs
+                ),
+                condition=condition,
+                problem_detail=application_message.problem_detail,
+            )
+        self.builder.add_tick_result(result)
+        return result
 
-        * A TEST_RESULT-like message becomes exactly one ``TickResult``.
-        * ``OK`` and ``PARTIAL`` retain all fixed digital/analogue/PWM values.
-        * ``EXECUTION_PROBLEM`` uses ``TickResult.execution_problem`` so placeholder
-          firmware zeros are stored as SQL NULL rather than false measurements.
-        * Any communication bytes bundled into that message become separate raw
-          ``CommunicationResult`` rows. Do not clean or decode payload bytes here.
-        * Application ERROR-like messages become ``ApplicationErrorRecord`` rows.
-        * Every result-bearing message must have a Test ID equal to
-          ``builder.application_test_id`` before any contained records are accepted.
-          The database stores that wire ID alongside the immutable definition ID.
-        * Completion/session-loss handling calls ``builder.finalize`` with the
-          corresponding ``CaptureStatus`` once the final protocol defines that signal.
 
-        No fields are accessed yet because the Python representation of
-        HIL_Application_Message_T is intentionally still unknown.
-        """
-        raise NotImplementedError(
-            "Application-message field mapping awaits the final Python interface"
-        )
+__all__ = ["IncomingResultAdapter"]

@@ -292,6 +292,47 @@ def test_analogue_output_configuration_rejects_non_numeric_initial_voltage() -> 
         test.analogue_output(channel=0).configure(initial_voltage="3.3")  # type: ignore[arg-type]
 
 
+def test_analogue_output_configuration_requires_whole_microvolts() -> None:
+    test = HilRigTest(name="Unrepresentable initial analogue voltage")
+
+    with pytest.raises(ValueError, match="whole microvolt"):
+        test.analogue_output(channel=0).configure(initial_voltage=0.0000001)
+
+
+@pytest.mark.parametrize(
+    ("frequency_hz", "message"),
+    [
+        (3, "whole-nanosecond"),
+        (0.1, "uint32 nanosecond range"),
+    ],
+)
+def test_pwm_configuration_requires_protocol_representable_frequency(
+    frequency_hz: float,
+    message: str,
+) -> None:
+    test = HilRigTest(name="Unrepresentable PWM frequency")
+
+    with pytest.raises(ValueError, match=message):
+        test.pwm_output(channel=0).configure(
+            voltage=LogicVoltage.V3_3,
+            initial_frequency_hz=frequency_hz,
+            initial_duty_cycle=0.5,
+            initially_enabled=True,
+        )
+
+
+def test_pwm_configuration_requires_permyriad_aligned_duty_cycle() -> None:
+    test = HilRigTest(name="Unrepresentable PWM duty")
+
+    with pytest.raises(ValueError, match="one permyriad"):
+        test.pwm_output(channel=0).configure(
+            voltage=LogicVoltage.V3_3,
+            initial_frequency_hz=1_000,
+            initial_duty_cycle=0.33333,
+            initially_enabled=True,
+        )
+
+
 @pytest.mark.parametrize("name", ["", "   ", None])
 def test_test_requires_a_name(name: str | None) -> None:
     with pytest.raises(ValueError):

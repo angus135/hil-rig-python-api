@@ -81,6 +81,8 @@ from hilrig.timing import TimeRange, TimeValue, resolve_time_range, resolve_time
 InstructionType = TypeVar("InstructionType", bound=Instruction)
 AssertionType = TypeVar("AssertionType", bound=Assertion)
 _MAX_ANALOGUE_OUTPUT_VOLTAGE = 20.0
+_NANOSECONDS_PER_SECOND = 1_000_000_000
+_UINT32_MAX = (1 << 32) - 1
 
 
 class _ChannelHandle:
@@ -211,8 +213,14 @@ class PwmOutput(_ChannelHandle):
         if not isinstance(initially_enabled, bool):
             raise TypeError("initially_enabled must be a bool")
         _validate_pwm_voltage(self.channel, voltage)
-        frequency = _positive_number(initial_frequency_hz, name="initial_frequency_hz")
-        duty_cycle = _duty_cycle(initial_duty_cycle, name="initial_duty_cycle")
+        frequency = _protocol_pwm_frequency(
+            initial_frequency_hz,
+            name="initial_frequency_hz",
+        )
+        duty_cycle = _protocol_pwm_duty_cycle(
+            initial_duty_cycle,
+            name="initial_duty_cycle",
+        )
         self._test._configure_channel(
             self._identity,
             PwmOutputConfiguration(
@@ -254,8 +262,8 @@ class PwmOutput(_ChannelHandle):
         at_s: TimeValue | None = None,
     ) -> PwmOutput:
         """Atomically schedule both PWM frequency and duty cycle."""
-        frequency = _positive_number(frequency_hz, name="frequency_hz")
-        duty = _duty_cycle(duty_cycle, name="duty_cycle")
+        frequency = _protocol_pwm_frequency(frequency_hz, name="frequency_hz")
+        duty = _protocol_pwm_duty_cycle(duty_cycle, name="duty_cycle")
         timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
         self._test._schedule(
             lambda instruction_id: PwmSetInstruction(
@@ -277,7 +285,7 @@ class PwmOutput(_ChannelHandle):
         at_s: TimeValue | None = None,
     ) -> PwmOutput:
         """Schedule a PWM frequency change without changing duty cycle."""
-        frequency = _positive_number(frequency_hz, name="frequency_hz")
+        frequency = _protocol_pwm_frequency(frequency_hz, name="frequency_hz")
         timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
         self._test._schedule(
             lambda instruction_id: PwmSetFrequencyInstruction(
@@ -298,7 +306,7 @@ class PwmOutput(_ChannelHandle):
         at_s: TimeValue | None = None,
     ) -> PwmOutput:
         """Schedule a PWM duty-cycle change without changing frequency."""
-        duty = _duty_cycle(duty_cycle, name="duty_cycle")
+        duty = _protocol_pwm_duty_cycle(duty_cycle, name="duty_cycle")
         timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
         self._test._schedule(
             lambda instruction_id: PwmSetDutyCycleInstruction(
@@ -1412,6 +1420,7 @@ def _analogue_output_voltage(value: int | float, *, name: str) -> float:
     converted = _number(value, name=name)
     if not 0.0 <= converted <= _MAX_ANALOGUE_OUTPUT_VOLTAGE:
         raise ValueError(f"{name} must be between 0 and 20 V")
+    _volts_to_microvolts(value, name=name)
     return converted
 
 
@@ -1419,6 +1428,27 @@ def _duty_cycle(value: int | float, *, name: str) -> float:
     converted = _number(value, name=name)
     if not 0.0 <= converted <= 1.0:
         raise ValueError(f"{name} must be between 0.0 and 1.0")
+    return converted
+
+
+def _protocol_pwm_duty_cycle(value: int | float, *, name: str) -> float:
+    """Validate a duty cycle that can be represented exactly as a permyriad."""
+    converted = _duty_cycle(value, name=name)
+    permyriad = Decimal(str(value)) * 10_000
+    if permyriad != permyriad.to_integral_value():
+        raise ValueError(f"{name} must align with one permyriad (0.0001)")
+    return converted
+
+
+def _protocol_pwm_frequency(value: int | float, *, name: str) -> float:
+    """Validate a frequency with an exact unsigned 32-bit nanosecond period."""
+    converted = _positive_number(value, name=name)
+    frequency = Decimal(str(value))
+    period_ns = Decimal(_NANOSECONDS_PER_SECOND) / frequency
+    if period_ns != period_ns.to_integral_value():
+        raise ValueError(f"{name} must produce a whole-nanosecond period")
+    if period_ns > _UINT32_MAX:
+        raise ValueError(f"{name} produces a period outside the uint32 nanosecond range")
     return converted
 
 

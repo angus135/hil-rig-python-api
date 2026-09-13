@@ -7,13 +7,24 @@ The current implementation covers test and peripheral configuration, stimulus
 instructions, exact user-time-to-tick conversion, digital, PWM, and analogue-input
 assertion definitions, protocol-neutral JSON and Excel intermediate representations,
 persistent captured-run storage, and host-side assertion evaluation with JSON and
-Markdown reports. It does not define an IDC representation, communicate over USB, or
-translate the unfinished application-message interface.
+Markdown reports. The optional protocol integration lowers fixed Digital, Analogue,
+and PWM configuration/stimulus state through `hil-rig-protocol`, services its Transport
+over a USB CDC COM port, and stores decoded fixed Test Results in the captured-run
+database. Variable communication messages and Application Response/Execution Control
+remain deferred.
 
 ## Requirements
 
 - Python 3.12 or newer
 - Git
+
+Fixed-I/O hardware communication additionally requires the `hil-rig-protocol` package
+and `pyserial`. Until dependency packaging is finalized, install them into the active
+environment from the adjacent protocol checkout:
+
+```powershell
+python -m pip install ..\hil-rig-protocol pyserial
+```
 
 ## Set up a development environment
 
@@ -256,8 +267,8 @@ the original user script and in-memory `Test` object are not required.
 
 ## Captured-run intermediate representation
 
-`CapturedRunBuilder` is the stable destination for the future application-message
-adapter. It receives typed, protocol-neutral records and writes them to a new SQLite
+`CapturedRunBuilder` is the stable destination for decoded application results. It
+receives typed, protocol-neutral records and writes them to a new SQLite
 database without holding an entire run in memory:
 
 ```python
@@ -322,17 +333,68 @@ Assertions remain absent from the RIG-facing JSON. The lower-level builder const
 remains available for tests and protocol-independent use; it creates an empty original
 assertion set when no compiled definitions are supplied.
 
-`IncomingResultAdapter` contains documented skeleton methods for the future flow:
+`IncomingResultAdapter` implements the fixed-result end of this flow:
 
 ```text
 USB bytes -> transport messages -> application messages -> typed builder records
 ```
 
-Those methods intentionally raise `NotImplementedError` until the transport/application
-Python interfaces and application-message field mapping are final. That mapping must
-reject result messages whose Test ID differs from `builder.application_test_id`; the
-capture database then links accepted wire results back to the immutable logical
+The adapter maps every decoded protocol `TestResult` to one `TickResult`, rejects a
+wire Test ID that differs from `builder.application_test_id`, converts PWM records to
+nanoseconds/permyriad, and queues the result for SQLite. `EXECUTION_PROBLEM` values are
+stored as SQL `NULL` rather than accepting the protocol's placeholder zeroes as real
+measurements. The capture database retains both the wire ID and immutable logical
 `test_id`.
+
+## Fixed-I/O protocol and USB CDC connection
+
+`FixedIOProtocolAdapter` turns a `CompiledTestIR` and `UploadAttempt` into the public
+`hil-rig-protocol` values. Configuration arrays are always complete; unconfigured
+channels use canonical disabled records. Communication peripheral configuration and
+instructions stay in the host IR but are deliberately not emitted yet.
+
+Stimulus messages are sparse. The adapter starts from configured Digital/PWM state and
+the initial Analogue voltage, applies all fixed-output changes at the next instruction
+tick, and emits one complete fixed state for that tick. It does not iterate through
+unchanged ticks. Because the protocol configuration has no initial Analogue value, any
+configured Analogue output causes a tick-zero state to be emitted. A tick-zero user
+stimulus is applied before that single state is sent. Disabled PWM outputs are encoded
+with period and duty both zero while their requested frequency/duty remain in the host
+state for a later enable.
+
+```python
+from hilrig import CapturedRunBuilder, FixedIOProtocolConnection
+
+attempt = compiled.new_upload_attempt()
+builder = CapturedRunBuilder.from_compiled_test(
+    "results/run.sqlite3",
+    compiled,
+    upload_attempt=attempt,
+)
+
+with FixedIOProtocolConnection.connect(result_builder=builder) as connection:
+    connection.queue_upload(compiled, upload_attempt=attempt)
+    while not connection.upload_delivery_complete:
+        connection.service()
+
+    # Continue calling service() while the RIG executes so each returned fixed
+    # TestResult is decoded and queued into builder.
+```
+
+The connection scans `serial.tools.list_ports.comports()` and uses the first port whose
+description is exactly `USB Serial Device`. No match is an error. It opens that port as
+115200 baud, 8 data bits, no parity, one stop bit, no flow control, non-blocking reads,
+and with DTR/RTS disabled. The baud/line coding is explicit even if the direct USB CDC
+firmware ignores it.
+
+`service()` owns the byte-stream details: it retains any Transport receive suffix,
+drains bounded events and Application data, preserves partial serial-write offsets, and
+commits a Transport output only after pySerial accepts every byte. Upload messages are
+submitted one at a time and the next is held until Transport reports reliable delivery.
+That is not yet equivalent to Application acceptance. The connection contains the
+single stop-and-wait hook that will wait for public configuration/tick Responses once
+the protocol wrapper exposes them. START/ABORT and completion signaling similarly await
+public Execution Control and Response support.
 
 ## Evaluate captured assertions
 
@@ -412,6 +474,11 @@ assertions even though their definitions are not transmitted. Compilation reject
 expected tick count of 1,000,000 or greater so the complete test remains within the
 protocol-compatible limit.
 
+Protocol-facing fixed output values are rejected before compilation if conversion
+would require rounding: Analogue output voltages must align to one microvolt, PWM duty
+cycles must align to one permyriad, and PWM frequencies must produce a whole-nanosecond
+period in the unsigned 32-bit range.
+
 The Excel workbook contains four sheets:
 
 - `Test Summary`
@@ -451,7 +518,8 @@ python -m ruff format .
 |   |-- exporters/                 JSON machine IR and human-readable Excel export
 |   |-- evaluation/                Assertion dispatch, handlers, and report export
 |   |-- exceptions.py              Library-specific exception hierarchy
-|   |-- results/                   Batched SQLite capture storage and query facade
+|   |-- protocol/                  Application lowering and USB CDC Transport service
+|   |-- results/                   Result mapping, SQLite storage, and query facade
 |   `-- models/                    Internal configuration/instruction/assertion data
 |-- tests/                         Unit tests
 `-- pyproject.toml                 Package, dependency, and tool configuration

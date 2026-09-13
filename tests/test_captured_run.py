@@ -3,6 +3,19 @@ import json
 from pathlib import Path
 
 import pytest
+from protocol_fakes import (
+    AnalogInputValue,
+    DigitalInputValue,
+    FakeProtocol,
+    PWMInputValue,
+    ResultCondition,
+)
+from protocol_fakes import (
+    TestId as ProtocolTestId,
+)
+from protocol_fakes import (
+    TestResult as ProtocolTestResult,
+)
 
 from hilrig import (
     ApplicationErrorRecord,
@@ -17,6 +30,7 @@ from hilrig import (
     FrequencyMode,
     IncomingResultAdapter,
     LogicVoltage,
+    ProtocolSessionError,
     PWMMeasurement,
     StartMode,
     TickCondition,
@@ -319,14 +333,57 @@ def test_manifest_and_csv_exports_are_derived_from_database(tmp_path: Path) -> N
         assert list(csv.DictReader(stream)) == []
 
 
-def test_future_adapter_is_explicitly_unimplemented(tmp_path: Path) -> None:
+def test_incoming_protocol_result_is_mapped_to_sqlite_records(tmp_path: Path) -> None:
     builder = _builder(tmp_path / "run.sqlite3", expected_tick_count=1)
-    adapter = IncomingResultAdapter(builder)
+    adapter = IncomingResultAdapter(builder, protocol_module=FakeProtocol)
+    message = ProtocolTestResult(
+        test_id=ProtocolTestId(builder.application_test_id.to_bytes(16, "big")),
+        tick_number=0,
+        digital_inputs=tuple(DigitalInputValue(high=index % 2 == 0) for index in range(10)),
+        analog_inputs=(AnalogInputValue(1_250_000), AnalogInputValue(2_500_000)),
+        pwm_inputs=(PWMInputValue(1_000_000, 2_500), PWMInputValue(500_000, 7_500)),
+        condition=ResultCondition.PARTIAL,
+        problem_detail=9,
+    )
 
-    with pytest.raises(NotImplementedError, match="final Python interfaces"):
-        adapter.receive_usb_bytes(b"future protocol data")
-    with pytest.raises(NotImplementedError, match="field mapping"):
-        adapter.ingest_application_message(object())
+    mapped = adapter.ingest_application_message(message)
+    run = builder.finalize()
+
+    assert mapped.tick == 0
+    assert mapped.condition is TickCondition.PARTIAL
+    assert mapped.problem_detail == 9
+    stored = run.tick_at(0)
+    assert stored is not None
+    assert stored.digital_inputs[0] is True
+    assert stored.analogue_inputs_uv == (1_250_000, 2_500_000)
+    assert stored.pwm_inputs[1] == PWMMeasurement(period_ns=500_000, duty_permyriad=7_500)
+
+
+def test_incoming_execution_problem_discards_protocol_placeholders(tmp_path: Path) -> None:
+    builder = _builder(tmp_path / "run.sqlite3", expected_tick_count=1)
+    adapter = IncomingResultAdapter(builder, protocol_module=FakeProtocol)
+    message = ProtocolTestResult(
+        test_id=ProtocolTestId(builder.application_test_id.to_bytes(16, "big")),
+        condition=ResultCondition.EXECUTION_PROBLEM,
+        problem_detail=42,
+    )
+
+    adapter.ingest_application_message(message)
+    result = builder.finalize().tick_at(0)
+
+    assert result is not None
+    assert result.digital_inputs == (None,) * 10
+    assert result.analogue_inputs_uv == (None, None)
+    assert result.pwm_inputs == (None, None)
+
+
+def test_incoming_result_rejects_a_different_application_test_id(tmp_path: Path) -> None:
+    builder = _builder(tmp_path / "run.sqlite3", expected_tick_count=1)
+    adapter = IncomingResultAdapter(builder, protocol_module=FakeProtocol)
+    message = ProtocolTestResult(test_id=ProtocolTestId(bytes(16)))
+
+    with pytest.raises(ProtocolSessionError, match="does not match"):
+        adapter.ingest_application_message(message)
 
     builder.abort()
 

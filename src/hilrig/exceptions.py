@@ -41,6 +41,22 @@ class CaptureSchemaError(CaptureStorageError):
     """A capture database has an absent or unsupported schema."""
 
 
+class ProtocolIntegrationError(HilRigError):
+    """The host API could not safely use the Application or Transport protocol."""
+
+
+class ProtocolDependencyError(ProtocolIntegrationError):
+    """A package required by the optional protocol integration is unavailable."""
+
+
+class SerialDiscoveryError(ProtocolIntegrationError):
+    """The configured HIL-RIG serial device could not be discovered."""
+
+
+class ProtocolSessionError(ProtocolIntegrationError):
+    """A protocol or serial session could not continue safely."""
+
+
 class EvaluationError(HilRigError):
     """A captured run could not be evaluated safely."""
 
