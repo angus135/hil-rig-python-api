@@ -1,0 +1,339 @@
+from unittest.mock import patch
+
+import pytest
+
+from hilrig import (
+    ConfigurationError,
+    DigitalState,
+    FrequencyMode,
+    I2CRole,
+    I2CSpeed,
+    LogicVoltage,
+    Pullup,
+    StartMode,
+)
+from hilrig import (
+    Test as HilRigTest,
+)
+from hilrig.models.configuration import (
+    AnalogueInputConfiguration,
+    AnalogueOutputConfiguration,
+    DigitalInputConfiguration,
+    DigitalOutputConfiguration,
+    I2CConfiguration,
+    PwmInputConfiguration,
+    PwmOutputConfiguration,
+)
+
+
+def test_test_receives_a_random_128_bit_integer_id() -> None:
+    expected_id = 0x123456789ABCDEF00112233445566778
+
+    with patch("hilrig.api.secrets.randbits", return_value=expected_id) as randbits:
+        test = HilRigTest(name="Identified test")
+
+    randbits.assert_called_once_with(128)
+    assert test.test_id == expected_id
+
+
+def test_test_configuration_stores_frequency_and_start_modes() -> None:
+    test = HilRigTest(name="Configured test")
+
+    returned_test = test.configure(
+        frequency_mode=FrequencyMode.HZ_10K,
+        start_mode=StartMode.HOST_COMMAND,
+    )
+
+    assert returned_test is test
+    assert test.configuration.frequency_mode is FrequencyMode.HZ_10K
+    assert test.configuration.start_mode is StartMode.HOST_COMMAND
+
+
+def test_test_can_only_be_configured_once() -> None:
+    test = HilRigTest(name="Configured once")
+    test.configure(
+        frequency_mode=FrequencyMode.HZ_1K,
+        start_mode=StartMode.IMMEDIATE,
+    )
+
+    with pytest.raises(ConfigurationError, match="already configured"):
+        test.configure(
+            frequency_mode=FrequencyMode.HZ_100,
+            start_mode=StartMode.IMMEDIATE,
+        )
+
+
+def test_channel_argument_is_explicitly_keyword_only() -> None:
+    test = HilRigTest(name="Keyword channels")
+
+    with pytest.raises(TypeError):
+        test.digital_output(0)  # type: ignore[misc]
+
+    assert test.digital_output(channel=0).channel == 0
+
+
+@pytest.mark.parametrize(
+    ("accessor", "last_valid_channel"),
+    [
+        ("digital_input", 9),
+        ("digital_output", 9),
+        ("pwm_input", 1),
+        ("pwm_output", 1),
+        ("analogue_input", 1),
+        ("analogue_output", 5),
+        ("i2c", 1),
+        ("spi", 1),
+        ("uart", 1),
+    ],
+)
+def test_channel_accessors_enforce_physical_ranges(
+    accessor: str,
+    last_valid_channel: int,
+) -> None:
+    test = HilRigTest(name="Physical channel ranges")
+    channel_factory = getattr(test, accessor)
+
+    assert channel_factory(channel=last_valid_channel).channel == last_valid_channel
+    with pytest.raises(ValueError, match=rf"0.*{last_valid_channel}"):
+        channel_factory(channel=last_valid_channel + 1)
+
+
+@pytest.mark.parametrize("channel", [-1, True, 1.5, "0"])
+def test_channel_accessors_reject_invalid_index_values(channel: object) -> None:
+    test = HilRigTest(name="Invalid channel index")
+
+    expected_error = ValueError if channel == -1 else TypeError
+    with pytest.raises(expected_error):
+        test.digital_input(channel=channel)  # type: ignore[arg-type]
+
+
+def test_handles_are_reused_and_share_channel_identity() -> None:
+    test = HilRigTest(name="Stable handles")
+
+    first = test.digital_input(channel=2)
+    second = test.digital_input(channel=2)
+
+    assert first is second
+    assert first.identity is second.identity
+
+
+def test_digital_input_configuration_contains_only_voltage() -> None:
+    test = HilRigTest(name="Digital input")
+    digital_input = test.digital_input(channel=0)
+
+    digital_input.configure(voltage=LogicVoltage.V12)
+
+    configuration = test.configuration.for_channel(digital_input.identity)
+    assert configuration == DigitalInputConfiguration(voltage=LogicVoltage.V12)
+    assert not hasattr(configuration, "recording_enabled")
+
+
+def test_digital_output_configuration_contains_voltage_and_initial_state() -> None:
+    test = HilRigTest(name="Digital output")
+    output = test.digital_output(channel=1)
+
+    output.configure(voltage=LogicVoltage.V24, initial_state=DigitalState.LOW)
+
+    assert test.configuration.for_channel(output.identity) == DigitalOutputConfiguration(
+        voltage=LogicVoltage.V24,
+        initial_state=DigitalState.LOW,
+    )
+
+
+def test_pwm_input_configuration_contains_voltage() -> None:
+    test = HilRigTest(name="PWM input")
+    pwm_input = test.pwm_input(channel=0)
+
+    pwm_input.configure(voltage=LogicVoltage.V5)
+
+    assert test.configuration.for_channel(pwm_input.identity) == PwmInputConfiguration(
+        voltage=LogicVoltage.V5
+    )
+
+
+@pytest.mark.parametrize(
+    ("channel", "voltage"),
+    [
+        (0, LogicVoltage.V3_3),
+        (0, LogicVoltage.V5),
+        (1, LogicVoltage.V12),
+        (1, LogicVoltage.V24),
+    ],
+)
+def test_pwm_output_configuration_accepts_each_channel_voltage_domain(
+    channel: int,
+    voltage: LogicVoltage,
+) -> None:
+    test = HilRigTest(name="PWM output")
+    output = test.pwm_output(channel=channel)
+
+    output.configure(
+        voltage=voltage,
+        initial_frequency_hz=1_000,
+        initial_duty_cycle=0.25,
+        initially_enabled=False,
+    )
+
+    assert test.configuration.for_channel(output.identity) == PwmOutputConfiguration(
+        voltage=voltage,
+        initial_frequency_hz=1_000.0,
+        initial_duty_cycle=0.25,
+        initially_enabled=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("channel", "voltage"),
+    [(0, LogicVoltage.V12), (1, LogicVoltage.V5)],
+)
+def test_pwm_output_rejects_wrong_channel_voltage_domain(
+    channel: int,
+    voltage: LogicVoltage,
+) -> None:
+    test = HilRigTest(name="Invalid PWM")
+
+    with pytest.raises(ConfigurationError, match="supports only"):
+        test.pwm_output(channel=channel).configure(
+            voltage=voltage,
+            initial_frequency_hz=1_000,
+            initial_duty_cycle=0.5,
+            initially_enabled=False,
+        )
+
+
+def test_i2c_master_configuration_is_stored() -> None:
+    test = HilRigTest(name="I2C master")
+    i2c = test.i2c(channel=0)
+
+    i2c.configure(
+        role=I2CRole.MASTER,
+        speed=I2CSpeed.FAST_400KHZ,
+        logic_voltage=LogicVoltage.V3_3,
+        pullup=Pullup.OHM_4K7,
+    )
+
+    assert test.configuration.for_channel(i2c.identity) == I2CConfiguration(
+        role=I2CRole.MASTER,
+        speed=I2CSpeed.FAST_400KHZ,
+        logic_voltage=LogicVoltage.V3_3,
+        pullup=Pullup.OHM_4K7,
+    )
+
+
+def test_i2c_slave_requires_own_address() -> None:
+    test = HilRigTest(name="I2C slave")
+
+    with pytest.raises(ValueError, match="7-bit"):
+        test.i2c(channel=1).configure(
+            role=I2CRole.SLAVE,
+            speed=I2CSpeed.STANDARD_100KHZ,
+            logic_voltage=LogicVoltage.V5,
+            pullup=Pullup.DISABLED,
+        )
+
+
+def test_old_digital_out_name_and_recording_commands_are_not_exposed() -> None:
+    test = HilRigTest(name="Removed API")
+    digital_input = test.digital_input(channel=0)
+
+    assert not hasattr(test, "digital_out")
+    assert not hasattr(digital_input, "record")
+    assert not hasattr(digital_input, "enable_recording")
+
+
+def test_full_analogue_output_name_is_exposed() -> None:
+    test = HilRigTest(name="Analogue output naming")
+
+    assert test.analogue_output(channel=0).channel == 0
+    assert not hasattr(test, "analogue_out")
+
+
+def test_analogue_input_and_default_analogue_output_configuration() -> None:
+    test = HilRigTest(name="Analogue declarations")
+    analogue_input = test.analogue_input(channel=0)
+    analogue_output = test.analogue_output(channel=1)
+
+    assert analogue_input.configure() is analogue_input
+    assert analogue_output.configure() is analogue_output
+    assert test.configuration.for_channel(analogue_input.identity) == AnalogueInputConfiguration()
+    assert test.configuration.for_channel(analogue_output.identity) == AnalogueOutputConfiguration(
+        initial_voltage=0.0
+    )
+
+
+def test_analogue_output_configuration_stores_initial_voltage() -> None:
+    test = HilRigTest(name="Initial analogue voltage")
+    analogue_output = test.analogue_output(channel=2)
+
+    analogue_output.configure(initial_voltage=20)
+
+    assert test.configuration.for_channel(analogue_output.identity) == AnalogueOutputConfiguration(
+        initial_voltage=20.0
+    )
+
+
+@pytest.mark.parametrize(
+    "initial_voltage",
+    [-0.1, 20.000001, float("inf"), float("nan")],
+)
+def test_analogue_output_configuration_rejects_invalid_initial_voltage(
+    initial_voltage: float,
+) -> None:
+    test = HilRigTest(name="Invalid initial analogue voltage")
+
+    with pytest.raises(ValueError):
+        test.analogue_output(channel=0).configure(initial_voltage=initial_voltage)
+
+
+def test_analogue_output_configuration_rejects_non_numeric_initial_voltage() -> None:
+    test = HilRigTest(name="Non-numeric initial analogue voltage")
+
+    with pytest.raises(TypeError, match="initial_voltage must be a number"):
+        test.analogue_output(channel=0).configure(initial_voltage="3.3")  # type: ignore[arg-type]
+
+
+def test_analogue_output_configuration_requires_whole_microvolts() -> None:
+    test = HilRigTest(name="Unrepresentable initial analogue voltage")
+
+    with pytest.raises(ValueError, match="whole microvolt"):
+        test.analogue_output(channel=0).configure(initial_voltage=0.0000001)
+
+
+@pytest.mark.parametrize(
+    ("frequency_hz", "message"),
+    [
+        (3, "whole-nanosecond"),
+        (0.1, "uint32 nanosecond range"),
+    ],
+)
+def test_pwm_configuration_requires_protocol_representable_frequency(
+    frequency_hz: float,
+    message: str,
+) -> None:
+    test = HilRigTest(name="Unrepresentable PWM frequency")
+
+    with pytest.raises(ValueError, match=message):
+        test.pwm_output(channel=0).configure(
+            voltage=LogicVoltage.V3_3,
+            initial_frequency_hz=frequency_hz,
+            initial_duty_cycle=0.5,
+            initially_enabled=True,
+        )
+
+
+def test_pwm_configuration_requires_permyriad_aligned_duty_cycle() -> None:
+    test = HilRigTest(name="Unrepresentable PWM duty")
+
+    with pytest.raises(ValueError, match="one permyriad"):
+        test.pwm_output(channel=0).configure(
+            voltage=LogicVoltage.V3_3,
+            initial_frequency_hz=1_000,
+            initial_duty_cycle=0.33333,
+            initially_enabled=True,
+        )
+
+
+@pytest.mark.parametrize("name", ["", "   ", None])
+def test_test_requires_a_name(name: str | None) -> None:
+    with pytest.raises(ValueError):
+        HilRigTest(name)  # type: ignore[arg-type]
