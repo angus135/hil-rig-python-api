@@ -10,15 +10,16 @@ persistent captured-run storage, and host-side assertion evaluation with JSON an
 Markdown reports. The optional protocol integration lowers fixed Digital, Analogue,
 and PWM configuration/stimulus state through `hil-rig-protocol`, services its Transport
 over a USB CDC COM port, and stores decoded fixed Test Results in the captured-run
-database. Variable communication messages and Application Response/Execution Control
-remain deferred.
+database. Protocol v0.2.0 discovery, semantic Responses, Application Errors, START,
+ABORT, and RESET_APPLICATION are integrated. Variable communication messages remain
+deferred.
 
 ## Requirements
 
 - Python 3.12 or newer
 - Git
 
-Fixed-I/O hardware communication additionally requires the `hil-rig-protocol` package
+Fixed-I/O hardware communication additionally requires `hil-rig-protocol` 0.2.0 or newer
 and `pyserial`. Until dependency packaging is finalized, install them into the active
 environment from the adjacent protocol checkout:
 
@@ -365,20 +366,31 @@ state for a later enable.
 ```python
 from hilrig import CapturedRunBuilder, FixedIOProtocolConnection
 
-attempt = compiled.new_upload_attempt()
-builder = CapturedRunBuilder.from_compiled_test(
-    "results/run.sqlite3",
-    compiled,
-    upload_attempt=attempt,
-)
-
-with FixedIOProtocolConnection.connect(result_builder=builder) as connection:
-    connection.queue_upload(compiled, upload_attempt=attempt)
-    while not connection.upload_delivery_complete:
+with FixedIOProtocolConnection.connect() as connection:
+    while not connection.session_confirmed:
         connection.service()
 
-    # Continue calling service() while the RIG executes so each returned fixed
-    # TestResult is decoded and queued into builder.
+    info = connection.session_info
+    attempt = compiled.new_upload_attempt()
+    builder = CapturedRunBuilder.from_compiled_test(
+        "results/run.sqlite3",
+        compiled,
+        upload_attempt=attempt,
+        application_protocol_version=info.protocol_version,
+        firmware_version=info.firmware_version,
+    )
+    connection.bind_result_builder(builder)
+    connection.queue_upload(compiled, upload_attempt=attempt)
+    while not connection.upload_accepted:
+        connection.service()
+
+    # IMMEDIATE queues START after Complete Test is accepted. HOST_COMMAND waits
+    # here for connection.start() to be called. EXTERNAL_TRIGGER deliberately has
+    # no protocol action.
+    while not connection.results_complete:
+        connection.service()
+
+    captured_run = builder.finalize()
 ```
 
 The connection scans `serial.tools.list_ports.comports()` and uses the first port whose
@@ -389,12 +401,36 @@ firmware ignores it.
 
 `service()` owns the byte-stream details: it retains any Transport receive suffix,
 drains bounded events and Application data, preserves partial serial-write offsets, and
-commits a Transport output only after pySerial accepts every byte. Upload messages are
-submitted one at a time and the next is held until Transport reports reliable delivery.
-That is not yet equivalent to Application acceptance. The connection contains the
-single stop-and-wait hook that will wait for public configuration/tick Responses once
-the protocol wrapper exposes them. START/ABORT and completion signaling similarly await
-public Execution Control and Response support.
+commits a Transport output only after pySerial accepts every byte. Each new Transport
+session first exchanges System Information and requires an exact protocol-version
+match. Configuration and sparse tick operations then wait for both Transport delivery
+and their correlated Application Response before the next operation is submitted.
+After the final sparse tick is accepted, the connection waits for the firmware's
+Complete Test Response.
+
+`IMMEDIATE` automatically queues `START`; `HOST_COMMAND` exposes `connection.start()`.
+`connection.abort()` and `connection.reset_application()` send the corresponding
+response-gated controls. `EXTERNAL_TRIGGER` remains representable in the compiled IR
+but intentionally performs no protocol action. Responses are correlated by scope,
+Application Test ID, tick and command. A rejection, mismatch, timeout, delivery
+failure, or Transport session reset fails the workflow rather than guessing that an
+operation succeeded. The default connection enables Transport retransmission with a
+250 ms timeout and three retries; callers can supply a different `TransportConfig`.
+
+Application Error messages associated with the active run are converted to
+`ApplicationErrorRecord` and queued into the same SQLite writer as results. Their
+category, recoverability, optional tick, numeric detail (stored losslessly as decimal
+text by the current schema), and diagnostic bytes are preserved. Errors do not replace
+the required fixed Test Results. The connection considers result transfer complete
+only after receiving the expected ordered result ticks `0..N-1`.
+
+If configuration, a tick, or whole-test validation is rejected, that upload ID is
+retired and the caller can restart immediately with `attempt.restart()`. A builder for
+the abandoned attempt must first be finalized, then a builder created for the fresh
+attempt can be attached with `connection.bind_result_builder(new_builder,
+replace=True)`. Reusing the retired wire ID is rejected locally. A rejected START leaves
+the accepted upload ready for an explicit retry; uncertain Transport failures and
+`FAILED` control outcomes still require ABORT, RESET_APPLICATION, or reconnection.
 
 ## Evaluate captured assertions
 

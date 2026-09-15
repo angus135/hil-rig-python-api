@@ -21,6 +21,64 @@ class ResultCondition(IntEnum):
     EXECUTION_PROBLEM = 2
 
 
+@dataclass(frozen=True)
+class ProtocolVersion:
+    major: int
+    minor: int
+    patch: int
+
+
+PROTOCOL_VERSION = ProtocolVersion(0, 2, 0)
+
+
+class ControlCommand(IntEnum):
+    INVALID = 0
+    START = 1
+    ABORT = 2
+
+
+class GlobalControlCommand(IntEnum):
+    INVALID = 0
+    RESET_APPLICATION = 1
+
+
+class ResponseScope(IntEnum):
+    TEST_CONFIGURATION = 1
+    TICK = 2
+    COMPLETE_TEST = 3
+    EXECUTION_CONTROL = 4
+    GLOBAL_CONTROL = 5
+
+
+class ResponseOutcome(IntEnum):
+    ACCEPTED = 1
+    REJECTED = 2
+    COMPLETED = 3
+    FAILED = 4
+
+
+class ResponseReason(IntEnum):
+    NONE = 0
+    UNSUPPORTED = 1
+    OPERATION_NOT_ALLOWED = 2
+    INCONSISTENT_TEST_ID = 3
+    INVALID_TICK = 4
+    LENGTH_MISMATCH = 5
+    STORAGE_UNAVAILABLE = 6
+    VALIDATION_FAILED = 7
+    HARDWARE_NOT_READY = 8
+    INTERNAL_FAILURE = 9
+
+
+class ErrorCategory(IntEnum):
+    HARDWARE = 1
+    EXECUTION = 2
+    TIMEOUT = 3
+    RETAINED_DATA = 4
+    PROTOCOL = 5
+    INTERNAL = 6
+
+
 class TransportStatus(IntEnum):
     OK = 0
     MESSAGE_TOO_LARGE = 4
@@ -50,8 +108,9 @@ class SessionState(IntEnum):
 
 class EventType(IntEnum):
     SESSION_ESTABLISHED = 1
-    DELIVERY_CONFIRMED = 2
-    DELIVERY_FAILED = 3
+    SESSION_RESET = 2
+    DELIVERY_CONFIRMED = 3
+    DELIVERY_FAILED = 4
     PROTOCOL_ERROR = 5
 
 
@@ -66,11 +125,62 @@ class ApplicationConfig:
 @dataclass(frozen=True)
 class TransportConfig:
     max_application_message_size: int = 512
+    retransmit_timeout_ms: int = 0
+    max_retries: int = 0
 
 
 @dataclass(frozen=True)
 class TestId:
     bytes: bytes
+
+
+@dataclass(frozen=True)
+class SystemInfoRequest:
+    request_firmware_git_hash: bool = False
+    protocol_version: ProtocolVersion = PROTOCOL_VERSION
+
+
+@dataclass(frozen=True)
+class SystemInfoResponse:
+    protocol_version: ProtocolVersion
+    firmware_version: ProtocolVersion
+    diagnostic_data: bytes = b""
+    firmware_git_hash: bytes = b""
+
+
+@dataclass(frozen=True)
+class ExecutionControl:
+    test_id: TestId
+    command: ControlCommand
+    flags: int = 0
+
+
+@dataclass(frozen=True)
+class GlobalControl:
+    command: GlobalControlCommand
+    flags: int = 0
+
+
+@dataclass(frozen=True)
+class ApplicationResponse:
+    test_id: TestId | None
+    scope: ResponseScope
+    outcome: ResponseOutcome
+    reason: ResponseReason = ResponseReason.NONE
+    tick_number: int = 0
+    control_command: ControlCommand = ControlCommand.INVALID
+    global_control_command: GlobalControlCommand = GlobalControlCommand.INVALID
+    detail: int = 0
+
+
+@dataclass(frozen=True)
+class ApplicationErrorMessage:
+    test_id: TestId | None
+    category: ErrorCategory
+    recoverable: bool
+    tick_number: int | None = None
+    detail: int = 0
+    diagnostic_data: bytes = b""
 
 
 @dataclass(frozen=True)
@@ -213,10 +323,23 @@ class TransportSnapshot:
 
 
 class FakeProtocol:
+    PROTOCOL_VERSION = PROTOCOL_VERSION
     ApplicationCodec = ApplicationCodec
     ApplicationConfig = ApplicationConfig
     TransportConfig = TransportConfig
     TestId = TestId
+    SystemInfoRequest = SystemInfoRequest
+    SystemInfoResponse = SystemInfoResponse
+    ExecutionControl = ExecutionControl
+    GlobalControl = GlobalControl
+    ApplicationResponse = ApplicationResponse
+    ApplicationErrorMessage = ApplicationErrorMessage
+    ControlCommand = ControlCommand
+    GlobalControlCommand = GlobalControlCommand
+    ResponseScope = ResponseScope
+    ResponseOutcome = ResponseOutcome
+    ResponseReason = ResponseReason
+    ErrorCategory = ErrorCategory
     TickDuration = TickDuration
     DigitalInputConfig = DigitalInputConfig
     DigitalOutputConfig = DigitalOutputConfig
@@ -241,6 +364,11 @@ class FakeProtocol:
     OperatingMode = OperatingMode
     SessionState = SessionState
     EventType = EventType
+
+    @staticmethod
+    def check_protocol_version(peer_version: ProtocolVersion) -> None:
+        if peer_version != PROTOCOL_VERSION:
+            raise ValueError("version mismatch")
 
 
 @dataclass

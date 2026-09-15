@@ -9,7 +9,12 @@ from typing import Any
 from hilrig.exceptions import ProtocolDependencyError, ProtocolSessionError
 from hilrig.models.identifiers import application_test_id_from_bytes
 from hilrig.results.builder import CapturedRunBuilder
-from hilrig.results.models import PWMMeasurement, TickCondition, TickResult
+from hilrig.results.models import (
+    ApplicationErrorRecord,
+    PWMMeasurement,
+    TickCondition,
+    TickResult,
+)
 
 
 def _load_protocol_module() -> ModuleType:
@@ -92,6 +97,32 @@ class IncomingResultAdapter:
             )
         self.builder.add_tick_result(result)
         return result
+
+    def ingest_application_error(self, application_message: object) -> ApplicationErrorRecord:
+        """Validate and persist one decoded Application Error message."""
+        p = self.protocol
+        if type(application_message) is not p.ApplicationErrorMessage:
+            raise ProtocolSessionError(
+                f"Expected ApplicationErrorMessage, received {type(application_message).__name__}"
+            )
+
+        if application_message.test_id is not None:
+            received_test_id = application_test_id_from_bytes(application_message.test_id.bytes)
+            if received_test_id != self.builder.application_test_id:
+                raise ProtocolSessionError(
+                    "Received Application Error has an Application Test ID that does not "
+                    "match the active captured run"
+                )
+
+        record = ApplicationErrorRecord(
+            category=application_message.category.name.lower(),
+            detail=str(application_message.detail),
+            recoverable=application_message.recoverable,
+            tick=application_message.tick_number,
+            diagnostic_data=application_message.diagnostic_data,
+        )
+        self.builder.add_application_error(record)
+        return record
 
 
 __all__ = ["IncomingResultAdapter"]

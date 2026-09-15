@@ -19,6 +19,21 @@ from hilrig.models.identifiers import (
 
 _UINT32_MAX = (1 << 32) - 1
 _FIXED_OUTPUT_PERIPHERALS = frozenset({"digital_output", "analogue_output", "pwm_output"})
+_CONTROL_FLOW_API = (
+    "PROTOCOL_VERSION",
+    "SystemInfoRequest",
+    "SystemInfoResponse",
+    "ApplicationResponse",
+    "ApplicationErrorMessage",
+    "ExecutionControl",
+    "GlobalControl",
+    "ControlCommand",
+    "GlobalControlCommand",
+    "ResponseScope",
+    "ResponseOutcome",
+    "ResponseReason",
+    "check_protocol_version",
+)
 
 
 def _load_protocol_module() -> ModuleType:
@@ -67,6 +82,12 @@ class FixedIOProtocolAdapter:
         application_config: object | None = None,
     ) -> None:
         self.protocol = protocol_module or _load_protocol_module()
+        missing = tuple(name for name in _CONTROL_FLOW_API if not hasattr(self.protocol, name))
+        if missing:
+            raise ProtocolDependencyError(
+                "Fixed-I/O protocol control flow requires hil-rig-protocol 0.2.0 or newer; "
+                f"missing public API: {', '.join(missing)}"
+            )
         if application_config is None:
             application_config = self.protocol.ApplicationConfig()
         self.codec = self.protocol.ApplicationCodec(application_config)
@@ -113,6 +134,42 @@ class FixedIOProtocolAdapter:
     def decode(self, data: bytes) -> object:
         """Decode one complete Application message received from Transport."""
         return self.codec.decode(data)
+
+    def encode(self, message: object) -> bytes:
+        """Encode one public Application value with the native protocol codec."""
+        return self.codec.encode(message)
+
+    def build_system_info_request(self, *, request_firmware_git_hash: bool = True) -> object:
+        """Build the discovery request required for each new Transport session."""
+        if not isinstance(request_firmware_git_hash, bool):
+            raise TypeError("request_firmware_git_hash must be a bool")
+        return self.protocol.SystemInfoRequest(request_firmware_git_hash=request_firmware_git_hash)
+
+    def build_start(self, upload_attempt: UploadAttempt) -> object:
+        """Build a START request for an accepted upload attempt."""
+        return self._build_execution_control(upload_attempt, self.protocol.ControlCommand.START)
+
+    def build_abort(self, upload_attempt: UploadAttempt) -> object:
+        """Build an ABORT request for an active upload attempt."""
+        return self._build_execution_control(upload_attempt, self.protocol.ControlCommand.ABORT)
+
+    def build_reset_application(self) -> object:
+        """Build a test-independent Application reset request."""
+        return self.protocol.GlobalControl(
+            command=self.protocol.GlobalControlCommand.RESET_APPLICATION,
+            flags=0,
+        )
+
+    def _build_execution_control(self, upload_attempt: UploadAttempt, command: object) -> object:
+        if not isinstance(upload_attempt, UploadAttempt):
+            raise TypeError("upload_attempt must be an UploadAttempt")
+        return self.protocol.ExecutionControl(
+            test_id=self.protocol.TestId(
+                application_test_id_to_bytes(upload_attempt.application_test_id)
+            ),
+            command=command,
+            flags=0,
+        )
 
     def _build_configuration(
         self,

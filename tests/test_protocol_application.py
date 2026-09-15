@@ -1,4 +1,12 @@
-from protocol_fakes import FakeProtocol, PeripheralVoltage
+from protocol_fakes import (
+    ControlCommand,
+    ExecutionControl,
+    FakeProtocol,
+    GlobalControl,
+    GlobalControlCommand,
+    PeripheralVoltage,
+    SystemInfoRequest,
+)
 
 from hilrig import (
     DigitalState,
@@ -122,3 +130,23 @@ def test_upload_encoding_keeps_configuration_first() -> None:
     assert len(encoded) == len(upload.instructions) + 1
     assert adapter.codec.encoded[encoded[0]] is upload.configuration
     assert adapter.codec.encoded[encoded[1]] is upload.instructions[0]
+
+
+def test_control_flow_builders_use_the_upload_attempt_wire_id() -> None:
+    compiled = _compiled_fixed_io_test()
+    attempt = compiled.new_upload_attempt()
+    adapter = FixedIOProtocolAdapter(protocol_module=FakeProtocol)
+
+    discovery = adapter.build_system_info_request()
+    start = adapter.build_start(attempt)
+    abort = adapter.build_abort(attempt)
+    reset = adapter.build_reset_application()
+
+    assert type(discovery) is SystemInfoRequest
+    assert discovery.request_firmware_git_hash
+    assert type(start) is ExecutionControl
+    assert start.command is ControlCommand.START
+    assert start.test_id.bytes == attempt.application_test_id.to_bytes(16, "big")
+    assert abort.command is ControlCommand.ABORT
+    assert type(reset) is GlobalControl
+    assert reset.command is GlobalControlCommand.RESET_APPLICATION

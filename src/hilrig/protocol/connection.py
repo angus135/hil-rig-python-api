@@ -1,4 +1,4 @@
-"""Caller-driven composition of pySerial, Transport, and Application codecs."""
+"""Caller-driven composition of pySerial, Transport, and Application workflows."""
 
 from __future__ import annotations
 
@@ -6,24 +6,57 @@ import time
 from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass
+from enum import Enum
 from types import ModuleType
 from typing import Any
 
 from hilrig.exceptions import ProtocolSessionError
 from hilrig.models.execution import CompiledTestIR
-from hilrig.models.identifiers import UploadAttempt
+from hilrig.models.identifiers import UploadAttempt, application_test_id_from_bytes
 from hilrig.protocol.application import FixedIOProtocolAdapter, FixedIOUploadMessages
 from hilrig.protocol.serial import SerialConnectionSettings, open_serial_port
 from hilrig.results.adapter import IncomingResultAdapter
 from hilrig.results.builder import CapturedRunBuilder
-from hilrig.results.models import TickResult
+from hilrig.results.models import ApplicationErrorRecord, TickResult
 
 _UINT32_MASK = (1 << 32) - 1
+_DEFAULT_RETRANSMIT_TIMEOUT_MS = 250
+_DEFAULT_MAX_RETRIES = 3
+_DEFAULT_APPLICATION_RESPONSE_TIMEOUT_S = 10.0
 
 
 def monotonic_now_ms() -> int:
     """Return monotonic milliseconds in Transport's wrapped uint32 domain."""
     return int(time.monotonic() * 1_000) & _UINT32_MASK
+
+
+class ProtocolWorkflowState(str, Enum):
+    """Host-visible state of the Application transaction layered over Transport."""
+
+    CONNECTING = "connecting"
+    DISCOVERING = "discovering"
+    READY = "ready"
+    CONFIGURING = "configuring"
+    UPLOADING = "uploading"
+    VALIDATING = "validating"
+    READY_TO_START = "ready_to_start"
+    STARTING = "starting"
+    RUNNING = "running"
+    ABORTING = "aborting"
+    RESETTING = "resetting"
+    RESULTS_COMPLETE = "results_complete"
+    ABORTED = "aborted"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class RigSystemInfo:
+    """Version and diagnostic information confirmed for one Transport session."""
+
+    protocol_version: str
+    firmware_version: str
+    diagnostic_data: bytes
+    firmware_git_hash: bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,22 +66,37 @@ class ProtocolServiceReport:
     events: tuple[object, ...]
     application_messages: tuple[object, ...]
     stored_tick_results: tuple[TickResult, ...]
+    stored_application_errors: tuple[ApplicationErrorRecord, ...]
     serial_bytes_read: int
     serial_bytes_written: int
     application_message_submitted: bool
+    workflow_state: ProtocolWorkflowState
 
 
-@dataclass(frozen=True, slots=True)
-class _QueuedApplicationMessage:
-    """Encoded message plus correlation retained for future Application Responses."""
+@dataclass(slots=True)
+class _ApplicationOperation:
+    """One response-gated operation, containing one or more Transport messages."""
 
-    encoded: bytes
-    operation: str
+    kind: str
+    encoded_messages: tuple[bytes, ...]
+    application_test_id: int | None = None
     tick: int | None = None
+    control_command: object | None = None
+    global_control_command: object | None = None
+    next_message_index: int = 0
+    response_received: bool = False
+    response_deadline: float | None = None
+    response_error: str | None = None
+    response_outcome: object | None = None
+    previous_workflow_state: ProtocolWorkflowState | None = None
+
+    @property
+    def every_message_submitted(self) -> bool:
+        return self.next_message_index == len(self.encoded_messages)
 
 
 class FixedIOProtocolConnection:
-    """Own one host Transport session over a discovered USB CDC serial port.
+    """Own one response-gated host Application session over USB CDC serial.
 
     All methods must be called on the thread that created the connection, matching
     the protocol wrapper's ownership rule. ``service`` is intentionally non-blocking;
@@ -62,19 +110,39 @@ class FixedIOProtocolConnection:
         application: FixedIOProtocolAdapter,
         transport: Any,
         result_adapter: IncomingResultAdapter | None = None,
+        application_response_timeout_s: float = _DEFAULT_APPLICATION_RESPONSE_TIMEOUT_S,
     ) -> None:
+        if (
+            not isinstance(application_response_timeout_s, (int, float))
+            or isinstance(application_response_timeout_s, bool)
+            or application_response_timeout_s <= 0
+        ):
+            raise ValueError("application_response_timeout_s must be a positive number")
+
         self.serial_port = serial_port
         self.application = application
         self.transport = transport
         self.result_adapter = result_adapter
         self.protocol = application.protocol
+        self.application_response_timeout_s = float(application_response_timeout_s)
 
         self._incoming = bytearray()
         self._pending_output: bytes | None = None
         self._pending_output_offset = 0
-        self._outgoing_application: deque[_QueuedApplicationMessage] = deque()
+        self._upload_operations: deque[_ApplicationOperation] = deque()
+        self._pending_operation: _ApplicationOperation | None = None
         self._transport_delivery_pending = False
         self._active_upload: FixedIOUploadMessages | None = None
+        self._upload_message_count = 0
+        self._upload_messages_delivered = 0
+        self._upload_accepted = False
+        self._execution_started = False
+        self._next_result_tick = 0
+        self._session_confirmed = False
+        self._session_info: RigSystemInfo | None = None
+        self._last_application_response: object | None = None
+        self._retired_application_test_ids: set[int] = set()
+        self._workflow_state = ProtocolWorkflowState.CONNECTING
         self._closed = False
 
     @classmethod
@@ -85,6 +153,7 @@ class FixedIOProtocolConnection:
         transport_config: object | None = None,
         application_config: object | None = None,
         result_builder: CapturedRunBuilder | None = None,
+        application_response_timeout_s: float = _DEFAULT_APPLICATION_RESPONSE_TIMEOUT_S,
         protocol_module: ModuleType | Any | None = None,
         serial_factory: Any | None = None,
         comports: Any | None = None,
@@ -96,7 +165,10 @@ class FixedIOProtocolConnection:
         )
         p = application.protocol
         if transport_config is None:
-            transport_config = p.TransportConfig()
+            transport_config = p.TransportConfig(
+                retransmit_timeout_ms=_DEFAULT_RETRANSMIT_TIMEOUT_MS,
+                max_retries=_DEFAULT_MAX_RETRIES,
+            )
         serial_port = open_serial_port(
             serial_settings,
             serial_factory=serial_factory,
@@ -114,6 +186,7 @@ class FixedIOProtocolConnection:
                 application=application,
                 transport=transport,
                 result_adapter=result_adapter,
+                application_response_timeout_s=application_response_timeout_s,
             )
             connection.transport.notify_link_state(p.LinkState.CONNECTED, monotonic_now_ms())
             return connection
@@ -127,17 +200,87 @@ class FixedIOProtocolConnection:
         return self._closed
 
     @property
+    def workflow_state(self) -> ProtocolWorkflowState:
+        return self._workflow_state
+
+    @property
+    def session_confirmed(self) -> bool:
+        """Whether exact Application compatibility was confirmed for this session."""
+        return self._session_confirmed
+
+    @property
+    def session_info(self) -> RigSystemInfo | None:
+        return self._session_info
+
+    @property
+    def active_upload(self) -> FixedIOUploadMessages | None:
+        return self._active_upload
+
+    @property
+    def last_application_response(self) -> object | None:
+        return self._last_application_response
+
+    @property
     def upload_delivery_complete(self) -> bool:
-        """Whether all queued messages reached the peer Transport endpoint."""
+        """Whether every sparse upload message was confirmed by peer Transport."""
         return (
             self._active_upload is not None
-            and not self._outgoing_application
-            and not self._transport_delivery_pending
+            and self._upload_message_count > 0
+            and self._upload_messages_delivered == self._upload_message_count
         )
 
     @property
+    def upload_accepted(self) -> bool:
+        """Whether firmware accepted and completed validation of the sparse upload."""
+        return self._upload_accepted
+
+    @property
+    def execution_started(self) -> bool:
+        return self._execution_started
+
+    @property
+    def results_complete(self) -> bool:
+        return self._workflow_state is ProtocolWorkflowState.RESULTS_COMPLETE
+
+    @property
     def queued_application_message_count(self) -> int:
-        return len(self._outgoing_application)
+        pending = 0
+        if self._pending_operation is not None:
+            pending = len(self._pending_operation.encoded_messages) - (
+                self._pending_operation.next_message_index
+            )
+        return pending + sum(
+            len(operation.encoded_messages) for operation in self._upload_operations
+        )
+
+    def bind_result_builder(
+        self,
+        builder: CapturedRunBuilder,
+        *,
+        replace: bool = False,
+    ) -> None:
+        """Bind result/error storage, optionally replacing an abandoned attempt."""
+        self._require_open()
+        if not isinstance(builder, CapturedRunBuilder):
+            raise TypeError("builder must be a CapturedRunBuilder")
+        if not isinstance(replace, bool):
+            raise TypeError("replace must be a bool")
+        if self.result_adapter is not None and not replace:
+            raise ProtocolSessionError(
+                "A captured-run builder is already bound; pass replace=True after "
+                "finalizing an abandoned attempt"
+            )
+        if self.result_adapter is not None and self._active_upload is not None:
+            raise ProtocolSessionError(
+                "Cannot replace the captured-run builder while an upload is active"
+            )
+        if (
+            self._active_upload is not None
+            and builder.application_test_id
+            != self._active_upload.upload_attempt.application_test_id
+        ):
+            raise ValueError("builder Application Test ID does not match the active upload")
+        self.result_adapter = IncomingResultAdapter(builder, protocol_module=self.protocol)
 
     def queue_upload(
         self,
@@ -145,10 +288,12 @@ class FixedIOProtocolConnection:
         *,
         upload_attempt: UploadAttempt | None = None,
     ) -> UploadAttempt:
-        """Queue configuration plus sparse fixed-I/O states for reliable delivery."""
+        """Queue configuration plus sparse fixed-I/O states for response-gated upload."""
         self._require_open()
-        if self._outgoing_application or self._transport_delivery_pending:
-            raise ProtocolSessionError("An Application upload is already in progress")
+        if self._active_upload is not None or self._upload_operations:
+            raise ProtocolSessionError("An Application upload is already active")
+        if self._pending_operation is not None and self._pending_operation.kind != "discovery":
+            raise ProtocolSessionError("Another Application operation is already in progress")
 
         if upload_attempt is None and self.result_adapter is not None:
             upload_attempt = UploadAttempt(
@@ -159,32 +304,46 @@ class FixedIOProtocolConnection:
             compiled_test,
             upload_attempt=upload_attempt,
         )
-        if (
-            self.result_adapter is not None
-            and upload.upload_attempt.application_test_id
+        if upload.upload_attempt.application_test_id in self._retired_application_test_ids:
+            raise ValueError(
+                "upload_attempt reuses an abandoned Application Test ID; restart the "
+                "UploadAttempt and bind a builder for the fresh ID"
+            )
+        if self.result_adapter is not None and (
+            upload.upload_attempt.application_test_id
             != self.result_adapter.builder.application_test_id
+            or compiled_test.test_id != self.result_adapter.builder.test_id
         ):
             raise ValueError(
-                "upload_attempt Application Test ID does not match the captured-run builder"
+                "upload attempt does not match the captured-run builder's definition and "
+                "Application Test IDs"
             )
 
         encoded = self.application.encode_upload(upload)
-        self._outgoing_application.append(
-            _QueuedApplicationMessage(encoded=encoded[0], operation="configuration")
+        application_test_id = upload.upload_attempt.application_test_id
+        self._upload_operations.append(
+            _ApplicationOperation(
+                kind="configuration",
+                encoded_messages=(encoded[0],),
+                application_test_id=application_test_id,
+            )
         )
-        self._outgoing_application.extend(
-            _QueuedApplicationMessage(
-                encoded=wire,
-                operation="tick",
+        self._upload_operations.extend(
+            _ApplicationOperation(
+                kind="tick",
+                encoded_messages=(wire,),
+                application_test_id=application_test_id,
                 tick=message.tick_number,
             )
             for message, wire in zip(upload.instructions, encoded[1:], strict=True)
         )
         self._active_upload = upload
-        # Scaffold for public Execution Control: after the complete-test ACCEPTED
-        # response, self._active_upload.start_mode determines whether START is queued
-        # immediately or left for the host-command UI. The external-trigger policy can
-        # be added at this same boundary without changing fixed state expansion.
+        self._upload_message_count = len(encoded)
+        self._upload_messages_delivered = 0
+        self._upload_accepted = False
+        self._execution_started = False
+        self._next_result_tick = 0
+        self._advance_workflow()
         return upload.upload_attempt
 
     def send_upload(
@@ -195,12 +354,7 @@ class FixedIOProtocolConnection:
         timeout_s: float = 10.0,
         poll_interval_s: float = 0.001,
     ) -> UploadAttempt:
-        """Service synchronously until every upload message is Transport-delivered.
-
-        This does not claim Application acceptance. Public Response and Execution
-        Control support is still required before the host can await configuration,
-        tick, complete-test, or START responses.
-        """
+        """Service until firmware semantically accepts the complete sparse upload."""
         if not isinstance(timeout_s, (int, float)) or isinstance(timeout_s, bool) or timeout_s <= 0:
             raise ValueError("timeout_s must be a positive number")
         if (
@@ -212,15 +366,62 @@ class FixedIOProtocolConnection:
 
         attempt = self.queue_upload(compiled_test, upload_attempt=upload_attempt)
         deadline = time.monotonic() + float(timeout_s)
-        while not self.upload_delivery_complete:
+        while not self.upload_accepted:
             self.service()
             if time.monotonic() >= deadline:
                 raise TimeoutError(
-                    "Timed out before the fixed-I/O upload was delivered by Transport"
+                    "Timed out before firmware accepted the complete fixed-I/O upload"
                 )
             if poll_interval_s:
                 time.sleep(float(poll_interval_s))
         return attempt
+
+    def start(self) -> None:
+        """Queue START after Complete Test acceptance, normally for HOST_COMMAND."""
+        self._require_open()
+        if (
+            self._active_upload is None
+            or not self._upload_accepted
+            or self._workflow_state is not ProtocolWorkflowState.READY_TO_START
+        ):
+            raise ProtocolSessionError("No accepted upload is ready to start")
+        if self._active_upload.start_mode == "EXTERNAL_TRIGGER":
+            raise ProtocolSessionError("EXTERNAL_TRIGGER has no protocol implementation")
+        self._require_no_pending_operation()
+        self._queue_start()
+
+    def abort(self) -> None:
+        """Queue a test-scoped ABORT request for the active upload attempt."""
+        self._require_open()
+        if self._active_upload is None:
+            raise ProtocolSessionError("There is no active upload to abort")
+        self._require_no_pending_operation()
+        message = self.application.build_abort(self._active_upload.upload_attempt)
+        self._activate_operation(
+            _ApplicationOperation(
+                kind="abort",
+                encoded_messages=(self.application.encode(message),),
+                application_test_id=self._active_upload.upload_attempt.application_test_id,
+                control_command=self.protocol.ControlCommand.ABORT,
+                previous_workflow_state=self._workflow_state,
+            )
+        )
+
+    def reset_application(self) -> None:
+        """Queue a test-independent Application reset without resetting Transport."""
+        self._require_open()
+        if not self._session_confirmed:
+            raise ProtocolSessionError("Application compatibility has not been confirmed")
+        self._require_no_pending_operation()
+        message = self.application.build_reset_application()
+        self._activate_operation(
+            _ApplicationOperation(
+                kind="reset",
+                encoded_messages=(self.application.encode(message),),
+                global_control_command=self.protocol.GlobalControlCommand.RESET_APPLICATION,
+                previous_workflow_state=self._workflow_state,
+            )
+        )
 
     def service(self, *, operating_mode: object | None = None) -> ProtocolServiceReport:
         """Run one bounded read/process/drain/submit/write service pass."""
@@ -233,29 +434,36 @@ class FixedIOProtocolConnection:
         if operating_mode is None:
             operating_mode = (
                 p.OperatingMode.BULK_TRANSFER
-                if self._outgoing_application or self._transport_delivery_pending
+                if self._upload_operations
+                or self._transport_delivery_pending
+                or (
+                    self._pending_operation is not None
+                    and self._pending_operation.kind in {"configuration", "tick"}
+                )
                 else p.OperatingMode.NORMAL
             )
-        process_status = self.transport.process(now_ms, operating_mode)
-        if process_status is p.TransportStatus.DELIVERY_FAILED:
-            raise ProtocolSessionError("Transport reported reliable delivery failure")
+        self._process_transport(now_ms, operating_mode)
 
-        events, messages, results = self._drain()
+        events, messages, results, errors = self._drain()
+        self._advance_workflow()
+        self._check_response_timeout()
         submitted = self._submit_next_application_message()
         if submitted:
-            process_status = self.transport.process(now_ms, operating_mode)
-            if process_status is p.TransportStatus.DELIVERY_FAILED:
-                raise ProtocolSessionError("Transport reported reliable delivery failure")
+            self._process_transport(now_ms, operating_mode)
 
         bytes_written = self._service_output(now_ms)
-        more_events, more_messages, more_results = self._drain()
+        more_events, more_messages, more_results, more_errors = self._drain()
+        self._advance_workflow()
+        self._check_response_timeout()
         return ProtocolServiceReport(
             events=(*events, *more_events),
             application_messages=(*messages, *more_messages),
             stored_tick_results=(*results, *more_results),
+            stored_application_errors=(*errors, *more_errors),
             serial_bytes_read=bytes_read,
             serial_bytes_written=bytes_written,
             application_message_submitted=submitted,
+            workflow_state=self._workflow_state,
         )
 
     def close(self) -> None:
@@ -273,12 +481,19 @@ class FixedIOProtocolConnection:
         self._incoming.clear()
         self._pending_output = None
         self._pending_output_offset = 0
-        self._outgoing_application.clear()
+        self._upload_operations.clear()
+        self._pending_operation = None
         self._transport_delivery_pending = False
         with suppress(Exception):
             self.transport.notify_link_state(self.protocol.LinkState.DISCONNECTED, now_ms)
         self.transport.close()
         self._closed = True
+
+    def _process_transport(self, now_ms: int, operating_mode: object) -> None:
+        status = self.transport.process(now_ms, operating_mode)
+        if status is self.protocol.TransportStatus.DELIVERY_FAILED:
+            self._fail_workflow()
+            raise ProtocolSessionError("Transport reported reliable delivery failure")
 
     def _read_serial(self) -> int:
         waiting = self.serial_port.in_waiting
@@ -312,58 +527,369 @@ class FixedIOProtocolConnection:
             if not self._incoming:
                 return
 
-    def _drain(self) -> tuple[tuple[object, ...], tuple[object, ...], tuple[TickResult, ...]]:
+    def _drain(
+        self,
+    ) -> tuple[
+        tuple[object, ...],
+        tuple[object, ...],
+        tuple[TickResult, ...],
+        tuple[ApplicationErrorRecord, ...],
+    ]:
         p = self.protocol
         events: list[object] = []
         while (event := self.transport.read_event()) is not None:
             events.append(event)
             if event.type is p.EventType.DELIVERY_CONFIRMED:
-                self._transport_delivery_pending = False
+                self._handle_delivery_confirmed()
             elif event.type is p.EventType.DELIVERY_FAILED:
-                self._transport_delivery_pending = False
+                self._fail_workflow()
                 raise ProtocolSessionError("Transport delivery failed")
             elif event.type is p.EventType.PROTOCOL_ERROR:
+                self._fail_workflow()
                 raise ProtocolSessionError("Transport reported a protocol error")
+            elif event.type is p.EventType.SESSION_RESET:
+                self._invalidate_session()
+                raise ProtocolSessionError(
+                    "Transport session reset; the Application transaction was abandoned"
+                )
+            elif event.type is p.EventType.SESSION_ESTABLISHED:
+                self._session_confirmed = False
+                self._session_info = None
+                self._workflow_state = ProtocolWorkflowState.CONNECTING
 
         messages: list[object] = []
         stored_results: list[TickResult] = []
+        stored_errors: list[ApplicationErrorRecord] = []
         while (encoded := self.transport.read_application_data()) is not None:
             message = self.application.decode(encoded)
             messages.append(message)
-            if type(message) is p.TestResult and self.result_adapter is not None:
-                stored_results.append(self.result_adapter.ingest_application_message(message))
-        return tuple(events), tuple(messages), tuple(stored_results)
+            if type(message) is p.SystemInfoResponse:
+                self._handle_system_info_response(message)
+            elif type(message) is p.ApplicationResponse:
+                self._handle_application_response(message)
+            elif type(message) is p.ApplicationErrorMessage:
+                if self.result_adapter is not None and self._error_belongs_to_active_upload(
+                    message
+                ):
+                    stored_errors.append(self.result_adapter.ingest_application_error(message))
+            elif type(message) is p.TestResult:
+                self._validate_result_sequence(message)
+                if self.result_adapter is not None:
+                    stored_results.append(self.result_adapter.ingest_application_message(message))
+                self._next_result_tick += 1
+                if self._active_upload is not None and (
+                    self._next_result_tick == self._active_upload.configuration.expected_tick_count
+                ):
+                    self._workflow_state = ProtocolWorkflowState.RESULTS_COMPLETE
+            else:
+                self._fail_workflow()
+                raise ProtocolSessionError(
+                    f"Unexpected inbound Application message: {type(message).__name__}"
+                )
+        return tuple(events), tuple(messages), tuple(stored_results), tuple(stored_errors)
+
+    def _handle_delivery_confirmed(self) -> None:
+        operation = self._pending_operation
+        if operation is None or not self._transport_delivery_pending:
+            self._fail_workflow()
+            raise ProtocolSessionError(
+                "Transport confirmed delivery without a pending Application message"
+            )
+        self._transport_delivery_pending = False
+        if operation.kind in {"configuration", "tick"}:
+            self._upload_messages_delivered += 1
+        if operation.every_message_submitted:
+            operation.response_deadline = time.monotonic() + self.application_response_timeout_s
+        self._finish_pending_operation_if_ready()
+
+    def _handle_system_info_response(self, message: object) -> None:
+        operation = self._pending_operation
+        if operation is None or operation.kind != "discovery":
+            self._fail_workflow()
+            raise ProtocolSessionError("Received an unexpected System Information response")
+        try:
+            self.protocol.check_protocol_version(message.protocol_version)
+        except Exception as error:
+            self._fail_workflow()
+            raise ProtocolSessionError(
+                "The RIG Application protocol version is incompatible with this host"
+            ) from error
+        self._session_info = RigSystemInfo(
+            protocol_version=_version_text(message.protocol_version),
+            firmware_version=_version_text(message.firmware_version),
+            diagnostic_data=message.diagnostic_data,
+            firmware_git_hash=message.firmware_git_hash,
+        )
+        operation.response_received = True
+        self._finish_pending_operation_if_ready()
+
+    def _handle_application_response(self, message: object) -> None:
+        p = self.protocol
+        operation = self._pending_operation
+        if operation is None or operation.kind == "discovery":
+            self._fail_workflow()
+            raise ProtocolSessionError("Received an Application Response with no matching request")
+
+        expected_scope = {
+            "configuration": p.ResponseScope.TEST_CONFIGURATION,
+            "tick": p.ResponseScope.TICK,
+            "complete_test": p.ResponseScope.COMPLETE_TEST,
+            "start": p.ResponseScope.EXECUTION_CONTROL,
+            "abort": p.ResponseScope.EXECUTION_CONTROL,
+            "reset": p.ResponseScope.GLOBAL_CONTROL,
+        }[operation.kind]
+        if message.scope is not expected_scope:
+            self._response_mismatch(
+                f"expected scope {expected_scope.name}, received {message.scope.name}"
+            )
+
+        received_test_id = (
+            None
+            if message.test_id is None
+            else application_test_id_from_bytes(message.test_id.bytes)
+        )
+        if received_test_id != operation.application_test_id:
+            self._response_mismatch("Application Test ID does not match the pending operation")
+        if operation.kind == "tick" and message.tick_number != operation.tick:
+            self._response_mismatch(
+                f"expected tick {operation.tick}, received tick {message.tick_number}"
+            )
+        if operation.kind in {"start", "abort"} and (
+            message.control_command is not operation.control_command
+        ):
+            self._response_mismatch("Execution Control command does not match the request")
+        if operation.kind == "reset" and (
+            message.global_control_command is not operation.global_control_command
+        ):
+            self._response_mismatch("Global Control command does not match the request")
+
+        successful_outcome = (
+            p.ResponseOutcome.COMPLETED
+            if operation.kind in {"start", "abort", "reset"}
+            else p.ResponseOutcome.ACCEPTED
+        )
+        self._last_application_response = message
+        if message.outcome is not successful_outcome:
+            operation.response_error = (
+                f"{operation.kind} was {message.outcome.name.lower()}: "
+                f"{message.reason.name} (detail {message.detail})"
+            )
+            operation.response_outcome = message.outcome
+
+        operation.response_received = True
+        self._finish_pending_operation_if_ready()
+
+    def _response_mismatch(self, detail: str) -> None:
+        self._fail_workflow()
+        raise ProtocolSessionError(f"Application Response correlation failed: {detail}")
+
+    def _finish_pending_operation_if_ready(self) -> None:
+        operation = self._pending_operation
+        if (
+            operation is None
+            or not operation.response_received
+            or self._transport_delivery_pending
+            or not operation.every_message_submitted
+        ):
+            return
+
+        self._pending_operation = None
+        if operation.response_error is not None:
+            self._handle_negative_response(operation)
+            raise ProtocolSessionError(operation.response_error)
+        if operation.kind == "discovery":
+            self._session_confirmed = True
+            self._workflow_state = ProtocolWorkflowState.READY
+        elif operation.kind in {"configuration", "tick"}:
+            if self._upload_operations:
+                self._activate_operation(self._upload_operations.popleft())
+            else:
+                self._activate_operation(
+                    _ApplicationOperation(
+                        kind="complete_test",
+                        encoded_messages=(),
+                        application_test_id=operation.application_test_id,
+                        response_deadline=time.monotonic() + self.application_response_timeout_s,
+                    )
+                )
+        elif operation.kind == "complete_test":
+            self._upload_accepted = True
+            self._workflow_state = ProtocolWorkflowState.READY_TO_START
+            if self._active_upload is not None and self._active_upload.start_mode == "IMMEDIATE":
+                self._queue_start()
+        elif operation.kind == "start":
+            self._execution_started = True
+            self._workflow_state = ProtocolWorkflowState.RUNNING
+        elif operation.kind == "abort":
+            self._retire_active_upload()
+            self._workflow_state = ProtocolWorkflowState.ABORTED
+        elif operation.kind == "reset":
+            self._retire_active_upload()
+            self._workflow_state = ProtocolWorkflowState.READY
+
+    def _handle_negative_response(self, operation: _ApplicationOperation) -> None:
+        """Apply the protocol's scope-specific recovery semantics."""
+        p = self.protocol
+        if operation.kind in {"configuration", "tick", "complete_test"}:
+            self._retire_active_upload()
+            self._workflow_state = ProtocolWorkflowState.FAILED
+            return
+        if operation.kind == "start" and operation.response_outcome is p.ResponseOutcome.REJECTED:
+            self._execution_started = False
+            self._upload_accepted = True
+            self._workflow_state = ProtocolWorkflowState.READY_TO_START
+            return
+        if operation.kind in {"abort", "reset"} and (
+            operation.response_outcome is p.ResponseOutcome.REJECTED
+        ):
+            self._workflow_state = operation.previous_workflow_state or ProtocolWorkflowState.FAILED
+            return
+        self._fail_workflow()
+
+    def _advance_workflow(self) -> None:
+        if self._pending_operation is not None:
+            return
+        snapshot = self.transport.get_status()
+        if snapshot.session_state is not self.protocol.SessionState.ESTABLISHED:
+            return
+        if not self._session_confirmed:
+            request = self.application.build_system_info_request(request_firmware_git_hash=True)
+            self._activate_operation(
+                _ApplicationOperation(
+                    kind="discovery",
+                    encoded_messages=(self.application.encode(request),),
+                )
+            )
+            return
+        if self._upload_operations:
+            self._activate_operation(self._upload_operations.popleft())
+
+    def _activate_operation(self, operation: _ApplicationOperation) -> None:
+        if self._pending_operation is not None:
+            raise ProtocolSessionError("Cannot activate two Application operations at once")
+        self._pending_operation = operation
+        self._workflow_state = {
+            "discovery": ProtocolWorkflowState.DISCOVERING,
+            "configuration": ProtocolWorkflowState.CONFIGURING,
+            "tick": ProtocolWorkflowState.UPLOADING,
+            "complete_test": ProtocolWorkflowState.VALIDATING,
+            "start": ProtocolWorkflowState.STARTING,
+            "abort": ProtocolWorkflowState.ABORTING,
+            "reset": ProtocolWorkflowState.RESETTING,
+        }[operation.kind]
+
+    def _queue_start(self) -> None:
+        if self._active_upload is None:
+            raise ProtocolSessionError("There is no accepted upload to start")
+        message = self.application.build_start(self._active_upload.upload_attempt)
+        self._activate_operation(
+            _ApplicationOperation(
+                kind="start",
+                encoded_messages=(self.application.encode(message),),
+                application_test_id=self._active_upload.upload_attempt.application_test_id,
+                control_command=self.protocol.ControlCommand.START,
+            )
+        )
 
     def _submit_next_application_message(self) -> bool:
         p = self.protocol
+        operation = self._pending_operation
         if (
-            not self._outgoing_application
+            operation is None
+            or operation.every_message_submitted
             or self._transport_delivery_pending
-            or self._application_response_pending()
         ):
             return False
         snapshot = self.transport.get_status()
         if snapshot.session_state is not p.SessionState.ESTABLISHED:
             return False
-        status = self.transport.submit_application_data(self._outgoing_application[0].encoded)
+        if operation.kind != "discovery" and not self._session_confirmed:
+            return False
+
+        encoded = operation.encoded_messages[operation.next_message_index]
+        status = self.transport.submit_application_data(encoded)
         if status is p.TransportStatus.OK:
-            self._outgoing_application.popleft()
+            operation.next_message_index += 1
             self._transport_delivery_pending = True
             return True
         if status in (p.TransportStatus.NOT_READY, p.TransportStatus.CAPACITY_EXHAUSTED):
             return False
+        self._fail_workflow()
         raise ProtocolSessionError(
             f"Could not submit Application message: Transport returned {status.name}"
         )
 
-    def _application_response_pending(self) -> bool:
-        # Scaffold for the forthcoming public Response wrapper: once it exists, this
-        # becomes true after configuration or a tick is Transport-delivered and remains
-        # true until the correlated Application ACCEPTED response is decoded. Each queue
-        # item already retains its operation and tick for that correlation, so this will
-        # make the upload strict Application-level stop-and-wait without changing the
-        # state expander or serial pump.
-        return False
+    def _check_response_timeout(self) -> None:
+        operation = self._pending_operation
+        if (
+            operation is None
+            or operation.response_received
+            or operation.response_deadline is None
+            or time.monotonic() < operation.response_deadline
+        ):
+            return
+        kind = operation.kind
+        self._fail_workflow()
+        raise ProtocolSessionError(f"Timed out waiting for the {kind} Application response")
+
+    def _validate_result_sequence(self, message: object) -> None:
+        if self._active_upload is None or not self._execution_started:
+            self._fail_workflow()
+            raise ProtocolSessionError("Received a TestResult before START completed")
+        received_test_id = application_test_id_from_bytes(message.test_id.bytes)
+        if received_test_id != self._active_upload.upload_attempt.application_test_id:
+            self._fail_workflow()
+            raise ProtocolSessionError("Received TestResult for a different Application Test ID")
+        if message.tick_number != self._next_result_tick:
+            self._fail_workflow()
+            raise ProtocolSessionError(
+                f"Expected TestResult tick {self._next_result_tick}, received {message.tick_number}"
+            )
+
+    def _require_no_pending_operation(self) -> None:
+        if self._pending_operation is not None or self._transport_delivery_pending:
+            raise ProtocolSessionError("Another response-requiring operation is already pending")
+
+    def _clear_active_transaction(self) -> None:
+        self._upload_operations.clear()
+        self._active_upload = None
+        self._upload_message_count = 0
+        self._upload_messages_delivered = 0
+        self._upload_accepted = False
+        self._execution_started = False
+        self._next_result_tick = 0
+
+    def _retire_active_upload(self) -> None:
+        if self._active_upload is not None:
+            self._retired_application_test_ids.add(
+                self._active_upload.upload_attempt.application_test_id
+            )
+        self._clear_active_transaction()
+
+    def _error_belongs_to_active_upload(self, message: object) -> bool:
+        if self._active_upload is None:
+            return False
+        if message.test_id is None:
+            return True
+        return (
+            application_test_id_from_bytes(message.test_id.bytes)
+            == self._active_upload.upload_attempt.application_test_id
+        )
+
+    def _fail_workflow(self) -> None:
+        self._upload_operations.clear()
+        self._pending_operation = None
+        self._transport_delivery_pending = False
+        self._upload_accepted = False
+        self._execution_started = False
+        self._workflow_state = ProtocolWorkflowState.FAILED
+
+    def _invalidate_session(self) -> None:
+        self._session_confirmed = False
+        self._session_info = None
+        self._pending_output = None
+        self._pending_output_offset = 0
+        self._fail_workflow()
 
     def _service_output(self, now_ms: int) -> int:
         p = self.protocol
@@ -406,8 +932,14 @@ class FixedIOProtocolConnection:
         self.close()
 
 
+def _version_text(version: object) -> str:
+    return f"{version.major}.{version.minor}.{version.patch}"
+
+
 __all__ = [
     "FixedIOProtocolConnection",
     "ProtocolServiceReport",
+    "ProtocolWorkflowState",
+    "RigSystemInfo",
     "monotonic_now_ms",
 ]

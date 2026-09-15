@@ -192,8 +192,9 @@ sparse ticks. Every group is applied in instruction-ID order and produces one co
 fixed `TestInstruction`. A disabled PWM produces protocol period/duty `0/0`; changing
 its frequency or duty updates retained state so a later enable restores the requested
 waveform. Analogue initial voltage is absent from the protocol configuration, so any
-configured Analogue output inserts tick zero into the sparse sequence. A real tick-zero
-stimulus wins within that single tick-zero state.
+configured Analogue output inserts tick zero into the sparse sequence. All real
+tick-zero instructions are then applied in instruction-ID order to that initialized
+state, and the merged state is emitted once for tick zero.
 
 `FixedIOProtocolConnection` composes four replaceable pieces:
 
@@ -205,20 +206,28 @@ stimulus wins within that single tick-zero state.
 The caller repeatedly invokes non-blocking `service()`. The connection retains partial
 Transport input and serial output, advances Transport with monotonic wrapped
 milliseconds, drains events/application data, and submits at most one reliable
-Application message at a time. A queued upload is considered delivered only when its
-last Transport delivery is confirmed; this deliberately does not claim Application
-acceptance. `_application_response_pending()` is the narrow scaffold that will enforce
-configuration/tick Response stop-and-wait once that public wrapper exists. Execution
-Control can be added to the same outgoing queue without changing serial or state
-expansion.
+Application message at a time. A separate Application workflow retains each operation
+after submission and advances only when both Transport delivery and the correlated
+semantic response are complete. A pending tick owns a tuple of encoded messages: it
+contains one fixed instruction today and can later contain declared communication data
+without changing the stop-and-wait state machine.
+
+Every established Transport session begins with BASIC System Information discovery and
+an exact major/minor/patch compatibility check. The response-gated sequence is Test
+Configuration, each non-consecutive sparse tick, automatic Complete Test validation,
+and optional START. IMMEDIATE queues START automatically; HOST_COMMAND waits for an
+explicit `start()` call. EXTERNAL_TRIGGER remains in the protocol-neutral IR but has no
+protocol behavior. ABORT and RESET_APPLICATION use the same single-outstanding-operation
+mechanism. Session reset, delivery failure, response timeout, negative response, or
+correlation mismatch abandons the workflow; an upload is never blindly replayed.
 
 ## Captured-run boundary
 
 The incoming protocol is isolated from result storage. The implemented fixed adapter
-turns one complete Application `TestResult` into one `TickResult`. Future public
-variable result and Error wrappers will add raw `CommunicationResult` values and
-`ApplicationErrorRecord` values at the same boundary. These typed storage records have
-no dependency on CFFI objects or USB framing.
+turns one complete Application `TestResult` into one `TickResult`, while decoded
+Application Errors become `ApplicationErrorRecord` values. Future public variable
+result wrappers will add raw `CommunicationResult` values at the same boundary. These
+typed storage records have no dependency on CFFI objects or USB framing.
 
 `TickResult` currently mirrors the stable semantic content identified in the
 application design:
@@ -346,11 +355,11 @@ the same captured evidence and assertion snapshot can be evaluated again later.
 
 ## Remaining planned boundaries
 
-When the protocol exposes them publicly, add Response and Execution Control handling to
-the existing connection workflow, then add variable communication configuration,
-instruction, result, and Error mappings beside the fixed mappings. Serial discovery,
-Transport servicing, upload identity, capture storage, and fixed state expansion do not
-need to change for those additions.
+When the protocol exposes variable communication instruction and result messages, add
+their mappings beside the fixed mappings. Each tick operation already supports a tuple
+of separately delivered messages followed by one Tick Response, so serial discovery,
+Transport servicing, response correlation, upload identity, capture storage, and fixed
+state expansion do not need to change for those additions.
 
 ## Testing approach
 

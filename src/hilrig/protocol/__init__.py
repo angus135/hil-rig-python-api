@@ -9,6 +9,8 @@ from hilrig.protocol.application import (
 from hilrig.protocol.connection import (
     FixedIOProtocolConnection,
     ProtocolServiceReport,
+    ProtocolWorkflowState,
+    RigSystemInfo,
     monotonic_now_ms,
 )
 from hilrig.protocol.serial import (
@@ -22,6 +24,8 @@ __all__ = [
     "FixedIOProtocolConnection",
     "FixedIOUploadMessages",
     "ProtocolServiceReport",
+    "ProtocolWorkflowState",
+    "RigSystemInfo",
     "SerialConnectionSettings",
     "application_test_id_from_bytes",
     "application_test_id_to_bytes",
