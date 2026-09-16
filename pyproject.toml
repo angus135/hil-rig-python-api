@@ -10,6 +10,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
 
+[project.scripts]
+hil-rig = "hilrig.terminal:main"
+
 [project.optional-dependencies]
 dev = [
     "build>=1.2",

@@ -203,6 +203,20 @@ state, and the merged state is emitted once for tick zero.
 - the stateless Application codec and fixed-I/O state adapter; and
 - an optional `IncomingResultAdapter` bound to a `CapturedRunBuilder`.
 
+The installed terminal application adds a deliberately thin layer above this
+connection. The main thread owns command input and immutable status rendering. A
+dedicated protocol worker thread creates and exclusively owns every
+`FixedIOProtocolConnection`, receives `run` and `abort` requests through thread-safe
+signals, and publishes immutable snapshots and user-facing notifications. Test files
+expose `build_test() -> Test`; they do not own protocol or artifact lifetimes.
+
+The worker currently executes only the automatic strict workflow. Its boundary is
+operation-oriented rather than encoded-message-oriented: it observes public workflow
+states and never reaches into the connection's pending message queue. A later semantic
+gate can therefore release one complete configuration or tick operation, even when a
+future operation contains several variable-peripheral messages followed by one
+Application Response, without changing the terminal/worker threading model.
+
 The caller repeatedly invokes non-blocking `service()`. The connection retains partial
 Transport input and serial output, advances Transport with monotonic wrapped
 milliseconds, drains events/application data, and submits at most one reliable

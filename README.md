@@ -41,6 +41,107 @@ python -m pip install -e ".[dev]"
 The editable install (`-e`) means changes under `src/hilrig/` are used immediately
 without reinstalling the package.
 
+## HIL-RIG terminal application
+
+The installed `hil-rig` command starts a persistent terminal application. It runs one
+test at a time on a dedicated protocol worker thread, so the terminal stays responsive
+to status and abort commands while the worker owns and services the USB connection.
+
+Start it from an activated development environment:
+
+```powershell
+hil-rig
+```
+
+It can also be started without activating the environment:
+
+```powershell
+.\.venv\Scripts\hil-rig.exe
+```
+
+A terminal-loadable Python test file must define a no-argument `build_test()` function
+that creates and returns a fresh `hilrig.Test`. The file describes the test only; the
+terminal owns compilation, connection, upload, capture, evaluation, and output files:
+
+```python
+from hilrig import FrequencyMode, LogicVoltage, StartMode, Test
+
+
+def build_test() -> Test:
+    test = Test(name="Observation test")
+    test.configure(
+        frequency_mode=FrequencyMode.HZ_1K,
+        start_mode=StartMode.IMMEDIATE,
+    )
+    test.digital_input(channel=0).configure(voltage=LogicVoltage.V3_3)
+    return test
+```
+
+Test-definition files are trusted Python code. Loading one executes its top-level code
+before `build_test()` is called. Do not run files from untrusted sources.
+
+The initial terminal provides five commands:
+
+```text
+help
+run <path>
+status
+abort
+quit
+```
+
+Paths containing spaces may be quoted. For example:
+
+```text
+HIL-RIG> run "C:\HIL-RIG Tests\motor-startup.py"
+Run queued: C:\HIL-RIG Tests\motor-startup.py
+
+HIL-RIG> status
+State: running
+Detail: Receiving test results (412 received).
+Results: 412/1751 ticks
+```
+
+`run` uses the strict protocol-v0.2 workflow: System Information discovery, exact
+version confirmation, correlated Application Responses for configuration and sparse
+ticks, Complete Test acceptance, START completion, and the complete ordered result
+set. `HOST_COMMAND` tests are started automatically by this automatic runner after
+upload acceptance. `EXTERNAL_TRIGGER` is not supported by this first terminal version.
+
+Each run creates a unique directory beside the test file:
+
+```text
+runs/
+`-- 20260916-184200-observation-test-<run-id>/
+    |-- test-definition.json
+    |-- test-review.xlsx
+    |-- captured-run.sqlite3
+    |-- run-manifest.json
+    |-- fixed-results.csv
+    |-- communication-results.csv
+    |-- application-errors.csv
+    |-- evaluation-report.json
+    `-- evaluation-report.md
+```
+
+The terminal prints that directory when the run finishes. An aborted run retains and
+reports any partial capture. A failed run writes `run-error.txt` when its output
+directory had already been created. After a run completes, fails, or is aborted, the
+same terminal can run another test. The initial implementation opens a fresh protocol
+connection for every run.
+
+See [`examples/terminal_test.py`](examples/terminal_test.py) for a dedicated terminal
+definition. The existing [`examples/basic_digital_test.py`](examples/basic_digital_test.py)
+also follows the contract and can either be loaded by the terminal or executed directly:
+
+```text
+HIL-RIG> run "examples\basic_digital_test.py"
+```
+
+`examples/captured_run.py` and `examples/assertion_evaluator.py` are offline
+demonstrations that fabricate captured data, so they are not terminal-loadable hardware
+test definitions. `examples/example_test.py` also retains its older standalone form.
+
 ## Current API example
 
 ```python
@@ -549,6 +650,8 @@ python -m ruff format .
 |-- examples/basic_digital_test.py Small runnable example
 |-- src/hilrig/                    Installable Python package
 |   |-- api.py                     Public Test and channel-handle API
+|   |-- runner.py                  Automatic run controller and protocol worker
+|   |-- terminal.py                Persistent `hil-rig` command shell
 |   |-- timing.py                  Exact conversion into ticks
 |   |-- compiler.py                Validation and immutable IR snapshot construction
 |   |-- exporters/                 JSON machine IR and human-readable Excel export
