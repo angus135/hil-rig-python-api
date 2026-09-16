@@ -1,7 +1,8 @@
 {
   "protocol_submodule_path": "external/hil-rig-protocol",
   "compatibility_authority": "Runtime STATUS compatibility profile/version and the protocol files supplied with the checkout or ZIP are authoritative. Git revisions are evidence only when observable.",
-  "protocol_version": "0.1.0",
+  "protocol_version": "0.2.0",
+  "pinned_protocol_commit": "49431179c7ba30cbce09c1d20df8cde7780b0840",
   "compatibility_profile_id": "0x41505031",
   "observed_revision_evidence": "Trace source_evidence records Python/protocol Git commit and dirty state when Git metadata is available, otherwise records them as unavailable.",
   "python_versions": [
@@ -34,7 +35,19 @@
     "representative_configuration": 242,
     "maximum_extension_configuration": 481,
     "instruction": 73,
-    "result": 62
+    "result": 62,
+    "response": 36,
+    "error": "35 + diagnostic_data length"
+  },
+  "application_v02": {
+    "command": "application-v02",
+    "coverage": [
+      "System Information discovery with exact protocol-version validation",
+      "synthetic START, ABORT, and RESET_APPLICATION responses",
+      "all five Response scopes",
+      "global, test-wide, and tick-specific Error forms including a 255-byte diagnostic"
+    ],
+    "scope_limit": "Synthetic control responses and inbound Response/Error round trips validate only the protocol data path; they do not prove execution, hardware abort behavior, or the production state machine."
   },
   "test_envelope_version": 1,
   "status_schema_version": 2,

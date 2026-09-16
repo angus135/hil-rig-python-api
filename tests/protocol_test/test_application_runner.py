@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import struct
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 
 import hil_rig_protocol as protocol
@@ -26,9 +27,12 @@ from hilrig.protocol_test.application_hardware import (
     PROTOCOL_VERSION,
     REPRESENTATIVE_CONFIGURATION_DIGEST,
     configuration_semantic_digest,
+    execution_control_response,
+    global_control_response,
     instruction_semantic_digest,
     make_application_codec,
     representative_configuration,
+    response_fixtures,
 )
 from hilrig.protocol_test.connection import LinkDisconnectedError, hardware_test_transport_config
 from hilrig.protocol_test.harness_codec import (
@@ -79,6 +83,7 @@ class ApplicationFirmwareConnection:
         self.codec_initialized = 1
         self.initialization_status = int(protocol.ApplicationStatus.OK)
         self.duplicate_results = False
+        self.duplicate_application_responses = False
         self.invalid_hrtp_messages = 0
         self.transport_event_count = 0
         self.usb_rx_bytes = 0
@@ -236,6 +241,37 @@ class ApplicationFirmwareConnection:
                 else protocol.ApplicationStatus.MALFORMED_MESSAGE
             )
             return
+        if type(message) is protocol.SystemInfoRequest:
+            self.last_message_type = 1
+            if message.protocol_version != protocol.PROTOCOL_VERSION:
+                self.semantic_rejections += 1
+                self.last_application_status = int(protocol.ApplicationStatus.VERSION_MISMATCH)
+                return
+            response = protocol.SystemInfoResponse(
+                protocol.PROTOCOL_VERSION,
+                protocol.ProtocolVersion(63, 0, 0),
+                b"firmware-pr-63",
+                b"63",
+            )
+            try:
+                self._queue_message(self.codec.encode(response))
+            except protocol.ApplicationEncodeError:
+                self.encode_failures += 1
+            return
+        if type(message) is protocol.ExecutionControl:
+            self.last_message_type = 18
+            try:
+                self._queue_message(self.codec.encode(execution_control_response(message)))
+            except protocol.ApplicationEncodeError:
+                self.encode_failures += 1
+            return
+        if type(message) is protocol.GlobalControl:
+            self.last_message_type = 19
+            try:
+                self._queue_message(self.codec.encode(global_control_response(message)))
+            except protocol.ApplicationEncodeError:
+                self.encode_failures += 1
+            return
         if type(message) is protocol.TestConfiguration:
             self.last_message_type = 16
             if self.state not in {
@@ -285,6 +321,17 @@ class ApplicationFirmwareConnection:
                 self.state = ApplicationHarnessState.COMPLETE
             self.last_application_status = int(protocol.ApplicationStatus.OK)
             return
+        if type(message) in {protocol.ApplicationResponse, protocol.ApplicationErrorMessage}:
+            self.last_message_type = 20 if type(message) is protocol.ApplicationResponse else 21
+            try:
+                encoded = self.codec.encode(message)
+            except protocol.ApplicationEncodeError:
+                self.encode_failures += 1
+                return
+            self._queue_message(encoded)
+            if self.duplicate_application_responses:
+                self._queue_message(encoded)
+            return
         self.semantic_rejections += 1
 
     def submit_application_data(self, data: bytes) -> TransportStatus:
@@ -307,7 +354,7 @@ def make_runner(
         tmp_path,
         "application-unit",
         seed=1,
-        source_evidence={"protocol_declared_version": "0.1.0"},
+        source_evidence={"protocol_declared_version": "0.2.0"},
     )
     runner = ProtocolTestRunner(
         connection,  # type: ignore[arg-type]
@@ -375,6 +422,77 @@ def test_application_repeat_uses_fresh_test_ids_and_detects_no_stale_results(
     close(runner, trace, connection)
 
 
+def test_application_v02_discovers_and_round_trips_controls_responses_and_errors(
+    tmp_path: Path,
+) -> None:
+    runner, connection, trace = make_runner(tmp_path)
+    result = runner.run_application_v02()
+    assert result["case_counts"] == {
+        "system_information": 1,
+        "execution_control": 2,
+        "global_control": 1,
+        "response_scopes": 5,
+        "error_forms": 3,
+        "total": 12,
+    }
+    assert len(set(result["test_ids_hex"].values())) == 3
+    assert result["discovery"].protocol_version == protocol.PROTOCOL_VERSION
+    assert [item["size"] for item in result["sizes"][3:8]] == [36] * 5
+    assert [item["size"] for item in result["sizes"][-3:]] == [35, 47, 290]
+    assert result["failure_deltas"] == {
+        "decode_failures": 0,
+        "semantic_rejections": 0,
+        "encode_failures": 0,
+    }
+    assert connection.semantic_rejections == 0
+    close(runner, trace, connection)
+
+
+def test_application_discovery_rejects_mismatched_patch_version(tmp_path: Path) -> None:
+    runner, connection, trace = make_runner(tmp_path)
+    wire = bytearray(
+        runner.application_codec.encode(
+            protocol.SystemInfoResponse(
+                protocol.PROTOCOL_VERSION,
+                protocol.ProtocolVersion(63, 0, 0),
+            )
+        )
+    )
+    wire[27] = 1  # SystemInfoResponse protocol-version patch in the public v0.2.0 wire form.
+    connection.messages.append(
+        ReceivedApplicationMessage(bytes(wire), connection.link_generation or 0, 0)
+    )
+    with pytest.raises(ScenarioFailure, match="discovery protocol version mismatch"):
+        runner.discover_application()
+    runner.close()
+    trace.finish(
+        passed=False, failure_reason="version mismatch", diagnostics=connection.get_diagnostics()
+    )
+
+
+def test_application_exchange_rejects_mismatched_and_duplicate_responses(tmp_path: Path) -> None:
+    runner, connection, trace = make_runner(tmp_path)
+    runner.discover_application()
+    expected = response_fixtures(protocol.TestId(bytes(range(16))))[0]
+    mismatch = replace(expected, detail=1)
+    connection.messages.append(
+        ReceivedApplicationMessage(
+            runner.application_codec.encode(mismatch), connection.link_generation or 0, 0
+        )
+    )
+    with pytest.raises(ScenarioFailure, match="did not match the expected value"):
+        runner._exchange_application(expected, expected, kind="APPLICATION_RESPONSE_TEST")
+    runner.close()
+    trace.finish(passed=False, failure_reason="mismatch", diagnostics=connection.get_diagnostics())
+
+    runner, connection, trace = make_runner(tmp_path)
+    connection.duplicate_application_responses = True
+    with pytest.raises(ScenarioFailure, match="duplicate Application response"):
+        runner.run_application_v02()
+    runner.close()
+    trace.finish(passed=False, failure_reason="duplicate", diagnostics=connection.get_diagnostics())
+
+
 def test_duplicate_fixed_result_is_rejected(tmp_path: Path) -> None:
     runner, connection, trace = make_runner(tmp_path)
     connection.duplicate_results = True
@@ -407,7 +525,7 @@ def test_raw_hrtp_and_application_classification_preserves_other_message(tmp_pat
     ("attribute", "value", "match"),
     [
         ("compatibility_profile_id", 0xDEADBEEF, "compatibility profile mismatch"),
-        ("protocol_version", (0, 2, 0), "protocol version mismatch"),
+        ("protocol_version", (0, 2, 1), "protocol version mismatch"),
         ("codec_initialized", 0, "not initialized"),
         (
             "initialization_status",
@@ -442,6 +560,13 @@ def test_application_reset_reconnect_clears_old_transaction_and_completes_new_on
     assert result["post_reconnect_transaction_succeeded"] is True
     assert result["old_test_id_hex"] != result["new_test_id_hex"]
     assert result["final_status"].application_harness_state == int(ApplicationHarnessState.COMPLETE)
+    records = [
+        json.loads(line) for line in trace.trace_path.read_text(encoding="utf-8").splitlines()
+    ]
+    discoveries = [
+        record for record in records if record["kind"] == "application_discovery_complete"
+    ]
+    assert [record["link_generation"] for record in discoveries] == [1, 2]
     close(runner, trace, connection)
 
 
@@ -510,7 +635,7 @@ def test_application_summary_contains_compatibility_and_semantic_evidence(tmp_pa
     )
     summary = json.loads(trace.summary_path.read_text(encoding="utf-8"))
     assert summary["scenario"] == "application-unit"
-    assert summary["protocol_version"] == [0, 1, 0]
+    assert summary["protocol_version"] == [0, 2, 0]
     assert summary["compatibility_profile_id"] == COMPATIBILITY_PROFILE_ID
     assert summary["application_codec_config"]["max_encoded_message_size"] == 512
     assert summary["result"]["test_id_hex"]

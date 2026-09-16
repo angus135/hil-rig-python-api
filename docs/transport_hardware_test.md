@@ -8,8 +8,8 @@ production-facing `hilrig` execution API.
 
 ## Compatibility
 
-The protocol source of truth is the submodule at `external/hil-rig-protocol`. For this
-checkout the required protocol version is **0.1.0** and the paired firmware advertises
+The protocol source of truth is the submodule at `external/hil-rig-protocol`. This checkout
+pins protocol commit `49431179c7ba30cbce09c1d20df8cde7780b0840` (version **0.2.0**), and the paired firmware advertises
 compatibility profile **`0x41505031`**. The harness fails STATUS compatibility checks if
 those runtime values do not match, if STATUS is not schema 2, or if the firmware reports
 that its Application codec failed to initialize.
@@ -104,6 +104,8 @@ Expected encoded sizes are:
 | Maximum-extension Test Configuration | 481 |
 | Fixed Test Instruction | 73 |
 | Fixed Test Result | 62 |
+| Fixed Application Response | 36 |
+| Application Error | 35 + diagnostic byte count |
 
 Semantic digests use unsigned 32-bit FNV-1a over explicitly typed values in protocol wire
 widths and little-endian order. Test IDs are deliberately excluded. Configuration golden
@@ -158,7 +160,7 @@ STATUS response. STATUS schema 2 is exactly 128 bytes: 32 consecutive little-end
 | 11 | Transport session state |
 | 12 | compatibility profile ID = `0x41505031` |
 | 13 | protocol version major = 0 |
-| 14 | protocol version minor = 1 |
+| 14 | protocol version minor = 2 |
 | 15 | protocol version patch = 0 |
 | 16 | Application codec initialized |
 | 17 | Application initialization status |
@@ -218,6 +220,7 @@ Application commands are:
 hilrig-protocol-test application-smoke --port /dev/ttyACM0
 hilrig-protocol-test application-boundaries --port /dev/ttyACM0
 hilrig-protocol-test application-negative --port /dev/ttyACM0
+hilrig-protocol-test application-v02 --port /dev/ttyACM0
 hilrig-protocol-test application-repeat --port /dev/ttyACM0 --count 100
 hilrig-protocol-test application-reset-reconnect --port /dev/ttyACM0
 ```
@@ -235,6 +238,18 @@ the known fixture size.
 bytes, proves the decode-failure counter increments without changing the invalid-HRTP
 counter, follows with a valid configuration, rejects a wrong-Test-ID instruction, and
 then completes the valid transaction.
+
+`application-v02` first performs the existing STATUS profile/version check and Application
+System Information discovery. It sends START, ABORT, and RESET_APPLICATION and requires
+their correlated synthetic Responses; round-trips all five Application Response scopes; and
+round-trips global, test-wide, and tick-specific Application Errors with empty, binary, and
+255-byte diagnostics. It finishes with STATUS and requires zero deltas in Application
+decode, semantic, and encode failure counters. Its trace records message family, scope/form,
+Test ID (or its absence), tick, wire size/hash, and delivery/response latency.
+
+The synthetic control Responses and inbound Response/Error round trips validate only the
+Application protocol data path added in v0.2.0. They do not implement or prove real
+execution, hardware abort behavior, or the final production state machine.
 
 `application-repeat` runs the requested number of complete one-tick transactions with
 fresh 16-byte Test IDs and records result latency/counter evidence.
@@ -266,7 +281,7 @@ explicitly unavailable otherwise.
 
 Physical tests are under `tests/hardware/` and use the `hardware` marker. They skip unless
 `HILRIG_TEST_PORT` or explicit USB identity variables are supplied. Application smoke,
-boundary, negative, and repeat tests use the same opt-in. Set
+boundary, negative, v0.2.0, and repeat tests use the same opt-in. Set
 `HILRIG_TEST_APPLICATION_REPEAT_COUNT` to change the default repeat count of 10.
 
 Manual reset tests remain separately opt-in with `HILRIG_TEST_MANUAL_RESET=1`. Long soak

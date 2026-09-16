@@ -21,6 +21,7 @@ def test_reset_reconnect_cli_exposes_explicit_unobserved_reset_fallback() -> Non
         (["application-smoke", "--port", "fake"], "application-smoke", None),
         (["application-boundaries", "--port", "fake"], "application-boundaries", None),
         (["application-negative", "--port", "fake"], "application-negative", None),
+        (["application-v02", "--port", "fake"], "application-v02", None),
         (
             ["application-repeat", "--port", "fake", "--count", "7"],
             "application-repeat",
@@ -86,6 +87,10 @@ class _Runner:
         self.calls.append(("application-negative", None))
         return {}
 
+    def run_application_v02(self) -> dict[str, object]:
+        self.calls.append(("application-v02", None))
+        return {}
+
     def run_application_repeat(self, count: int) -> dict[str, object]:
         self.calls.append(("application-repeat", count))
         return {}
@@ -103,6 +108,7 @@ class _Runner:
         (["application-smoke", "--port", "fake"], ("application-smoke", None)),
         (["application-boundaries", "--port", "fake"], ("application-boundaries", None)),
         (["application-negative", "--port", "fake"], ("application-negative", None)),
+        (["application-v02", "--port", "fake"], ("application-v02", None)),
         (
             ["application-repeat", "--port", "fake", "--count", "4"],
             ("application-repeat", 4),

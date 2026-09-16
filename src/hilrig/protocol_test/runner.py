@@ -17,7 +17,9 @@ from .application_hardware import (
     ALL_DISABLED_CONFIGURATION_SIZE,
     APPLICATION_CODEC_CONFIG,
     COMPATIBILITY_PROFILE_ID,
+    ERROR_FIXED_SIZE,
     FIXED_INSTRUCTION_SIZE,
+    FIXED_RESPONSE_SIZE,
     FIXED_RESULT_SIZE,
     MAX_EXTENSION_CONFIGURATION_DIGEST,
     MAX_EXTENSION_CONFIGURATION_SIZE,
@@ -25,15 +27,21 @@ from .application_hardware import (
     REPRESENTATIVE_CONFIGURATION_DIGEST,
     REPRESENTATIVE_CONFIGURATION_SIZE,
     all_disabled_configuration,
+    application_error_fixtures,
     application_message_name,
     configuration_semantic_digest,
+    execution_control_response,
+    execution_controls,
     expected_result,
+    global_control_response,
     instruction_semantic_digest,
     make_application_codec,
     maximum_extension_configuration,
     new_test_id,
     representative_configuration,
     representative_instructions,
+    reset_application_control,
+    response_fixtures,
     zero_instruction,
 )
 from .connection import LinkDisconnectedError, ProtocolTestConnection
@@ -91,11 +99,13 @@ class ProtocolTestRunner:
         self._ids = RequestIdAllocator()
         self._completed_ids: deque[int] = deque(maxlen=1024)
         self._pending_messages: deque[ReceivedApplicationMessage] = deque()
+        self._stale_application_messages: deque[ReceivedApplicationMessage] = deque()
         self._seen_results: set[tuple[bytes, int]] = set()
         self._active_request_id: int | None = None
         self._outbound_active = False
         self._delivery_confirmations = 0
         self._opened = False
+        self._application_discovery_generation: int | None = None
         self.application_codec = make_application_codec()
 
     @property
@@ -166,6 +176,7 @@ class ProtocolTestRunner:
     def _drain_received_messages(self) -> None:
         while (received := self.connection.pop_application_message()) is not None:
             if received.link_generation != self.connection.link_generation:
+                self._stale_application_messages.append(received)
                 self.trace.record(
                     "stale_application_message",
                     link_generation=received.link_generation,
@@ -266,14 +277,17 @@ class ProtocolTestRunner:
         try:
             self._submit_until_ready(payload, deadline)
             submitted = self._monotonic()
+            payload_evidence = {
+                "payload_size": len(payload),
+                "payload_sha256": payload_hash(payload),
+                **(evidence or {}),
+            }
             self.trace.record(
                 "payload_submitted",
                 payload_kind=kind,
                 link_generation=self.connection.link_generation,
-                payload_size=len(payload),
-                payload_sha256=payload_hash(payload),
                 submission_wait_ms=(submitted - started) * 1000,
-                **(evidence or {}),
+                **payload_evidence,
             )
             while self._monotonic() <= deadline:
                 self._service()
@@ -285,9 +299,7 @@ class ProtocolTestRunner:
                         payload_kind=kind,
                         delivery_confirmation_count=self._delivery_confirmations,
                         delivery_confirmation_latency_ms=latency_ms,
-                        payload_size=len(payload),
-                        payload_sha256=payload_hash(payload),
-                        **(evidence or {}),
+                        **payload_evidence,
                     )
                     return latency_ms
                 self._pause()
@@ -539,17 +551,226 @@ class ProtocolTestRunner:
         semantic_digest: int | None = None,
     ) -> bytes:
         encoded = self.application_codec.encode(message)
-        evidence: dict[str, object] = {
-            "application_scenario": self.trace.scenario,
-            "test_id_hex": message.test_id.bytes.hex(),
-            "encoded_message_type": application_message_name(message),
-            "encoded_message_size": len(encoded),
-            "payload_sha256": payload_hash(encoded),
-        }
+        evidence = self._application_message_evidence(message, encoded)
+        evidence["application_scenario"] = self.trace.scenario
+        evidence["encoded_message_type"] = application_message_name(message)
+        evidence["encoded_message_size"] = len(encoded)
         if semantic_digest is not None:
             evidence["semantic_digest"] = semantic_digest
         self.trace.record("application_message_encoded", **evidence)
         return encoded
+
+    def _application_message_form(self, message: protocol.ApplicationMessage) -> str | None:
+        if type(message) is protocol.ApplicationResponse:
+            return message.scope.name
+        if type(message) is protocol.ApplicationErrorMessage:
+            if message.test_id is None:
+                return "GLOBAL"
+            if message.tick_number is None:
+                return "TEST_WIDE"
+            return "TICK_SPECIFIC"
+        if type(message) is protocol.ExecutionControl:
+            return message.command.name
+        if type(message) is protocol.GlobalControl:
+            return message.command.name
+        if type(message) is protocol.SystemInfoRequest:
+            return message.query.name
+        if type(message) is protocol.SystemInfoResponse:
+            return "BASIC"
+        return None
+
+    def _application_message_evidence(
+        self, message: protocol.ApplicationMessage, encoded: bytes
+    ) -> dict[str, object]:
+        """Return common trace evidence without inventing a Test ID for global messages."""
+        test_id = getattr(message, "test_id", None)
+        return {
+            "message_family": application_message_name(message),
+            "message_scope": (
+                message.scope.name if type(message) is protocol.ApplicationResponse else None
+            ),
+            "message_form": self._application_message_form(message),
+            "test_id_hex": test_id.bytes.hex() if test_id is not None else None,
+            "tick": getattr(message, "tick_number", None),
+            "payload_size": len(encoded),
+            "payload_sha256": payload_hash(encoded),
+        }
+
+    def _require_application_discovery(self) -> None:
+        if self._application_discovery_generation != self.connection.link_generation:
+            raise ScenarioFailure(
+                "Application System Information discovery is required for the current "
+                "link generation"
+            )
+
+    def _raise_for_stale_application_message(self) -> None:
+        if not self._stale_application_messages:
+            return
+        received = self._stale_application_messages.popleft()
+        raise ScenarioFailure(
+            "stale-generation Application response received",
+            details={
+                "received_generation": received.link_generation,
+                "current_generation": self.connection.link_generation,
+                "payload_size": len(received.data),
+                "payload_sha256": payload_hash(received.data),
+            },
+        )
+
+    def _raise_for_unexpected_application_queue(
+        self, *, expected_name: str, expected_value: protocol.ApplicationMessage | None
+    ) -> None:
+        self._raise_for_stale_application_message()
+        if not self._pending_messages:
+            return
+        unexpected = self._pending_messages.popleft()
+        if unexpected.link_generation != self.connection.link_generation:
+            raise ScenarioFailure("stale-generation Application response received")
+        if unexpected.data.startswith(MAGIC):
+            self.trace.record(
+                "unexpected_message",
+                expected=expected_name,
+                actual="HRTP response",
+                payload_size=len(unexpected.data),
+                payload_sha256=payload_hash(unexpected.data),
+            )
+            raise ScenarioFailure("unexpected HRTP response while waiting for Application response")
+        try:
+            decoded = self.application_codec.decode(unexpected.data)
+        except protocol.ApplicationDecodeError as exc:
+            raise ScenarioFailure(f"malformed extra Application response: {exc}") from exc
+        if (
+            expected_value is not None
+            and type(decoded) is type(expected_value)
+            and decoded == expected_value
+        ):
+            raise ScenarioFailure("duplicate Application response")
+        raise ScenarioFailure(
+            f"unexpected additional Application response {application_message_name(decoded)}"
+        )
+
+    def _wait_for_application_response(
+        self,
+        *,
+        expected_type: type[object],
+        expected_value: protocol.ApplicationMessage | None,
+        deadline: float,
+    ) -> tuple[protocol.ApplicationMessage, float]:
+        """Wait for exactly one current-generation non-HRTP Application response."""
+        started = self._monotonic()
+        while self._monotonic() <= deadline:
+            self._service()
+            self._raise_for_stale_application_message()
+            if any(item.data.startswith(MAGIC) for item in self._pending_messages):
+                self._raise_for_unexpected_application_queue(
+                    expected_name=expected_type.__name__, expected_value=expected_value
+                )
+            received = self._take_pending(hrtp=False)
+            if received is not None:
+                if received.link_generation != self.connection.link_generation:
+                    raise ScenarioFailure("stale-generation Application response received")
+                try:
+                    decoded = self.application_codec.decode(received.data)
+                except protocol.ApplicationDecodeError as exc:
+                    self.trace.record(
+                        "unexpected_message",
+                        expected=expected_type.__name__,
+                        actual="malformed Application response",
+                        reason=str(exc),
+                        payload_size=len(received.data),
+                        payload_sha256=payload_hash(received.data),
+                    )
+                    raise ScenarioFailure(f"malformed Application response: {exc}") from exc
+                if type(decoded) is not expected_type:
+                    raise ScenarioFailure(
+                        "unexpected Application response family: "
+                        f"expected {expected_type.__name__}, got "
+                        f"{application_message_name(decoded)}"
+                    )
+                if expected_value is not None and decoded != expected_value:
+                    details = {"expected": expected_value, "actual": decoded}
+                    self.trace.record("application_response_mismatch", **details)
+                    raise ScenarioFailure(
+                        "Application response did not match the expected value", details=details
+                    )
+                self.trace.record(
+                    "application_response_decoded",
+                    response_latency_ms=(self._monotonic() - started) * 1000,
+                    **self._application_message_evidence(decoded, received.data),
+                )
+                self._service()
+                if expected_value is not None:
+                    self._raise_for_unexpected_application_queue(
+                        expected_name=expected_type.__name__, expected_value=expected_value
+                    )
+                return decoded, (self._monotonic() - started) * 1000
+            self._pause()
+        raise ScenarioFailure("timed out waiting for Application response")
+
+    def _exchange_application(
+        self,
+        message: protocol.ApplicationMessage,
+        expected: protocol.ApplicationMessage,
+        *,
+        kind: str,
+    ) -> tuple[float, float]:
+        """Send one Application value and require one exact public-codec response value."""
+        self._require_application_discovery()
+        encoded = self._encode_application_message(message)
+        delivery_latency_ms = self._submit_and_confirm(
+            encoded,
+            kind=kind,
+            evidence=self._application_message_evidence(message, encoded),
+        )
+        decoded, response_latency_ms = self._wait_for_application_response(
+            expected_type=type(expected),
+            expected_value=expected,
+            deadline=self._deadline(self.request_timeout_ms),
+        )
+        if decoded != expected:  # Defensive: the wait enforces exact equality above.
+            raise AssertionError("Application response equality was not enforced")
+        return delivery_latency_ms, response_latency_ms
+
+    def discover_application(self) -> protocol.SystemInfoResponse:
+        """Discover the current Application protocol and require the public exact-version gate."""
+        request = protocol.SystemInfoRequest(
+            protocol.SystemInfoQuery.BASIC,
+            request_firmware_git_hash=True,
+        )
+        encoded = self._encode_application_message(request)
+        delivery_latency_ms = self._submit_and_confirm(
+            encoded,
+            kind="APPLICATION_SYSTEM_INFO_REQUEST",
+            evidence=self._application_message_evidence(request, encoded),
+        )
+        decoded, response_latency_ms = self._wait_for_application_response(
+            expected_type=protocol.SystemInfoResponse,
+            expected_value=None,
+            deadline=self._deadline(self.request_timeout_ms),
+        )
+        assert type(decoded) is protocol.SystemInfoResponse
+        try:
+            protocol.check_protocol_version(decoded.protocol_version)
+        except protocol.ApplicationVersionMismatchError as exc:
+            self.trace.record(
+                "application_discovery_version_mismatch",
+                protocol_version=decoded.protocol_version,
+                reason=str(exc),
+            )
+            raise ScenarioFailure(
+                f"Application discovery protocol version mismatch: {exc}"
+            ) from exc
+        self._application_discovery_generation = self.connection.link_generation
+        self.trace.record(
+            "application_discovery_complete",
+            link_generation=self.connection.link_generation,
+            protocol_version=decoded.protocol_version,
+            firmware_version=decoded.firmware_version,
+            delivery_confirmation_latency_ms=delivery_latency_ms,
+            response_latency_ms=response_latency_ms,
+            **self._application_message_evidence(decoded, self.application_codec.encode(decoded)),
+        )
+        return decoded
 
     def _send_configuration(
         self,
@@ -559,6 +780,7 @@ class ProtocolTestRunner:
         expected_size: int,
         expected_digest: int,
     ) -> StatusPayloadV2:
+        self._require_application_discovery()
         digest = configuration_semantic_digest(configuration)
         if digest != expected_digest:
             raise ScenarioFailure(
@@ -693,6 +915,7 @@ class ProtocolTestRunner:
         instruction: protocol.TestInstruction,
         baseline: StatusPayloadV2,
     ) -> tuple[StatusPayloadV2, float]:
+        self._require_application_discovery()
         digest = instruction_semantic_digest(instruction)
         encoded = self._encode_application_message(instruction, semantic_digest=digest)
         if len(encoded) != FIXED_INSTRUCTION_SIZE:
@@ -758,6 +981,7 @@ class ProtocolTestRunner:
 
     def run_application_smoke(self) -> dict[str, object]:
         baseline = self.run_status()
+        self.discover_application()
         test_id = new_test_id()
         configuration = representative_configuration(test_id)
         status = self._send_configuration(
@@ -785,6 +1009,7 @@ class ProtocolTestRunner:
 
     def run_application_boundaries(self) -> dict[str, object]:
         baseline = self.run_status()
+        self.discover_application()
         first_id = new_test_id()
         disabled = all_disabled_configuration(first_id)
         status = self._send_configuration(
@@ -869,6 +1094,7 @@ class ProtocolTestRunner:
 
     def run_application_negative(self) -> dict[str, object]:
         baseline = self.run_status()
+        self.discover_application()
         test_id = new_test_id()
         configuration = representative_configuration(test_id)
         valid_wire = self._encode_application_message(
@@ -947,6 +1173,7 @@ class ProtocolTestRunner:
         if count < 1:
             raise ValueError("application repeat count must be positive")
         status = self.run_status()
+        self.discover_application()
         latencies: list[float] = []
         test_ids: list[str] = []
         for _ in range(count):
@@ -972,6 +1199,123 @@ class ProtocolTestRunner:
             "latency_max_ms": max(latencies),
             "latency_average_ms": sum(latencies) / len(latencies),
             "final_status": status,
+        }
+
+    def run_application_v02(self) -> dict[str, object]:
+        """Exercise the v0.2.0 Application additions without changing production semantics."""
+        baseline = self.run_status()
+        discovery = self.discover_application()
+        control_test_id = new_test_id()
+        response_test_id = new_test_id()
+        error_test_id = new_test_id()
+        while len({control_test_id, response_test_id, error_test_id}) != 3:
+            response_test_id = new_test_id()
+            error_test_id = new_test_id()
+
+        sizes: list[dict[str, object]] = []
+        latencies: list[dict[str, object]] = []
+
+        def exchange(
+            message: protocol.ApplicationMessage,
+            expected: protocol.ApplicationMessage,
+            *,
+            kind: str,
+            expected_size: int | None = None,
+        ) -> None:
+            encoded = self.application_codec.encode(message)
+            if expected_size is not None and len(encoded) != expected_size:
+                raise ScenarioFailure(
+                    f"{application_message_name(message)} encoded size mismatch: "
+                    f"expected {expected_size}, got {len(encoded)}"
+                )
+            delivery_latency_ms, response_latency_ms = self._exchange_application(
+                message, expected, kind=kind
+            )
+            evidence = self._application_message_evidence(message, encoded)
+            sizes.append(
+                {
+                    "message_family": evidence["message_family"],
+                    "message_scope": evidence["message_scope"],
+                    "message_form": evidence["message_form"],
+                    "size": len(encoded),
+                }
+            )
+            latencies.append(
+                {
+                    "message_family": evidence["message_family"],
+                    "message_scope": evidence["message_scope"],
+                    "message_form": evidence["message_form"],
+                    "delivery_confirmation_ms": delivery_latency_ms,
+                    "response_ms": response_latency_ms,
+                }
+            )
+
+        for control in execution_controls(control_test_id):
+            exchange(
+                control,
+                execution_control_response(control),
+                kind=f"APPLICATION_EXECUTION_CONTROL_{control.command.name}",
+            )
+        reset = reset_application_control()
+        exchange(
+            reset,
+            global_control_response(reset),
+            kind="APPLICATION_GLOBAL_CONTROL_RESET_APPLICATION",
+        )
+
+        for response in response_fixtures(response_test_id):
+            exchange(
+                response,
+                response,
+                kind=f"APPLICATION_RESPONSE_{response.scope.name}",
+                expected_size=FIXED_RESPONSE_SIZE,
+            )
+        for error in application_error_fixtures(error_test_id):
+            exchange(
+                error,
+                error,
+                kind=f"APPLICATION_ERROR_{self._application_message_form(error)}",
+                expected_size=ERROR_FIXED_SIZE + len(error.diagnostic_data),
+            )
+
+        final_status = self.run_status()
+        failure_deltas = {
+            "decode_failures": (
+                final_status.application_decode_failures - baseline.application_decode_failures
+            ),
+            "semantic_rejections": (
+                final_status.application_semantic_rejections
+                - baseline.application_semantic_rejections
+            ),
+            "encode_failures": (
+                final_status.application_encode_failures - baseline.application_encode_failures
+            ),
+        }
+        if any(failure_deltas.values()):
+            raise ScenarioFailure(
+                "Application v0.2.0 scenario changed failure counters",
+                details={"failure_deltas": failure_deltas, "final_status": final_status},
+            )
+        return {
+            "application_scenario": "application-v02",
+            "case_counts": {
+                "system_information": 1,
+                "execution_control": 2,
+                "global_control": 1,
+                "response_scopes": len(response_fixtures(response_test_id)),
+                "error_forms": len(application_error_fixtures(error_test_id)),
+                "total": 12,
+            },
+            "test_ids_hex": {
+                "execution_control": control_test_id.bytes.hex(),
+                "response_round_trip": response_test_id.bytes.hex(),
+                "error_round_trip": error_test_id.bytes.hex(),
+            },
+            "discovery": discovery,
+            "sizes": sizes,
+            "latencies_ms": latencies,
+            "failure_deltas": failure_deltas,
+            "final_status": final_status,
         }
 
     def _reset_and_reconnect(
@@ -1019,6 +1363,8 @@ class ProtocolTestRunner:
             )
             self.connection.close_link()
             self._pending_messages.clear()
+            self._stale_application_messages.clear()
+            self._application_discovery_generation = None
         reconnect_deadline = self._deadline(self.reconnect_timeout_ms)
         while self._monotonic() <= reconnect_deadline:
             try:
@@ -1035,6 +1381,8 @@ class ProtocolTestRunner:
             if generation == old_generation:
                 raise ScenarioFailure("reconnect did not allocate a new link generation")
             self._pending_messages.clear()
+            self._stale_application_messages.clear()
+            self._application_discovery_generation = None
             self._wait_for_session(self._deadline(self.request_timeout_ms))
             return {
                 "physical_disconnect_observed": disconnected,
@@ -1100,6 +1448,7 @@ class ProtocolTestRunner:
         allow_unobserved_reset: bool = False,
     ) -> dict[str, object]:
         status = self.run_status()
+        self.discover_application()
         old_id = new_test_id()
         configuration = representative_configuration(old_id)
         status = self._send_configuration(
@@ -1116,6 +1465,7 @@ class ProtocolTestRunner:
             label="Reset the HIL-RIG board after Application tick 0, then continue",
         )
         reset_status = self.run_status()
+        self.discover_application()
         if reset_status.application_harness_state != int(
             ApplicationHarnessState.WAITING_FOR_CONFIGURATION
         ):
@@ -1126,6 +1476,7 @@ class ProtocolTestRunner:
         old_wire = self._encode_application_message(
             instructions[1], semantic_digest=instruction_semantic_digest(instructions[1])
         )
+        self._require_application_discovery()
         self._submit_and_confirm(
             old_wire,
             kind="APPLICATION_STALE_TEST_INSTRUCTION",

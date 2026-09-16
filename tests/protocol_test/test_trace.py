@@ -56,16 +56,16 @@ def test_protocol_version_declared_by_supplied_files_is_compatibility_gate(tmp_p
 
 def test_observed_protocol_commit_is_evidence_not_a_gate() -> None:
     validate_protocol_compatibility(
-        {"protocol_declared_version": "0.1.0", "protocol_observed_commit": "deadbeef"}
+        {"protocol_declared_version": "0.2.0", "protocol_observed_commit": "deadbeef"}
     )
 
 
 def test_zip_without_git_metadata_records_protocol_version_from_files(tmp_path: Path) -> None:
     protocol = tmp_path / "external" / "hil-rig-protocol"
     protocol.mkdir(parents=True)
-    (protocol / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    (protocol / "VERSION").write_text("0.2.0\n", encoding="utf-8")
     evidence = collect_source_evidence(tmp_path)
-    assert evidence["protocol_declared_version"] == "0.1.0"
+    assert evidence["protocol_declared_version"] == "0.2.0"
     assert evidence["protocol_git_metadata_available"] is False
     assert evidence["protocol_observed_commit"] is None
 
@@ -75,11 +75,11 @@ def test_trace_summary_contains_application_compatibility_metadata(tmp_path: Pat
         tmp_path,
         "unit",
         seed=1,
-        source_evidence={"protocol_declared_version": "0.1.0"},
+        source_evidence={"protocol_declared_version": "0.2.0"},
     )
     trace.finish(passed=True, failure_reason=None, diagnostics={})
     summary = json.loads(trace.summary_path.read_text(encoding="utf-8"))
-    assert summary["protocol_version"] == [0, 1, 0]
+    assert summary["protocol_version"] == [0, 2, 0]
     assert summary["compatibility_profile_id"] == 0x41505031
     assert summary["application_codec_config"]["max_encoded_message_size"] == 512
 
@@ -112,10 +112,10 @@ def test_nested_directory_cannot_borrow_parent_revision(tmp_path: Path, nested_p
     assert metadata.commit is None
     assert metadata.dirty is None
     if nested_path == "external/hil-rig-protocol":
-        (nested / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+        (nested / "VERSION").write_text("0.2.0\n", encoding="utf-8")
         evidence = collect_source_evidence(tmp_path)
         assert evidence["python_api_git_metadata_available"] is True
         assert evidence["protocol_git_metadata_available"] is False
         assert evidence["protocol_observed_commit"] is None
         assert evidence["protocol_working_tree_dirty"] is None
-        assert evidence["protocol_declared_version"] == "0.1.0"
+        assert evidence["protocol_declared_version"] == "0.2.0"

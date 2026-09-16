@@ -15,7 +15,7 @@ APPLICATION_CODEC_CONFIG = protocol.ApplicationConfig(
     max_expected_tick_count=1_000_000,
 )
 
-PROTOCOL_VERSION = (0, 1, 0)
+PROTOCOL_VERSION = (0, 2, 0)
 COMPATIBILITY_PROFILE_ID = 0x41505031
 
 REPRESENTATIVE_CONFIGURATION_SIZE = 242
@@ -23,6 +23,9 @@ ALL_DISABLED_CONFIGURATION_SIZE = 226
 MAX_EXTENSION_CONFIGURATION_SIZE = 481
 FIXED_INSTRUCTION_SIZE = 73
 FIXED_RESULT_SIZE = 62
+FIXED_RESPONSE_SIZE = 36
+ERROR_FIXED_SIZE = 35
+ERROR_DIAGNOSTIC_SIZE_BASE = ERROR_FIXED_SIZE
 
 REPRESENTATIVE_CONFIGURATION_DIGEST = 0xDF35534C
 ALL_DISABLED_CONFIGURATION_DIGEST = 0x98E57BA3
@@ -31,6 +34,8 @@ INSTRUCTION_DIGESTS = (0x80089EF8, 0x8DE22BBE, 0x6AC9DD7A)
 
 REPRESENTATIVE_EXTENSION = bytes.fromhex("00 01 7E 7F 80 FE FF 48 52 54 50 00 A5 5A C3 3C")
 MAX_EXTENSION = bytes((index * 37) & 0xFF for index in range(255))
+BINARY_ERROR_DIAGNOSTIC = bytes.fromhex("00 FF 48 49 4C 00 52 49 47 7E C0 DB")
+MAXIMUM_ERROR_DIAGNOSTIC = bytes(range(255))
 
 _FNV_OFFSET = 2_166_136_261
 _FNV_PRIME = 16_777_619
@@ -221,6 +226,125 @@ def maximum_extension_configuration(
     )
 
 
+def execution_controls(
+    test_id: bytes | protocol.TestId,
+) -> tuple[protocol.ExecutionControl, protocol.ExecutionControl]:
+    """Build deterministic START and ABORT controls for a caller-owned fresh Test ID."""
+    test_id = _test_id(test_id)
+    return (
+        protocol.ExecutionControl(test_id, protocol.ControlCommand.START),
+        protocol.ExecutionControl(test_id, protocol.ControlCommand.ABORT),
+    )
+
+
+def reset_application_control() -> protocol.GlobalControl:
+    """Build the test-only RESET_APPLICATION global control fixture."""
+    return protocol.GlobalControl(protocol.GlobalControlCommand.RESET_APPLICATION)
+
+
+def execution_control_response(
+    control: protocol.ExecutionControl,
+) -> protocol.ApplicationResponse:
+    """Build the correlated synthetic response expected for a control fixture."""
+    return protocol.ApplicationResponse(
+        control.test_id,
+        protocol.ResponseScope.EXECUTION_CONTROL,
+        protocol.ResponseOutcome.ACCEPTED,
+        protocol.ResponseReason.NONE,
+        control_command=control.command,
+    )
+
+
+def global_control_response(control: protocol.GlobalControl) -> protocol.ApplicationResponse:
+    """Build the no-Test-ID synthetic response expected for a global control fixture."""
+    return protocol.ApplicationResponse(
+        None,
+        protocol.ResponseScope.GLOBAL_CONTROL,
+        protocol.ResponseOutcome.ACCEPTED,
+        protocol.ResponseReason.NONE,
+        global_control_command=control.command,
+    )
+
+
+def response_fixtures(test_id: bytes | protocol.TestId) -> tuple[protocol.ApplicationResponse, ...]:
+    """Build one deterministic Response for every defined non-sentinel Response scope."""
+    test_id = _test_id(test_id)
+    start, _ = execution_controls(test_id)
+    reset = reset_application_control()
+    return (
+        protocol.ApplicationResponse(
+            test_id,
+            protocol.ResponseScope.TEST_CONFIGURATION,
+            protocol.ResponseOutcome.ACCEPTED,
+            protocol.ResponseReason.NONE,
+        ),
+        protocol.ApplicationResponse(
+            test_id,
+            protocol.ResponseScope.TICK,
+            protocol.ResponseOutcome.COMPLETED,
+            protocol.ResponseReason.NONE,
+            tick_number=23,
+            detail=0x1020_3040,
+        ),
+        protocol.ApplicationResponse(
+            test_id,
+            protocol.ResponseScope.COMPLETE_TEST,
+            protocol.ResponseOutcome.COMPLETED,
+            protocol.ResponseReason.NONE,
+            tick_number=24,
+            detail=0x5060_7080,
+        ),
+        execution_control_response(start),
+        global_control_response(reset),
+    )
+
+
+def global_application_error() -> protocol.ApplicationErrorMessage:
+    """Build the global Error form with an intentionally empty diagnostic."""
+    return protocol.ApplicationErrorMessage(
+        None,
+        protocol.ErrorCategory.PROTOCOL,
+        True,
+        detail=0x0102_0304,
+    )
+
+
+def test_wide_application_error(
+    test_id: bytes | protocol.TestId,
+) -> protocol.ApplicationErrorMessage:
+    """Build the test-wide Error form with binary diagnostic bytes."""
+    return protocol.ApplicationErrorMessage(
+        _test_id(test_id),
+        protocol.ErrorCategory.HARDWARE,
+        False,
+        detail=0x1122_3344,
+        diagnostic_data=BINARY_ERROR_DIAGNOSTIC,
+    )
+
+
+def tick_application_error(test_id: bytes | protocol.TestId) -> protocol.ApplicationErrorMessage:
+    """Build the tick-specific Error form with the maximum 255-byte diagnostic."""
+    return protocol.ApplicationErrorMessage(
+        _test_id(test_id),
+        protocol.ErrorCategory.EXECUTION,
+        True,
+        tick_number=23,
+        detail=0x99AA_BBCC,
+        diagnostic_data=MAXIMUM_ERROR_DIAGNOSTIC,
+    )
+
+
+def application_error_fixtures(
+    test_id: bytes | protocol.TestId,
+) -> tuple[protocol.ApplicationErrorMessage, ...]:
+    """Build deterministic global, test-wide, and tick-specific Error fixtures."""
+    return (
+        global_application_error(),
+        test_wide_application_error(test_id),
+        tick_application_error(test_id),
+    )
+
+
 def expected_result(
     configuration: protocol.TestConfiguration,
     instruction: protocol.TestInstruction,
@@ -372,10 +496,22 @@ def instruction_semantic_digest(instruction: protocol.TestInstruction) -> int:
 
 
 def application_message_name(message: protocol.ApplicationMessage) -> str:
+    if type(message) is protocol.SystemInfoRequest:
+        return "SYSTEM_INFO_REQUEST"
+    if type(message) is protocol.SystemInfoResponse:
+        return "SYSTEM_INFO_RESPONSE"
     if type(message) is protocol.TestConfiguration:
         return "TEST_CONFIGURATION"
     if type(message) is protocol.TestInstruction:
         return "TEST_INSTRUCTION"
+    if type(message) is protocol.ExecutionControl:
+        return "EXECUTION_CONTROL"
+    if type(message) is protocol.GlobalControl:
+        return "GLOBAL_CONTROL"
     if type(message) is protocol.TestResult:
         return "TEST_RESULT"
+    if type(message) is protocol.ApplicationResponse:
+        return "RESPONSE"
+    if type(message) is protocol.ApplicationErrorMessage:
+        return "ERROR"
     raise TypeError("unsupported Application message")

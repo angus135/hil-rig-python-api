@@ -22,6 +22,8 @@ from hilrig.protocol_test.application_hardware import (  # noqa: E402
     COMPATIBILITY_PROFILE_ID,
     PROTOCOL_VERSION,
     configuration_semantic_digest,
+    execution_control_response,
+    global_control_response,
     instruction_semantic_digest,
     make_application_codec,
 )
@@ -244,6 +246,38 @@ class ApplicationRigBehavior:
             self.active_expected_tick_count = message.expected_tick_count
             self.last_application_status = int(protocol.ApplicationStatus.OK)
             return None
+        if type(message) is protocol.SystemInfoRequest:
+            self.last_message_type = 1
+            if message.protocol_version != protocol.PROTOCOL_VERSION:
+                self.semantic_rejections += 1
+                self.last_application_status = int(protocol.ApplicationStatus.VERSION_MISMATCH)
+                return None
+            try:
+                return self.codec.encode(
+                    protocol.SystemInfoResponse(
+                        protocol.PROTOCOL_VERSION,
+                        protocol.ProtocolVersion(63, 0, 0),
+                        b"firmware-pr-63",
+                        b"63",
+                    )
+                )
+            except protocol.ApplicationEncodeError:
+                self.encode_failures += 1
+                return None
+        if type(message) is protocol.ExecutionControl:
+            self.last_message_type = 18
+            try:
+                return self.codec.encode(execution_control_response(message))
+            except protocol.ApplicationEncodeError:
+                self.encode_failures += 1
+                return None
+        if type(message) is protocol.GlobalControl:
+            self.last_message_type = 19
+            try:
+                return self.codec.encode(global_control_response(message))
+            except protocol.ApplicationEncodeError:
+                self.encode_failures += 1
+                return None
         if type(message) is protocol.TestInstruction:
             self.last_message_type = 17
             if self.state is not ApplicationHarnessState.ACCEPTING_INSTRUCTIONS:
@@ -273,6 +307,13 @@ class ApplicationRigBehavior:
                 self.state = ApplicationHarnessState.COMPLETE
             self.last_application_status = int(protocol.ApplicationStatus.OK)
             return encoded
+        if type(message) in {protocol.ApplicationResponse, protocol.ApplicationErrorMessage}:
+            self.last_message_type = 20 if type(message) is protocol.ApplicationResponse else 21
+            try:
+                return self.codec.encode(message)
+            except protocol.ApplicationEncodeError:
+                self.encode_failures += 1
+                return None
         self.semantic_rejections += 1
         return None
 
@@ -401,6 +442,7 @@ def test_real_protocol_disconnect_and_reconnect_uses_new_generation() -> None:
         "application-boundaries",
         "application-negative",
         "application-repeat",
+        "application-v02",
         "oracle-regression",
     ],
 )
@@ -413,7 +455,7 @@ def test_real_protocol_application_runner_over_both_transport_endpoints(
         tmp_path,
         scenario,
         seed=1,
-        source_evidence={"protocol_declared_version": "0.1.0"},
+        source_evidence={"protocol_declared_version": "0.2.0"},
     )
     runner = ProtocolTestRunner(connection, trace, request_timeout_ms=1000)
     try:
@@ -439,6 +481,21 @@ def test_real_protocol_application_runner_over_both_transport_endpoints(
             result = runner.run_application_negative()
             assert result["decode_failures_delta"] == 1
             assert result["semantic_rejections_delta"] == 1
+        elif scenario == "application-v02":
+            result = runner.run_application_v02()
+            assert result["case_counts"] == {
+                "system_information": 1,
+                "execution_control": 2,
+                "global_control": 1,
+                "response_scopes": 5,
+                "error_forms": 3,
+                "total": 12,
+            }
+            assert result["failure_deltas"] == {
+                "decode_failures": 0,
+                "semantic_rejections": 0,
+                "encode_failures": 0,
+            }
         else:
             result = runner.run_application_repeat(3)
             assert result["completed"] == 3

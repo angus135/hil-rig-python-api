@@ -8,7 +8,10 @@ from hilrig.protocol_test.application_hardware import (
     ALL_DISABLED_CONFIGURATION_DIGEST,
     ALL_DISABLED_CONFIGURATION_SIZE,
     APPLICATION_CODEC_CONFIG,
+    BINARY_ERROR_DIAGNOSTIC,
+    ERROR_FIXED_SIZE,
     FIXED_INSTRUCTION_SIZE,
+    FIXED_RESPONSE_SIZE,
     FIXED_RESULT_SIZE,
     INSTRUCTION_DIGESTS,
     MAX_EXTENSION_CONFIGURATION_DIGEST,
@@ -16,13 +19,17 @@ from hilrig.protocol_test.application_hardware import (
     REPRESENTATIVE_CONFIGURATION_DIGEST,
     REPRESENTATIVE_CONFIGURATION_SIZE,
     all_disabled_configuration,
+    application_error_fixtures,
     configuration_semantic_digest,
+    execution_controls,
     expected_result,
     instruction_semantic_digest,
     make_application_codec,
     maximum_extension_configuration,
     representative_configuration,
     representative_instructions,
+    reset_application_control,
+    response_fixtures,
     zero_instruction,
 )
 
@@ -39,6 +46,49 @@ def test_application_codec_configuration_matches_hardware_profile() -> None:
         )
         == APPLICATION_CODEC_CONFIG
     )
+
+
+def test_v02_control_response_and_error_fixtures_round_trip_with_exact_wire_sizes() -> None:
+    codec = make_application_codec()
+    start, abort = execution_controls(TEST_ID)
+    reset = reset_application_control()
+    assert (start.command, abort.command) == (
+        protocol.ControlCommand.START,
+        protocol.ControlCommand.ABORT,
+    )
+    assert start.test_id == abort.test_id == TEST_ID
+    assert reset.command is protocol.GlobalControlCommand.RESET_APPLICATION
+
+    responses = response_fixtures(TEST_ID)
+    assert tuple(item.scope for item in responses) == (
+        protocol.ResponseScope.TEST_CONFIGURATION,
+        protocol.ResponseScope.TICK,
+        protocol.ResponseScope.COMPLETE_TEST,
+        protocol.ResponseScope.EXECUTION_CONTROL,
+        protocol.ResponseScope.GLOBAL_CONTROL,
+    )
+    assert responses[-1].test_id is None
+    for response in responses:
+        encoded = codec.encode(response)
+        assert len(encoded) == FIXED_RESPONSE_SIZE
+        assert codec.decode(encoded) == response
+
+    global_error, test_wide_error, tick_error = application_error_fixtures(TEST_ID)
+    assert global_error.test_id is None and global_error.tick_number is None
+    assert test_wide_error.test_id == TEST_ID and test_wide_error.tick_number is None
+    assert tick_error.test_id == TEST_ID and tick_error.tick_number is not None
+    assert global_error.diagnostic_data == b""
+    assert test_wide_error.diagnostic_data == BINARY_ERROR_DIAGNOSTIC
+    assert len(tick_error.diagnostic_data) == 255
+    for error in (global_error, test_wide_error, tick_error):
+        encoded = codec.encode(error)
+        decoded = codec.decode(encoded)
+        assert len(encoded) == ERROR_FIXED_SIZE + len(error.diagnostic_data)
+        assert decoded == error
+    maximum_decoded = codec.decode(codec.encode(tick_error))
+    assert type(maximum_decoded) is protocol.ApplicationErrorMessage
+    assert maximum_decoded.diagnostic_data == tick_error.diagnostic_data
+    assert maximum_decoded.diagnostic_data is not tick_error.diagnostic_data
 
 
 def test_representative_configuration_populates_every_family() -> None:
