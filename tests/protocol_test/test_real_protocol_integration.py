@@ -26,6 +26,9 @@ from hilrig.protocol_test.application_hardware import (  # noqa: E402
     global_control_response,
     instruction_semantic_digest,
     make_application_codec,
+    representative_configuration,
+    representative_instructions,
+    response_fixtures,
 )
 from hilrig.protocol_test.connection import ProtocolTestConnection  # noqa: E402
 from hilrig.protocol_test.harness_codec import (  # noqa: E402
@@ -39,6 +42,17 @@ from hilrig.protocol_test.runner import ProtocolTestRunner, ScenarioFailure  # n
 from hilrig.protocol_test.trace import TraceWriter  # noqa: E402
 
 pytestmark = pytest.mark.protocol_integration
+
+
+_APPLICATION_MESSAGE_TYPES = {
+    protocol.SystemInfoRequest: 1,
+    protocol.TestConfiguration: 16,
+    protocol.TestInstruction: 17,
+    protocol.ExecutionControl: 19,
+    protocol.GlobalControl: 20,
+    protocol.ApplicationResponse: 48,
+    protocol.ApplicationErrorMessage: 49,
+}
 
 
 def now_ms() -> int:
@@ -159,6 +173,14 @@ class ApplicationRigBehavior:
         self.last_message_type = 0
         self.configuration_digest = 0
         self.last_instruction_digest = 0
+        self.protocol_version_confirmed = False
+        self.active_configuration = None
+        self.state = ApplicationHarnessState.WAITING_FOR_CONFIGURATION
+        self.next_tick = 0
+        self.active_expected_tick_count = 0
+
+    def reset_session(self) -> None:
+        self.protocol_version_confirmed = False
         self.active_configuration = None
         self.state = ApplicationHarnessState.WAITING_FOR_CONFIGURATION
         self.next_tick = 0
@@ -229,8 +251,27 @@ class ApplicationRigBehavior:
                 else protocol.ApplicationStatus.MALFORMED_MESSAGE
             )
             return None
+        self.last_message_type = _APPLICATION_MESSAGE_TYPES.get(type(message), 0)
+        if type(message) is protocol.SystemInfoRequest:
+            self.protocol_version_confirmed = message.protocol_version == protocol.PROTOCOL_VERSION
+            self.last_application_status = int(protocol.ApplicationStatus.OK)
+            try:
+                return self.codec.encode(
+                    protocol.SystemInfoResponse(
+                        protocol.PROTOCOL_VERSION,
+                        protocol.ProtocolVersion(63, 0, 0),
+                        b"firmware-pr-63",
+                        b"63",
+                    )
+                )
+            except protocol.ApplicationEncodeError:
+                self.encode_failures += 1
+                return None
+        if not self.protocol_version_confirmed:
+            self.semantic_rejections += 1
+            self.last_application_status = int(protocol.ApplicationStatus.VERSION_MISMATCH)
+            return None
         if type(message) is protocol.TestConfiguration:
-            self.last_message_type = 16
             if self.state not in {
                 ApplicationHarnessState.WAITING_FOR_CONFIGURATION,
                 ApplicationHarnessState.COMPLETE,
@@ -246,40 +287,19 @@ class ApplicationRigBehavior:
             self.active_expected_tick_count = message.expected_tick_count
             self.last_application_status = int(protocol.ApplicationStatus.OK)
             return None
-        if type(message) is protocol.SystemInfoRequest:
-            self.last_message_type = 1
-            if message.protocol_version != protocol.PROTOCOL_VERSION:
-                self.semantic_rejections += 1
-                self.last_application_status = int(protocol.ApplicationStatus.VERSION_MISMATCH)
-                return None
-            try:
-                return self.codec.encode(
-                    protocol.SystemInfoResponse(
-                        protocol.PROTOCOL_VERSION,
-                        protocol.ProtocolVersion(63, 0, 0),
-                        b"firmware-pr-63",
-                        b"63",
-                    )
-                )
-            except protocol.ApplicationEncodeError:
-                self.encode_failures += 1
-                return None
         if type(message) is protocol.ExecutionControl:
-            self.last_message_type = 18
             try:
                 return self.codec.encode(execution_control_response(message))
             except protocol.ApplicationEncodeError:
                 self.encode_failures += 1
                 return None
         if type(message) is protocol.GlobalControl:
-            self.last_message_type = 19
             try:
                 return self.codec.encode(global_control_response(message))
             except protocol.ApplicationEncodeError:
                 self.encode_failures += 1
                 return None
         if type(message) is protocol.TestInstruction:
-            self.last_message_type = 17
             if self.state is not ApplicationHarnessState.ACCEPTING_INSTRUCTIONS:
                 self.semantic_rejections += 1
                 self.last_application_status = int(protocol.ApplicationStatus.VALIDATION_FAILED)
@@ -308,7 +328,6 @@ class ApplicationRigBehavior:
             self.last_application_status = int(protocol.ApplicationStatus.OK)
             return encoded
         if type(message) in {protocol.ApplicationResponse, protocol.ApplicationErrorMessage}:
-            self.last_message_type = 20 if type(message) is protocol.ApplicationResponse else 21
             try:
                 return self.codec.encode(message)
             except protocol.ApplicationEncodeError:
@@ -330,6 +349,10 @@ class ApplicationInMemoryRigSerial(InMemoryRigSerial):
         super().__init__()
         self.behavior = ApplicationRigBehavior()
         self.response_factory = self.behavior.handle
+
+    def close(self) -> None:
+        self.behavior.reset_session()
+        super().close()
 
 
 class InMemoryProvider:
@@ -433,6 +456,80 @@ def test_real_protocol_disconnect_and_reconnect_uses_new_generation() -> None:
         assert exchange(connection, b"after-reconnect") == b"rig-response:after-reconnect"
     finally:
         connection.close()
+
+
+def test_real_transport_fake_version_gate_and_message_type_diagnostics() -> None:
+    behavior = ApplicationRigBehavior()
+    test_id = protocol.TestId(bytes(range(16)))
+    configuration = representative_configuration(test_id)
+
+    assert behavior._application(behavior.codec.encode(configuration)) is None
+    assert behavior.protocol_version_confirmed is False
+    assert behavior.last_message_type == 16
+    assert behavior.last_application_status == int(protocol.ApplicationStatus.VERSION_MISMATCH)
+
+    discovery_wire = behavior._application(behavior.codec.encode(protocol.SystemInfoRequest()))
+    assert discovery_wire is not None
+    discovery_response = behavior.codec.decode(discovery_wire)
+    assert type(discovery_response) is protocol.SystemInfoResponse
+    assert discovery_response.protocol_version == protocol.PROTOCOL_VERSION
+    assert behavior.protocol_version_confirmed is True
+    assert behavior.last_message_type == 1
+
+    assert behavior._application(behavior.codec.encode(configuration)) is None
+    assert behavior.last_message_type == 16
+    result_wire = behavior._application(
+        behavior.codec.encode(representative_instructions(test_id)[0])
+    )
+    assert result_wire is not None
+    assert behavior.last_message_type == 17
+
+    for command in (protocol.ControlCommand.START, protocol.ControlCommand.ABORT):
+        control_wire = behavior._application(
+            behavior.codec.encode(protocol.ExecutionControl(test_id, command))
+        )
+        assert control_wire is not None
+        control_response = behavior.codec.decode(control_wire)
+        assert type(control_response) is protocol.ApplicationResponse
+        assert control_response.outcome is protocol.ResponseOutcome.COMPLETED
+        assert behavior.last_message_type == 19
+
+    reset = protocol.GlobalControl(protocol.GlobalControlCommand.RESET_APPLICATION)
+    reset_wire = behavior._application(behavior.codec.encode(reset))
+    assert reset_wire is not None
+    reset_response = behavior.codec.decode(reset_wire)
+    assert type(reset_response) is protocol.ApplicationResponse
+    assert reset_response.outcome is protocol.ResponseOutcome.COMPLETED
+    assert behavior.last_message_type == 20
+
+    response_wire = behavior._application(behavior.codec.encode(response_fixtures(test_id)[0]))
+    assert response_wire is not None
+    assert behavior.last_message_type == 48
+    error_wire = behavior._application(
+        behavior.codec.encode(
+            protocol.ApplicationErrorMessage(None, protocol.ErrorCategory.PROTOCOL, True)
+        )
+    )
+    assert error_wire is not None
+    assert behavior.last_message_type == 49
+
+    behavior.reset_session()
+    assert behavior.protocol_version_confirmed is False
+    assert behavior._application(behavior.codec.encode(configuration)) is None
+    assert behavior.last_application_status == int(protocol.ApplicationStatus.VERSION_MISMATCH)
+
+    foreign_request = bytearray(behavior.codec.encode(protocol.SystemInfoRequest()))
+    foreign_request[1] = 3
+    foreign_request[27] = 3
+    foreign_wire = behavior._application(bytes(foreign_request))
+    assert foreign_wire is not None
+    foreign_response = behavior.codec.decode(foreign_wire)
+    assert type(foreign_response) is protocol.SystemInfoResponse
+    assert foreign_response.protocol_version == protocol.PROTOCOL_VERSION
+    assert behavior.protocol_version_confirmed is False
+    assert behavior._application(behavior.codec.encode(reset)) is None
+    assert behavior.last_message_type == 20
+    assert behavior.last_application_status == int(protocol.ApplicationStatus.VERSION_MISMATCH)
 
 
 @pytest.mark.parametrize(

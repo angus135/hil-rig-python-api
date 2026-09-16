@@ -249,7 +249,7 @@ def execution_control_response(
     return protocol.ApplicationResponse(
         control.test_id,
         protocol.ResponseScope.EXECUTION_CONTROL,
-        protocol.ResponseOutcome.ACCEPTED,
+        protocol.ResponseOutcome.COMPLETED,
         protocol.ResponseReason.NONE,
         control_command=control.command,
     )
@@ -260,7 +260,7 @@ def global_control_response(control: protocol.GlobalControl) -> protocol.Applica
     return protocol.ApplicationResponse(
         None,
         protocol.ResponseScope.GLOBAL_CONTROL,
-        protocol.ResponseOutcome.ACCEPTED,
+        protocol.ResponseOutcome.COMPLETED,
         protocol.ResponseReason.NONE,
         global_control_command=control.command,
     )

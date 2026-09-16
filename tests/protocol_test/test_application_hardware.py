@@ -21,8 +21,10 @@ from hilrig.protocol_test.application_hardware import (
     all_disabled_configuration,
     application_error_fixtures,
     configuration_semantic_digest,
+    execution_control_response,
     execution_controls,
     expected_result,
+    global_control_response,
     instruction_semantic_digest,
     make_application_codec,
     maximum_extension_configuration,
@@ -58,6 +60,9 @@ def test_v02_control_response_and_error_fixtures_round_trip_with_exact_wire_size
     )
     assert start.test_id == abort.test_id == TEST_ID
     assert reset.command is protocol.GlobalControlCommand.RESET_APPLICATION
+    assert execution_control_response(start).outcome is protocol.ResponseOutcome.COMPLETED
+    assert execution_control_response(abort).outcome is protocol.ResponseOutcome.COMPLETED
+    assert global_control_response(reset).outcome is protocol.ResponseOutcome.COMPLETED
 
     responses = response_fixtures(TEST_ID)
     assert tuple(item.scope for item in responses) == (

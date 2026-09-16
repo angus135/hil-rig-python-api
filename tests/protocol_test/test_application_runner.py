@@ -32,6 +32,7 @@ from hilrig.protocol_test.application_hardware import (
     instruction_semantic_digest,
     make_application_codec,
     representative_configuration,
+    representative_instructions,
     response_fixtures,
 )
 from hilrig.protocol_test.connection import LinkDisconnectedError, hardware_test_transport_config
@@ -49,6 +50,16 @@ from hilrig.protocol_test.models import (
 )
 from hilrig.protocol_test.runner import ProtocolTestRunner, ScenarioFailure
 from hilrig.protocol_test.trace import TraceWriter
+
+_APPLICATION_MESSAGE_TYPES = {
+    protocol.SystemInfoRequest: 1,
+    protocol.TestConfiguration: 16,
+    protocol.TestInstruction: 17,
+    protocol.ExecutionControl: 19,
+    protocol.GlobalControl: 20,
+    protocol.ApplicationResponse: 48,
+    protocol.ApplicationErrorMessage: 49,
+}
 
 
 class FakeTime:
@@ -84,6 +95,7 @@ class ApplicationFirmwareConnection:
         self.initialization_status = int(protocol.ApplicationStatus.OK)
         self.duplicate_results = False
         self.duplicate_application_responses = False
+        self.protocol_version_confirmed = False
         self.invalid_hrtp_messages = 0
         self.transport_event_count = 0
         self.usb_rx_bytes = 0
@@ -108,6 +120,7 @@ class ApplicationFirmwareConnection:
         self.service_calls = 0
 
     def _reset_transaction(self) -> None:
+        self.protocol_version_confirmed = False
         self.active_configuration = None
         self.state = ApplicationHarnessState.WAITING_FOR_CONFIGURATION
         self.next_tick = 0
@@ -117,8 +130,7 @@ class ApplicationFirmwareConnection:
         self._generation += 1
         self.link_generation = self._generation
         self.link_open = True
-        if self._generation > 1:
-            self._reset_transaction()
+        self._reset_transaction()
         return self._generation
 
     def close_link(self) -> None:
@@ -130,6 +142,7 @@ class ApplicationFirmwareConnection:
     def close(self) -> None:
         self.closed = True
         self.link_open = False
+        self._reset_transaction()
 
     def get_status(self) -> TransportSnapshot:
         return TransportSnapshot(
@@ -241,12 +254,10 @@ class ApplicationFirmwareConnection:
                 else protocol.ApplicationStatus.MALFORMED_MESSAGE
             )
             return
+        self.last_message_type = _APPLICATION_MESSAGE_TYPES.get(type(message), 0)
         if type(message) is protocol.SystemInfoRequest:
-            self.last_message_type = 1
-            if message.protocol_version != protocol.PROTOCOL_VERSION:
-                self.semantic_rejections += 1
-                self.last_application_status = int(protocol.ApplicationStatus.VERSION_MISMATCH)
-                return
+            self.protocol_version_confirmed = message.protocol_version == protocol.PROTOCOL_VERSION
+            self.last_application_status = int(protocol.ApplicationStatus.OK)
             response = protocol.SystemInfoResponse(
                 protocol.PROTOCOL_VERSION,
                 protocol.ProtocolVersion(63, 0, 0),
@@ -258,22 +269,23 @@ class ApplicationFirmwareConnection:
             except protocol.ApplicationEncodeError:
                 self.encode_failures += 1
             return
+        if not self.protocol_version_confirmed:
+            self.semantic_rejections += 1
+            self.last_application_status = int(protocol.ApplicationStatus.VERSION_MISMATCH)
+            return
         if type(message) is protocol.ExecutionControl:
-            self.last_message_type = 18
             try:
                 self._queue_message(self.codec.encode(execution_control_response(message)))
             except protocol.ApplicationEncodeError:
                 self.encode_failures += 1
             return
         if type(message) is protocol.GlobalControl:
-            self.last_message_type = 19
             try:
                 self._queue_message(self.codec.encode(global_control_response(message)))
             except protocol.ApplicationEncodeError:
                 self.encode_failures += 1
             return
         if type(message) is protocol.TestConfiguration:
-            self.last_message_type = 16
             if self.state not in {
                 ApplicationHarnessState.WAITING_FOR_CONFIGURATION,
                 ApplicationHarnessState.COMPLETE,
@@ -290,7 +302,6 @@ class ApplicationFirmwareConnection:
             self.last_application_status = int(protocol.ApplicationStatus.OK)
             return
         if type(message) is protocol.TestInstruction:
-            self.last_message_type = 17
             if self.state is not ApplicationHarnessState.ACCEPTING_INSTRUCTIONS:
                 self.semantic_rejections += 1
                 self.last_application_status = int(protocol.ApplicationStatus.VALIDATION_FAILED)
@@ -322,7 +333,6 @@ class ApplicationFirmwareConnection:
             self.last_application_status = int(protocol.ApplicationStatus.OK)
             return
         if type(message) in {protocol.ApplicationResponse, protocol.ApplicationErrorMessage}:
-            self.last_message_type = 20 if type(message) is protocol.ApplicationResponse else 21
             try:
                 encoded = self.codec.encode(message)
             except protocol.ApplicationEncodeError:
@@ -375,6 +385,88 @@ def close(
 ) -> None:
     runner.close()
     trace.finish(passed=True, failure_reason=None, diagnostics=connection.get_diagnostics())
+
+
+def _foreign_system_info_request(codec: protocol.ApplicationCodec) -> bytes:
+    wire = bytearray(codec.encode(protocol.SystemInfoRequest()))
+    wire[1] = 3
+    wire[27] = 3  # Public v0.2.0 SystemInfoRequest application_protocol_minor byte.
+    return bytes(wire)
+
+
+def test_fake_version_confirmation_gate_and_message_type_diagnostics(tmp_path: Path) -> None:
+    runner, connection, trace = make_runner(tmp_path)
+    test_id = protocol.TestId(bytes(range(16)))
+    configuration = representative_configuration(test_id)
+
+    connection._handle_application(connection.codec.encode(configuration))
+    assert connection.protocol_version_confirmed is False
+    assert connection.last_message_type == 16
+    assert connection.last_application_status == int(protocol.ApplicationStatus.VERSION_MISMATCH)
+    assert connection.configurations_accepted == 0
+
+    connection._handle_application(connection.codec.encode(protocol.SystemInfoRequest()))
+    discovered = connection.pop_application_message()
+    assert discovered is not None
+    response = connection.codec.decode(discovered.data)
+    assert type(response) is protocol.SystemInfoResponse
+    assert response.protocol_version == protocol.PROTOCOL_VERSION
+    assert connection.protocol_version_confirmed is True
+    assert connection.last_message_type == 1
+
+    connection._handle_application(connection.codec.encode(configuration))
+    assert connection.configurations_accepted == 1
+    assert connection.last_message_type == 16
+    instruction = representative_instructions(test_id)[0]
+    connection._handle_application(connection.codec.encode(instruction))
+    assert connection.last_message_type == 17
+    assert connection.pop_application_message() is not None
+
+    for command in (protocol.ControlCommand.START, protocol.ControlCommand.ABORT):
+        control = protocol.ExecutionControl(test_id, command)
+        connection._handle_application(connection.codec.encode(control))
+        received = connection.pop_application_message()
+        assert received is not None
+        control_response = connection.codec.decode(received.data)
+        assert type(control_response) is protocol.ApplicationResponse
+        assert control_response.outcome is protocol.ResponseOutcome.COMPLETED
+        assert connection.last_message_type == 19
+
+    reset = protocol.GlobalControl(protocol.GlobalControlCommand.RESET_APPLICATION)
+    connection._handle_application(connection.codec.encode(reset))
+    received = connection.pop_application_message()
+    assert received is not None
+    reset_response = connection.codec.decode(received.data)
+    assert type(reset_response) is protocol.ApplicationResponse
+    assert reset_response.outcome is protocol.ResponseOutcome.COMPLETED
+    assert connection.last_message_type == 20
+
+    response = response_fixtures(test_id)[0]
+    connection._handle_application(connection.codec.encode(response))
+    assert connection.last_message_type == 48
+    assert connection.pop_application_message() is not None
+    error = protocol.ApplicationErrorMessage(None, protocol.ErrorCategory.PROTOCOL, True)
+    connection._handle_application(connection.codec.encode(error))
+    assert connection.last_message_type == 49
+    assert connection.pop_application_message() is not None
+
+    connection.close_link()
+    connection.open_link()
+    connection._handle_application(connection.codec.encode(configuration))
+    assert connection.protocol_version_confirmed is False
+    assert connection.last_application_status == int(protocol.ApplicationStatus.VERSION_MISMATCH)
+
+    connection._handle_application(_foreign_system_info_request(connection.codec))
+    received = connection.pop_application_message()
+    assert received is not None
+    foreign_discovery_response = connection.codec.decode(received.data)
+    assert type(foreign_discovery_response) is protocol.SystemInfoResponse
+    assert foreign_discovery_response.protocol_version == protocol.PROTOCOL_VERSION
+    assert connection.protocol_version_confirmed is False
+    connection._handle_application(connection.codec.encode(reset))
+    assert connection.last_message_type == 20
+    assert connection.last_application_status == int(protocol.ApplicationStatus.VERSION_MISMATCH)
+    close(runner, trace, connection)
 
 
 def test_application_smoke_checks_configuration_three_results_and_complete_state(
