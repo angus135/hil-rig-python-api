@@ -751,6 +751,7 @@ python -m ruff format .
 |-- .github/workflows/ci.yml       Pull request and main-branch checks
 |-- docs/architecture.md           Model boundaries and extension guide
 |-- examples/basic_digital_test.py Small runnable example
+|-- reference.md                   Teammate-oriented repository and change guide
 |-- src/hilrig/                    Installable Python package
 |   |-- api.py                     Public Test and channel-handle API
 |   |-- runner.py                  Automatic run controller and protocol worker
@@ -767,7 +768,8 @@ python -m ruff format .
 `-- pyproject.toml                 Package, dependency, and tool configuration
 ```
 
-See [docs/architecture.md](docs/architecture.md) for the current model boundaries.
+See [reference.md](reference.md) for a practical repository map and change guide, and
+[docs/architecture.md](docs/architecture.md) for the detailed model boundaries.
 
 ## Continuous integration
 
