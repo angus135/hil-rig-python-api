@@ -7,6 +7,7 @@ import runpy
 import secrets
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -20,8 +21,11 @@ from hilrig.evaluation import evaluate_assertions
 from hilrig.models.execution import CompiledTestIR
 from hilrig.protocol import (
     FixedIOProtocolConnection,
+    ManualSendResult,
     ProtocolWorkflowState,
+    SerialConnectionSettings,
     UploadAdvanceMode,
+    load_manual_message,
 )
 from hilrig.results import CapturedRunBuilder, CapturedRunIR, CaptureStatus
 
@@ -47,6 +51,17 @@ class WorkerState(str, Enum):
     ABORTED = "aborted"
     FAILED = "failed"
     STOPPED = "stopped"
+
+
+class ManualSessionState(str, Enum):
+    """Lifecycle exposed for the standalone manual protocol session."""
+
+    DISCONNECTED = "disconnected"
+    CONNECTING = "connecting"
+    READY = "ready"
+    SENDING = "sending"
+    DISCONNECTING = "disconnecting"
+    FAILED = "failed"
 
 
 _BUSY_STATES = frozenset(
@@ -88,9 +103,50 @@ class RunSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class ManualSessionSnapshot:
+    """Thread-safe status for the persistent manual protocol session."""
+
+    state: ManualSessionState = ManualSessionState.DISCONNECTED
+    detail: str = "Manual session is disconnected."
+    device: str | None = None
+    skip_system_info: bool = False
+    protocol_version: str | None = None
+    firmware_version: str | None = None
+    pending_message: str | None = None
+    last_result: ManualSendResult | None = None
+    inbox_count: int = 0
+    error: str | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.state in {
+            ManualSessionState.CONNECTING,
+            ManualSessionState.READY,
+            ManualSessionState.SENDING,
+            ManualSessionState.DISCONNECTING,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class _RunCommand:
     path: Path
     stepped: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ManualConnectCommand:
+    serial_settings: SerialConnectionSettings
+    skip_system_info: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ManualSendCommand:
+    path: Path
+    transport_only: bool
+
+
+class _ManualDisconnectCommand:
+    pass
 
 
 class _AdvanceCommand(str, Enum):
@@ -106,8 +162,10 @@ class _RunAborted(Exception):
     pass
 
 
-_Command = _RunCommand | _StopWorker
+_Command = _RunCommand | _ManualConnectCommand | _StopWorker
+_ManualCommand = _ManualSendCommand | _ManualDisconnectCommand
 _ConnectionFactory = Callable[[], Any]
+_ManualConnectionFactory = Callable[..., Any]
 _NotificationCallback = Callable[[str], None]
 
 
@@ -125,6 +183,7 @@ class ProtocolWorker:
         self,
         *,
         connection_factory: _ConnectionFactory | None = None,
+        manual_connection_factory: _ManualConnectionFactory | None = None,
         notification_callback: _NotificationCallback | None = None,
         poll_interval_s: float = 0.001,
         abort_timeout_s: float = 3.0,
@@ -134,13 +193,19 @@ class ProtocolWorker:
         if abort_timeout_s <= 0:
             raise ValueError("abort_timeout_s must be positive")
         self._connection_factory = connection_factory or FixedIOProtocolConnection.connect
+        self._manual_connection_factory = (
+            manual_connection_factory or FixedIOProtocolConnection.connect_manual
+        )
         self._notification_callback = notification_callback
         self._poll_interval_s = float(poll_interval_s)
         self._abort_timeout_s = float(abort_timeout_s)
         self._commands: queue.Queue[_Command] = queue.Queue()
+        self._manual_commands: queue.Queue[_ManualCommand] = queue.Queue()
         self._advance_commands: queue.Queue[_AdvanceCommand] = queue.Queue()
         self._snapshot_lock = threading.Lock()
         self._snapshot = RunSnapshot()
+        self._manual_snapshot = ManualSessionSnapshot()
+        self._manual_inbox: deque[str] = deque(maxlen=100)
         self._abort_requested = threading.Event()
         self._idle = threading.Event()
         self._idle.set()
@@ -170,7 +235,7 @@ class ProtocolWorker:
         self.start()
         candidate = Path(path).expanduser()
         with self._snapshot_lock:
-            if self._stopping or self._snapshot.busy:
+            if self._stopping or self._snapshot.busy or self._manual_snapshot.active:
                 return False
             self._abort_requested.clear()
             self._discard_advance_commands()
@@ -184,6 +249,78 @@ class ProtocolWorker:
             )
             self._commands.put(_RunCommand(candidate, stepped))
         return True
+
+    def manual_connect(
+        self,
+        *,
+        device: str | None = None,
+        skip_system_info: bool = False,
+    ) -> bool:
+        """Start a persistent standalone manual protocol session."""
+        if device is not None and (not isinstance(device, str) or not device.strip()):
+            raise ValueError("device must be a non-empty string or None")
+        if not isinstance(skip_system_info, bool):
+            raise TypeError("skip_system_info must be a bool")
+        self.start()
+        settings = SerialConnectionSettings(device=device.strip() if device else None)
+        with self._snapshot_lock:
+            if self._stopping or self._snapshot.busy or self._manual_snapshot.active:
+                return False
+            self._discard_manual_commands()
+            self._manual_inbox.clear()
+            self._idle.clear()
+            self._manual_snapshot = ManualSessionSnapshot(
+                state=ManualSessionState.CONNECTING,
+                detail="Opening the manual protocol session.",
+                device=settings.device,
+                skip_system_info=skip_system_info,
+            )
+            self._commands.put(_ManualConnectCommand(settings, skip_system_info))
+        return True
+
+    def manual_send(self, path: str | Path, *, transport_only: bool = False) -> bool:
+        """Queue one standalone JSON Application message in the manual session."""
+        if not isinstance(transport_only, bool):
+            raise TypeError("transport_only must be a bool")
+        candidate = Path(path).expanduser()
+        with self._snapshot_lock:
+            if self._manual_snapshot.state is not ManualSessionState.READY:
+                return False
+            self._manual_snapshot = _updated_manual_snapshot(
+                self._manual_snapshot,
+                state=ManualSessionState.SENDING,
+                detail="Loading and sending the manual Application message.",
+                pending_message=str(candidate),
+                last_result=None,
+                error=None,
+            )
+            self._manual_commands.put(_ManualSendCommand(candidate, transport_only))
+        return True
+
+    def manual_disconnect(self) -> bool:
+        """Request closure of the active manual protocol session."""
+        with self._snapshot_lock:
+            if not self._manual_snapshot.active:
+                return False
+            if self._manual_snapshot.state is ManualSessionState.DISCONNECTING:
+                return False
+            self._manual_snapshot = _updated_manual_snapshot(
+                self._manual_snapshot,
+                state=ManualSessionState.DISCONNECTING,
+                detail="Disconnect requested.",
+            )
+            self._manual_commands.put(_ManualDisconnectCommand())
+        return True
+
+    def manual_snapshot(self) -> ManualSessionSnapshot:
+        """Return the latest immutable manual-session status."""
+        with self._snapshot_lock:
+            return self._manual_snapshot
+
+    def manual_inbox(self) -> tuple[str, ...]:
+        """Return the retained inbound Application-message summaries."""
+        with self._snapshot_lock:
+            return tuple(self._manual_inbox)
 
     def step(self) -> bool:
         """Release one operation when a stepped run is paused at its gate."""
@@ -241,6 +378,8 @@ class ProtocolWorker:
                 self._stopping = True
                 if self._snapshot.busy:
                     self._abort_requested.set()
+                if self._manual_snapshot.active:
+                    self._manual_commands.put(_ManualDisconnectCommand())
                 self._commands.put(_StopWorker())
                 thread = self._thread
         if self._started:
@@ -254,10 +393,159 @@ class ProtocolWorker:
             if isinstance(command, _StopWorker):
                 break
             try:
-                self._execute_run(command.path, stepped=command.stepped)
+                if isinstance(command, _ManualConnectCommand):
+                    self._execute_manual_session(command)
+                else:
+                    self._execute_run(command.path, stepped=command.stepped)
             finally:
                 self._idle.set()
         self._set_snapshot(state=WorkerState.STOPPED, detail="Protocol worker stopped.")
+
+    def _execute_manual_session(self, command: _ManualConnectCommand) -> None:
+        connection: Any | None = None
+        requested_disconnect = False
+        reported_sequence = 0
+        try:
+            connection = self._manual_connection_factory(
+                serial_settings=command.serial_settings,
+                skip_system_info=command.skip_system_info,
+            )
+            actual_device = getattr(connection.serial_port, "port", None)
+            if not isinstance(actual_device, str) or not actual_device:
+                actual_device = command.serial_settings.device or "automatic"
+            self._set_manual_snapshot(
+                detail="Establishing the Transport session.",
+                device=actual_device,
+            )
+
+            while not connection.session_confirmed:
+                request = self._take_manual_command()
+                if isinstance(request, _ManualDisconnectCommand):
+                    requested_disconnect = True
+                    break
+                report = connection.service()
+                self._record_manual_messages(report.application_messages)
+                self._manual_pause()
+
+            if not requested_disconnect:
+                info = connection.session_info
+                detail = (
+                    "Manual Transport session ready; System Information was skipped."
+                    if command.skip_system_info
+                    else "Manual protocol session ready."
+                )
+                self._set_manual_snapshot(
+                    state=ManualSessionState.READY,
+                    detail=detail,
+                    protocol_version=(info.protocol_version if info is not None else None),
+                    firmware_version=(info.firmware_version if info is not None else None),
+                    error=None,
+                )
+                self._notify(f"Manual session connected on {actual_device}.")
+
+            while not requested_disconnect:
+                request = self._take_manual_command()
+                if isinstance(request, _ManualDisconnectCommand):
+                    requested_disconnect = True
+                    break
+                if isinstance(request, _ManualSendCommand):
+                    self._begin_manual_send(connection, request)
+
+                report = connection.service()
+                self._record_manual_messages(report.application_messages)
+                result = connection.last_manual_send_result
+                if result is not None and result.sequence > reported_sequence:
+                    reported_sequence = result.sequence
+                    self._set_manual_snapshot(
+                        state=ManualSessionState.READY,
+                        detail=result.detail,
+                        pending_message=None,
+                        last_result=result,
+                        error=None if result.success else result.detail,
+                    )
+                    outcome = "successful" if result.success else "unsuccessful"
+                    self._notify(
+                        f"Manual send {outcome}: {result.label}. {result.detail}"
+                    )
+                self._manual_pause()
+        except BaseException as error:
+            self._set_manual_snapshot(
+                state=ManualSessionState.FAILED,
+                detail="Manual protocol session failed.",
+                pending_message=None,
+                error=f"{type(error).__name__}: {error}",
+            )
+            self._notify(f"Manual session failed: {type(error).__name__}: {error}")
+        finally:
+            if connection is not None:
+                with suppress(BaseException):
+                    connection.close()
+            if requested_disconnect:
+                self._set_manual_snapshot(
+                    state=ManualSessionState.DISCONNECTED,
+                    detail="Manual session disconnected.",
+                    pending_message=None,
+                    error=None,
+                )
+                self._notify("Manual session disconnected.")
+            self._discard_manual_commands()
+
+    def _begin_manual_send(self, connection: Any, command: _ManualSendCommand) -> None:
+        try:
+            message = load_manual_message(command.path, connection.application)
+            connection.queue_manual_message(
+                message,
+                transport_only=command.transport_only,
+            )
+        except BaseException as error:
+            self._set_manual_snapshot(
+                state=ManualSessionState.READY,
+                detail="Manual message was not sent.",
+                pending_message=None,
+                error=f"{type(error).__name__}: {error}",
+            )
+            self._notify(f"Manual message was not sent: {type(error).__name__}: {error}")
+            return
+        mode = "Transport delivery only" if command.transport_only else "Application response"
+        self._set_manual_snapshot(
+            state=ManualSessionState.SENDING,
+            detail=f"Sending {message.label}; waiting for {mode.lower()}.",
+            pending_message=message.label,
+            error=None,
+        )
+        self._notify(f"Sending {message.label} ({mode}).")
+
+    def _record_manual_messages(self, messages: tuple[object, ...]) -> None:
+        if not messages:
+            return
+        rendered = tuple(_format_application_message(message) for message in messages)
+        with self._snapshot_lock:
+            self._manual_inbox.extend(rendered)
+            self._manual_snapshot = _updated_manual_snapshot(
+                self._manual_snapshot,
+                inbox_count=len(self._manual_inbox),
+            )
+
+    def _take_manual_command(self) -> _ManualCommand | None:
+        try:
+            return self._manual_commands.get_nowait()
+        except queue.Empty:
+            return None
+
+    def _discard_manual_commands(self) -> None:
+        while self._take_manual_command() is not None:
+            pass
+
+    def _manual_pause(self) -> None:
+        if self._poll_interval_s:
+            time.sleep(self._poll_interval_s)
+
+    def _set_manual_snapshot(self, **changes: object) -> None:
+        with self._snapshot_lock:
+            self._manual_snapshot = _updated_manual_snapshot(
+                self._manual_snapshot,
+                **changes,
+            )
 
     def _execute_run(self, requested_path: Path, *, stepped: bool) -> None:
         connection: Any | None = None
@@ -604,6 +892,66 @@ def _updated_snapshot(snapshot: RunSnapshot, **changes: object) -> RunSnapshot:
     return RunSnapshot(**values)  # type: ignore[arg-type]
 
 
+def _updated_manual_snapshot(
+    snapshot: ManualSessionSnapshot,
+    **changes: object,
+) -> ManualSessionSnapshot:
+    values = {
+        "state": snapshot.state,
+        "detail": snapshot.detail,
+        "device": snapshot.device,
+        "skip_system_info": snapshot.skip_system_info,
+        "protocol_version": snapshot.protocol_version,
+        "firmware_version": snapshot.firmware_version,
+        "pending_message": snapshot.pending_message,
+        "last_result": snapshot.last_result,
+        "inbox_count": snapshot.inbox_count,
+        "error": snapshot.error,
+    }
+    values.update(changes)
+    return ManualSessionSnapshot(**values)  # type: ignore[arg-type]
+
+
+def _format_application_message(message: object) -> str:
+    name = type(message).__name__
+    fields: list[str] = []
+    test_id = getattr(message, "test_id", None)
+    test_id_bytes = getattr(test_id, "bytes", None)
+    if isinstance(test_id_bytes, bytes):
+        fields.append(f"test_id={test_id_bytes.hex()}")
+    for attribute, label in (
+        ("scope", "scope"),
+        ("outcome", "outcome"),
+        ("reason", "reason"),
+        ("category", "category"),
+        ("control_command", "command"),
+        ("global_control_command", "global_command"),
+    ):
+        value = getattr(message, attribute, None)
+        value_name = getattr(value, "name", None)
+        if isinstance(value_name, str) and value_name != "INVALID" and value_name != "NONE":
+            fields.append(f"{label}={value_name}")
+    tick = getattr(message, "tick_number", None)
+    if isinstance(tick, int) and not isinstance(tick, bool):
+        fields.append(f"tick={tick}")
+    detail = getattr(message, "detail", None)
+    if isinstance(detail, int) and detail:
+        fields.append(f"detail={detail}")
+    protocol_version = getattr(message, "protocol_version", None)
+    if protocol_version is not None:
+        fields.append(f"protocol={_version_value(protocol_version)}")
+    firmware_version = getattr(message, "firmware_version", None)
+    if firmware_version is not None:
+        fields.append(f"firmware={_version_value(firmware_version)}")
+    return f"{name}({', '.join(fields)})" if fields else name
+
+
+def _version_value(version: object) -> str:
+    return ".".join(
+        str(getattr(version, component, "?")) for component in ("major", "minor", "patch")
+    )
+
+
 def _slug(value: str) -> str:
     slug = "".join(character.lower() if character.isalnum() else "-" for character in value)
     collapsed = "-".join(part for part in slug.split("-") if part)
@@ -622,6 +970,8 @@ __all__ = [
     "ProtocolWorker",
     "RunSnapshot",
     "DefinitionFileError",
+    "ManualSessionSnapshot",
+    "ManualSessionState",
     "WorkerState",
     "create_run_directory",
     "load_test_definition",

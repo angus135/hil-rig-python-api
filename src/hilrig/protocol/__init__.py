@@ -12,11 +12,17 @@ from hilrig.protocol.application import (
 )
 from hilrig.protocol.connection import (
     FixedIOProtocolConnection,
+    ManualSendResult,
     ProtocolServiceReport,
     ProtocolWorkflowState,
     RigSystemInfo,
     UploadAdvanceMode,
     monotonic_now_ms,
+)
+from hilrig.protocol.manual import (
+    ManualApplicationMessage,
+    ManualMessageDefinitionError,
+    load_manual_message,
 )
 from hilrig.protocol.serial import (
     SerialConnectionSettings,
@@ -28,6 +34,9 @@ __all__ = [
     "FixedIOProtocolAdapter",
     "FixedIOProtocolConnection",
     "FixedIOUploadMessages",
+    "ManualApplicationMessage",
+    "ManualMessageDefinitionError",
+    "ManualSendResult",
     "ProtocolServiceReport",
     "ProtocolWorkflowState",
     "RigSystemInfo",
@@ -42,4 +51,5 @@ __all__ = [
     "discover_serial_port",
     "monotonic_now_ms",
     "open_serial_port",
+    "load_manual_message",
 ]

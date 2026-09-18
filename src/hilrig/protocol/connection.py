@@ -21,6 +21,7 @@ from hilrig.protocol.application import (
     UploadOperationKind,
     UploadPlan,
 )
+from hilrig.protocol.manual import ManualApplicationMessage
 from hilrig.protocol.serial import SerialConnectionSettings, open_serial_port
 from hilrig.results.adapter import IncomingResultAdapter
 from hilrig.results.builder import CapturedRunBuilder
@@ -43,6 +44,8 @@ class ProtocolWorkflowState(str, Enum):
     CONNECTING = "connecting"
     DISCOVERING = "discovering"
     READY = "ready"
+    MANUAL_READY = "manual_ready"
+    MANUAL_SENDING = "manual_sending"
     WAITING_FOR_OPERATOR = "waiting_for_operator"
     CONFIGURING = "configuring"
     UPLOADING = "uploading"
@@ -88,6 +91,19 @@ class ProtocolServiceReport:
     workflow_state: ProtocolWorkflowState
 
 
+@dataclass(frozen=True, slots=True)
+class ManualSendResult:
+    """Terminal result of one standalone manual Application-message send."""
+
+    sequence: int
+    label: str
+    transport_delivered: bool
+    application_response_required: bool
+    application_response: object | None
+    success: bool
+    detail: str
+
+
 @dataclass(slots=True)
 class _ApplicationOperation:
     """One response-gated operation, containing one or more Transport messages."""
@@ -102,6 +118,9 @@ class _ApplicationOperation:
     response_error: str | None = None
     response_outcome: object | None = None
     previous_workflow_state: ProtocolWorkflowState | None = None
+    manual_sequence: int | None = None
+    manual_label: str | None = None
+    application_response_required: bool = True
 
     @property
     def every_message_submitted(self) -> bool:
@@ -124,6 +143,8 @@ class FixedIOProtocolConnection:
         transport: Any,
         result_adapter: IncomingResultAdapter | None = None,
         application_response_timeout_s: float = _DEFAULT_APPLICATION_RESPONSE_TIMEOUT_S,
+        manual_mode: bool = False,
+        skip_system_info: bool = False,
     ) -> None:
         if (
             not isinstance(application_response_timeout_s, (int, float))
@@ -138,6 +159,14 @@ class FixedIOProtocolConnection:
         self.result_adapter = result_adapter
         self.protocol = application.protocol
         self.application_response_timeout_s = float(application_response_timeout_s)
+        if not isinstance(manual_mode, bool):
+            raise TypeError("manual_mode must be a bool")
+        if not isinstance(skip_system_info, bool):
+            raise TypeError("skip_system_info must be a bool")
+        if skip_system_info and not manual_mode:
+            raise ValueError("skip_system_info is only available in manual mode")
+        self._manual_mode = manual_mode
+        self._skip_system_info = skip_system_info
 
         self._incoming = bytearray()
         self._pending_output: bytes | None = None
@@ -157,6 +186,8 @@ class FixedIOProtocolConnection:
         self._session_confirmed = False
         self._session_info: RigSystemInfo | None = None
         self._last_application_response: object | None = None
+        self._manual_send_sequence = 0
+        self._last_manual_send_result: ManualSendResult | None = None
         self._retired_application_test_ids: set[int] = set()
         self._workflow_state = ProtocolWorkflowState.CONNECTING
         self._closed = False
@@ -211,6 +242,52 @@ class FixedIOProtocolConnection:
                 serial_port.close()
             raise
 
+    @classmethod
+    def connect_manual(
+        cls,
+        *,
+        serial_settings: SerialConnectionSettings | None = None,
+        transport_config: object | None = None,
+        application_config: object | None = None,
+        application_response_timeout_s: float = _DEFAULT_APPLICATION_RESPONSE_TIMEOUT_S,
+        skip_system_info: bool = False,
+        protocol_module: ModuleType | Any | None = None,
+        serial_factory: Any | None = None,
+        comports: Any | None = None,
+    ) -> FixedIOProtocolConnection:
+        """Open a persistent standalone Application-message debugging session."""
+        application = FixedIOProtocolAdapter(
+            protocol_module=protocol_module,
+            application_config=application_config,
+        )
+        p = application.protocol
+        if transport_config is None:
+            transport_config = p.TransportConfig(
+                retransmit_timeout_ms=_DEFAULT_RETRANSMIT_TIMEOUT_MS,
+                max_retries=_DEFAULT_MAX_RETRIES,
+            )
+        serial_port = open_serial_port(
+            serial_settings,
+            serial_factory=serial_factory,
+            comports=comports,
+        )
+        try:
+            transport = p.Transport(p.Role.HOST, transport_config)
+            connection = cls(
+                serial_port=serial_port,
+                application=application,
+                transport=transport,
+                application_response_timeout_s=application_response_timeout_s,
+                manual_mode=True,
+                skip_system_info=skip_system_info,
+            )
+            connection.transport.notify_link_state(p.LinkState.CONNECTED, monotonic_now_ms())
+            return connection
+        except Exception:
+            with suppress(Exception):
+                serial_port.close()
+            raise
+
     @property
     def closed(self) -> bool:
         return self._closed
@@ -252,6 +329,18 @@ class FixedIOProtocolConnection:
     @property
     def last_application_response(self) -> object | None:
         return self._last_application_response
+
+    @property
+    def manual_mode(self) -> bool:
+        return self._manual_mode
+
+    @property
+    def manual_send_pending(self) -> bool:
+        return self._pending_operation is not None and self._pending_operation.kind == "manual"
+
+    @property
+    def last_manual_send_result(self) -> ManualSendResult | None:
+        return self._last_manual_send_result
 
     @property
     def upload_delivery_complete(self) -> bool:
@@ -329,6 +418,8 @@ class FixedIOProtocolConnection:
     ) -> UploadAttempt:
         """Queue configuration plus sparse fixed-I/O states for response-gated upload."""
         self._require_open()
+        if self._manual_mode:
+            raise ProtocolSessionError("Test uploads are unavailable in a manual session")
         if not isinstance(advance_mode, UploadAdvanceMode):
             raise TypeError("advance_mode must be an UploadAdvanceMode")
         if (
@@ -378,6 +469,39 @@ class FixedIOProtocolConnection:
         self._next_result_tick = 0
         self._advance_workflow()
         return upload.upload_attempt
+
+    def queue_manual_message(
+        self,
+        message: ManualApplicationMessage,
+        *,
+        transport_only: bool = False,
+    ) -> int:
+        """Queue one standalone Application message in a manual session."""
+        self._require_open()
+        if not self._manual_mode:
+            raise ProtocolSessionError("Manual messages require a manual connection")
+        if not isinstance(message, ManualApplicationMessage):
+            raise TypeError("message must be a ManualApplicationMessage")
+        if not isinstance(transport_only, bool):
+            raise TypeError("transport_only must be a bool")
+        if not self._session_confirmed:
+            raise ProtocolSessionError("The manual protocol session is not ready")
+        self._require_no_pending_operation()
+        self._manual_send_sequence += 1
+        sequence = self._manual_send_sequence
+        self._last_manual_send_result = None
+        self._last_application_response = None
+        self._activate_operation(
+            _ApplicationOperation(
+                kind="manual",
+                encoded_messages=(message.encoded_message,),
+                response=None if transport_only else message.response,
+                manual_sequence=sequence,
+                manual_label=message.label,
+                application_response_required=not transport_only,
+            )
+        )
+        return sequence
 
     def release_next_operation(self) -> UploadOperation:
         """Release exactly one semantic operation waiting at the operator gate."""
@@ -635,28 +759,46 @@ class FixedIOProtocolConnection:
             message = self.application.decode(encoded)
             messages.append(message)
             if type(message) is p.SystemInfoResponse:
-                self._handle_system_info_response(message)
+                if (
+                    self._pending_operation is not None
+                    and self._pending_operation.kind == "discovery"
+                ) or not self._manual_mode:
+                    self._handle_system_info_response(message)
             elif type(message) is p.ApplicationResponse:
-                self._handle_application_response(message)
+                if not self._manual_mode or (
+                    self._pending_operation is not None
+                    and self._pending_operation.kind == "manual"
+                    and self._pending_operation.application_response_required
+                ):
+                    self._handle_application_response(message)
             elif type(message) is p.ApplicationErrorMessage:
-                if self.result_adapter is not None and self._error_belongs_to_active_upload(
-                    message
+                if (
+                    not self._manual_mode
+                    and self.result_adapter is not None
+                    and self._error_belongs_to_active_upload(
+                        message
+                    )
                 ):
                     stored_errors.append(self.result_adapter.ingest_application_error(message))
             elif type(message) is p.TestResult:
-                self._validate_result_sequence(message)
-                if self.result_adapter is not None:
-                    stored_results.append(self.result_adapter.ingest_application_message(message))
-                self._next_result_tick += 1
-                if self._active_upload is not None and (
-                    self._next_result_tick == self._active_upload.configuration.expected_tick_count
-                ):
-                    self._workflow_state = ProtocolWorkflowState.RESULTS_COMPLETE
+                if not self._manual_mode:
+                    self._validate_result_sequence(message)
+                    if self.result_adapter is not None:
+                        stored_results.append(
+                            self.result_adapter.ingest_application_message(message)
+                        )
+                    self._next_result_tick += 1
+                    if self._active_upload is not None and (
+                        self._next_result_tick
+                        == self._active_upload.configuration.expected_tick_count
+                    ):
+                        self._workflow_state = ProtocolWorkflowState.RESULTS_COMPLETE
             else:
-                self._fail_workflow()
-                raise ProtocolSessionError(
-                    f"Unexpected inbound Application message: {type(message).__name__}"
-                )
+                if not self._manual_mode:
+                    self._fail_workflow()
+                    raise ProtocolSessionError(
+                        f"Unexpected inbound Application message: {type(message).__name__}"
+                    )
         return tuple(events), tuple(messages), tuple(stored_results), tuple(stored_errors)
 
     def _handle_delivery_confirmed(self) -> None:
@@ -670,7 +812,12 @@ class FixedIOProtocolConnection:
         if operation.kind in {"configuration", "tick"}:
             self._upload_messages_delivered += 1
         if operation.every_message_submitted:
-            operation.response_deadline = time.monotonic() + self.application_response_timeout_s
+            if operation.kind == "manual" and not operation.application_response_required:
+                operation.response_received = True
+            else:
+                operation.response_deadline = (
+                    time.monotonic() + self.application_response_timeout_s
+                )
         self._finish_pending_operation_if_ready()
 
     def _handle_system_info_response(self, message: object) -> None:
@@ -702,6 +849,8 @@ class FixedIOProtocolConnection:
 
         correlation = operation.response
         if message.scope is not correlation.scope:
+            if self._manual_mode and operation.kind == "manual":
+                return
             self._response_mismatch(
                 f"expected scope {correlation.scope.name}, received {message.scope.name}"
             )
@@ -712,18 +861,26 @@ class FixedIOProtocolConnection:
             else application_test_id_from_bytes(message.test_id.bytes)
         )
         if received_test_id != correlation.application_test_id:
+            if self._manual_mode and operation.kind == "manual":
+                return
             self._response_mismatch("Application Test ID does not match the pending operation")
         if correlation.tick is not None and message.tick_number != correlation.tick:
+            if self._manual_mode and operation.kind == "manual":
+                return
             self._response_mismatch(
                 f"expected tick {correlation.tick}, received tick {message.tick_number}"
             )
         if correlation.control_command is not None and (
             message.control_command is not correlation.control_command
         ):
+            if self._manual_mode and operation.kind == "manual":
+                return
             self._response_mismatch("Execution Control command does not match the request")
         if correlation.global_control_command is not None and (
             message.global_control_command is not correlation.global_control_command
         ):
+            if self._manual_mode and operation.kind == "manual":
+                return
             self._response_mismatch("Global Control command does not match the request")
 
         self._last_application_response = message
@@ -752,12 +909,43 @@ class FixedIOProtocolConnection:
             return
 
         self._pending_operation = None
+        if operation.kind == "manual":
+            success = operation.response_error is None
+            if operation.application_response_required:
+                detail = (
+                    "Application response accepted."
+                    if success
+                    else operation.response_error or "Application response failed."
+                )
+            else:
+                detail = (
+                    "Transport delivery confirmed; Application response was not required."
+                )
+            self._last_manual_send_result = ManualSendResult(
+                sequence=operation.manual_sequence or 0,
+                label=operation.manual_label or "Application message",
+                transport_delivered=True,
+                application_response_required=operation.application_response_required,
+                application_response=(
+                    self._last_application_response
+                    if operation.application_response_required
+                    else None
+                ),
+                success=success,
+                detail=detail,
+            )
+            self._workflow_state = ProtocolWorkflowState.MANUAL_READY
+            return
         if operation.response_error is not None:
             self._handle_negative_response(operation)
             raise ProtocolSessionError(operation.response_error)
         if operation.kind == "discovery":
             self._session_confirmed = True
-            self._workflow_state = ProtocolWorkflowState.READY
+            self._workflow_state = (
+                ProtocolWorkflowState.MANUAL_READY
+                if self._manual_mode
+                else ProtocolWorkflowState.READY
+            )
         elif operation.kind in {"configuration", "tick"}:
             if self._upload_operations:
                 self._advance_or_gate(self._upload_operations.popleft())
@@ -820,6 +1008,10 @@ class FixedIOProtocolConnection:
         snapshot = self.transport.get_status()
         if snapshot.session_state is not self.protocol.SessionState.ESTABLISHED:
             return
+        if self._manual_mode and self._skip_system_info and not self._session_confirmed:
+            self._session_confirmed = True
+            self._workflow_state = ProtocolWorkflowState.MANUAL_READY
+            return
         if not self._session_confirmed:
             request = self.application.build_system_info_request(request_firmware_git_hash=True)
             self._activate_operation(
@@ -828,6 +1020,8 @@ class FixedIOProtocolConnection:
                     encoded_messages=(self.application.encode(request),),
                 )
             )
+            return
+        if self._manual_mode:
             return
         if self._upload_operations:
             self._advance_or_gate(self._upload_operations.popleft())
@@ -844,6 +1038,7 @@ class FixedIOProtocolConnection:
             "start": ProtocolWorkflowState.STARTING,
             "abort": ProtocolWorkflowState.ABORTING,
             "reset": ProtocolWorkflowState.RESETTING,
+            "manual": ProtocolWorkflowState.MANUAL_SENDING,
         }[operation.kind]
 
     def _activate_upload_operation(self, operation: UploadOperation) -> None:
@@ -928,6 +1123,19 @@ class FixedIOProtocolConnection:
         ):
             return
         kind = operation.kind
+        if kind == "manual":
+            self._pending_operation = None
+            self._last_manual_send_result = ManualSendResult(
+                sequence=operation.manual_sequence or 0,
+                label=operation.manual_label or "Application message",
+                transport_delivered=True,
+                application_response_required=True,
+                application_response=None,
+                success=False,
+                detail="Timed out waiting for the Application response.",
+            )
+            self._workflow_state = ProtocolWorkflowState.MANUAL_READY
+            return
         self._fail_workflow()
         raise ProtocolSessionError(f"Timed out waiting for the {kind} Application response")
 
@@ -1041,6 +1249,7 @@ def _version_text(version: object) -> str:
 
 __all__ = [
     "FixedIOProtocolConnection",
+    "ManualSendResult",
     "ProtocolServiceReport",
     "ProtocolWorkflowState",
     "RigSystemInfo",

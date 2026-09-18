@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import cmd
+import shlex
 import sys
 import threading
 from pathlib import Path
 from typing import TextIO
 
-from hilrig.runner import ProtocolWorker, RunSnapshot
+from hilrig.runner import ManualSessionSnapshot, ProtocolWorker, RunSnapshot
 
 
 class HilRigShell(cmd.Cmd):
@@ -55,6 +56,13 @@ class HilRigShell(cmd.Cmd):
             "  continue           Release the gate and finish automatically.\n"
             "  status             Show the current or most recently completed run.\n"
             "  abort              Request cancellation of the active run.\n"
+            "  manual connect [COM=<n>] [--skip-system-info]\n"
+            "                     Open a persistent manual protocol session.\n"
+            "  manual send <message-file> [--transport-only]\n"
+            "                     Send one standalone JSON Application message.\n"
+            "  manual inbox      Show received manual Application messages.\n"
+            "  manual status     Show manual-session status.\n"
+            "  manual disconnect Close the manual protocol session.\n"
             "  help               Show this command list.\n"
             "  quit               Abort any active run and close the terminal."
         )
@@ -95,6 +103,101 @@ class HilRigShell(cmd.Cmd):
             self._write_line("Abort requested.")
         else:
             self._write_line("There is no abortable active run.")
+
+    def do_manual(self, argument: str) -> None:
+        """manual <command> -- Manage a standalone Application debugging session."""
+        try:
+            tokens = shlex.split(argument, posix=False)
+        except ValueError as error:
+            self._write_line(f"Invalid manual command: {error}")
+            return
+        if not tokens:
+            self._write_line(_manual_usage())
+            return
+        command = tokens.pop(0).lower()
+        if command == "connect":
+            self._manual_connect(tokens)
+        elif command == "send":
+            self._manual_send(tokens)
+        elif command == "inbox":
+            if tokens:
+                self._write_line("Usage: manual inbox")
+            else:
+                inbox = self.worker.manual_inbox()
+                self._write_line(
+                    "Manual inbox is empty."
+                    if not inbox
+                    else "Manual inbox:\n" + "\n".join(f"  {item}" for item in inbox)
+                )
+        elif command == "status":
+            if tokens:
+                self._write_line("Usage: manual status")
+            else:
+                self._write_line(_format_manual_status(self.worker.manual_snapshot()))
+        elif command == "disconnect":
+            if tokens:
+                self._write_line("Usage: manual disconnect")
+            elif self.worker.manual_disconnect():
+                self._write_line("Manual disconnect requested.")
+            else:
+                self._write_line("There is no active manual session.")
+        else:
+            self._write_line(_manual_usage())
+
+    def _manual_connect(self, tokens: list[str]) -> None:
+        device = None
+        skip_system_info = False
+        for token in tokens:
+            if token.lower() == "--skip-system-info":
+                if skip_system_info:
+                    self._write_line(_manual_connect_usage())
+                    return
+                skip_system_info = True
+            elif token.lower().startswith("com="):
+                if device is not None:
+                    self._write_line(_manual_connect_usage())
+                    return
+                number = token.partition("=")[2]
+                if not number.isdecimal() or int(number) < 1:
+                    self._write_line("COM must be a positive port number, for example COM=2.")
+                    return
+                device = f"COM{int(number)}"
+            else:
+                self._write_line(_manual_connect_usage())
+                return
+        if not self.worker.manual_connect(
+            device=device,
+            skip_system_info=skip_system_info,
+        ):
+            self._write_line("A test run or manual session is already active.")
+            return
+        selected = device or "automatic COM-port discovery"
+        suffix = "; System Information disabled" if skip_system_info else ""
+        self._write_line(f"Manual connection queued: {selected}{suffix}.")
+
+    def _manual_send(self, tokens: list[str]) -> None:
+        transport_only = False
+        path_token = None
+        for token in tokens:
+            if token.lower() == "--transport-only":
+                if transport_only:
+                    self._write_line(_manual_send_usage())
+                    return
+                transport_only = True
+            elif path_token is None:
+                path_token = token
+            else:
+                self._write_line(_manual_send_usage())
+                return
+        path = _path_argument(path_token or "")
+        if path is None:
+            self._write_line(_manual_send_usage())
+            return
+        if not self.worker.manual_send(path, transport_only=transport_only):
+            self._write_line("The manual session is not ready for another message.")
+            return
+        mode = "transport only" if transport_only else "Application response required"
+        self._write_line(f"Manual send queued: {path} ({mode}).")
 
     def do_quit(self, argument: str) -> bool:
         """quit -- Abort any active run and close the HIL-RIG terminal."""
@@ -195,6 +298,54 @@ def _format_status(snapshot: RunSnapshot) -> str:
     if snapshot.error is not None:
         lines.append(f"Error: {snapshot.error}")
     return "\n".join(lines)
+
+
+def _format_manual_status(snapshot: ManualSessionSnapshot) -> str:
+    lines = [
+        f"Manual state: {snapshot.state.value}",
+        f"Detail: {snapshot.detail}",
+    ]
+    if snapshot.device is not None:
+        lines.append(f"Port: {snapshot.device}")
+    lines.append(
+        "System Information: skipped"
+        if snapshot.skip_system_info
+        else "System Information: enabled"
+    )
+    if snapshot.protocol_version is not None:
+        lines.append(f"Protocol version: {snapshot.protocol_version}")
+    if snapshot.firmware_version is not None:
+        lines.append(f"Firmware version: {snapshot.firmware_version}")
+    if snapshot.pending_message is not None:
+        lines.append(f"Pending message: {snapshot.pending_message}")
+    if snapshot.last_result is not None:
+        lines.append(
+            f"Last send: {'successful' if snapshot.last_result.success else 'unsuccessful'} "
+            f"({snapshot.last_result.label})"
+        )
+    lines.append(f"Inbox messages: {snapshot.inbox_count}")
+    if snapshot.error is not None:
+        lines.append(f"Error: {snapshot.error}")
+    return "\n".join(lines)
+
+
+def _manual_usage() -> str:
+    return (
+        "Manual commands:\n"
+        "  manual connect [COM=<n>] [--skip-system-info]\n"
+        "  manual send <message-file> [--transport-only]\n"
+        "  manual inbox\n"
+        "  manual status\n"
+        "  manual disconnect"
+    )
+
+
+def _manual_connect_usage() -> str:
+    return "Usage: manual connect [COM=<n>] [--skip-system-info]"
+
+
+def _manual_send_usage() -> str:
+    return 'Usage: manual send "path to message.json" [--transport-only]'
 
 
 if __name__ == "__main__":

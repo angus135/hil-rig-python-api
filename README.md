@@ -90,6 +90,11 @@ step
 continue
 status
 abort
+manual connect [COM=<n>] [--skip-system-info]
+manual send <message-file> [--transport-only]
+manual inbox
+manual status
+manual disconnect
 quit
 ```
 
@@ -146,6 +151,60 @@ Continue requested; the remainder will run automatically.
 ```
 
 `EXTERNAL_TRIGGER` is not supported by the terminal runner.
+
+### Manual Application-message mode
+
+Manual mode is independent of test definitions, upload plans, captured-run databases,
+and evaluation. It keeps one protocol connection open so standalone JSON Application
+messages can be sent for firmware debugging.
+
+Connect using automatic COM-port discovery:
+
+```text
+HIL-RIG> manual connect
+```
+
+Or select a Windows COM port explicitly and optionally skip the Application-level
+System Information request/version check:
+
+```text
+HIL-RIG> manual connect COM=2 --skip-system-info
+```
+
+`COM=2` opens `COM2` directly. When it is omitted, the host retains its normal behavior
+of selecting the first port whose description is exactly `USB Serial Device`.
+`--skip-system-info` does not skip COM discovery or Transport session establishment.
+
+Send one message and require both Transport delivery and its correlated Application
+Response:
+
+```text
+HIL-RIG> manual send "examples\manual_messages\instruction.json"
+```
+
+To finish the send after reliable Transport delivery without requiring an Application
+Response, add `--transport-only`:
+
+```text
+HIL-RIG> manual send "examples\manual_messages\instruction.json" --transport-only
+```
+
+Inbound messages—including responses received after a Transport-only send—are retained
+in a bounded terminal inbox:
+
+```text
+HIL-RIG> manual inbox
+HIL-RIG> manual status
+HIL-RIG> manual disconnect
+```
+
+A manual session and a normal test run cannot own the serial connection at the same
+time. The current standalone JSON loader supports `test_configuration`,
+`test_instruction`, `execution_control`, and `global_control`. Example files are in
+[`examples/manual_messages`](examples/manual_messages). Configuration channels omitted
+from a file are disabled. Instruction outputs omitted from a file are encoded as their
+protocol zero/false values, so the JSON describes the complete emitted message rather
+than modifying a retained test definition.
 
 Each run creates a unique directory beside the test file:
 

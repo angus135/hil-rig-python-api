@@ -64,6 +64,9 @@ from hilrig.protocol import (
     FixedIOProtocolAdapter,
     FixedIOProtocolConnection,
     FixedIOUploadMessages,
+    ManualApplicationMessage,
+    ManualMessageDefinitionError,
+    ManualSendResult,
     ProtocolServiceReport,
     ProtocolWorkflowState,
     ResponseCorrelation,
@@ -74,6 +77,7 @@ from hilrig.protocol import (
     UploadOperationKind,
     UploadPlan,
     discover_serial_port,
+    load_manual_message,
 )
 from hilrig.results import (
     ApplicationErrorRecord,
@@ -126,6 +130,9 @@ __all__ = [
     "I2CSpeed",
     "IncomingResultAdapter",
     "LogicVoltage",
+    "ManualApplicationMessage",
+    "ManualMessageDefinitionError",
+    "ManualSendResult",
     "PeripheralError",
     "ProtocolDependencyError",
     "ProtocolIntegrationError",
@@ -166,4 +173,5 @@ __all__ = [
     "ValidationError",
     "evaluate_assertions",
     "discover_serial_port",
+    "load_manual_message",
 ]

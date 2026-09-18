@@ -217,6 +217,16 @@ messages. One gate release therefore covers a complete configuration, tick, or S
 operation. A future operation can contain several variable-peripheral messages followed
 by one Application Response without changing the terminal/worker threading model.
 
+The same worker also owns an exclusive persistent manual session. This path does not
+construct a `Test` or `UploadPlan`: a standalone JSON document is validated into one
+public protocol value, encoded by the Application codec, and submitted as one Transport
+payload. A normal manual send remains pending through reliable Transport delivery and a
+correlated Application Response. A Transport-only send completes on delivery
+confirmation and treats any later Application message as inbox data. Manual sessions
+can bypass System Information/version discovery, but never bypass Transport session
+establishment or reliable-delivery handling. Normal runs continue using automatic
+exact-description COM discovery; manual sessions may explicitly select a COM device.
+
 The caller repeatedly invokes non-blocking `service()`. The connection retains partial
 Transport input and serial output, advances Transport with monotonic wrapped
 milliseconds, drains events/application data, and submits at most one reliable

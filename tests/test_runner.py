@@ -5,10 +5,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from protocol_fakes import FakeProtocol
 
-from hilrig import PWMMeasurement, TickResult
+from hilrig import FixedIOProtocolAdapter, ManualSendResult, PWMMeasurement, TickResult
 from hilrig.protocol import ProtocolWorkflowState, UploadAdvanceMode, UploadOperationKind
-from hilrig.runner import DefinitionFileError, ProtocolWorker, WorkerState, load_test_definition
+from hilrig.runner import (
+    DefinitionFileError,
+    ManualSessionState,
+    ProtocolWorker,
+    WorkerState,
+    load_test_definition,
+)
 
 
 def _write_test_file(path: Path, *, start_mode: str = "HOST_COMMAND") -> Path:
@@ -132,6 +139,54 @@ class _AutomaticConnection:
     def abort(self) -> None:
         self.abort_called = True
         self.workflow_state = ProtocolWorkflowState.ABORTING
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _ManualConnection:
+    def __init__(self, *, device: str | None, skip_system_info: bool) -> None:
+        self.skip_system_info = skip_system_info
+        self.serial_port = SimpleNamespace(port=device or "COM7")
+        self.application = FixedIOProtocolAdapter(protocol_module=FakeProtocol)
+        self.session_confirmed = False
+        self.session_info = None
+        self.last_manual_send_result = None
+        self.pending = None
+        self.sequence = 0
+        self.closed = False
+
+    def service(self):
+        if not self.session_confirmed:
+            self.session_confirmed = True
+            if not self.skip_system_info:
+                self.session_info = SimpleNamespace(
+                    protocol_version="0.2.0",
+                    firmware_version="1.2.3",
+                )
+        elif self.pending is not None:
+            message, transport_only = self.pending
+            self.pending = None
+            self.last_manual_send_result = ManualSendResult(
+                sequence=self.sequence,
+                label=message.label,
+                transport_delivered=True,
+                application_response_required=not transport_only,
+                application_response=None,
+                success=True,
+                detail=(
+                    "Transport delivery confirmed; Application response was not required."
+                    if transport_only
+                    else "Application response accepted."
+                ),
+            )
+        return SimpleNamespace(application_messages=())
+
+    def queue_manual_message(self, message, *, transport_only: bool = False) -> int:
+        self.sequence += 1
+        self.last_manual_send_result = None
+        self.pending = (message, transport_only)
+        return self.sequence
 
     def close(self) -> None:
         self.closed = True
@@ -278,6 +333,49 @@ def test_worker_continue_makes_remainder_automatic(tmp_path: Path) -> None:
         worker.shutdown()
 
 
+def test_worker_owns_persistent_manual_session_and_sends_message() -> None:
+    created: list[tuple[object, _ManualConnection]] = []
+
+    def manual_factory(*, serial_settings, skip_system_info):
+        connection = _ManualConnection(
+            device=serial_settings.device,
+            skip_system_info=skip_system_info,
+        )
+        created.append((serial_settings, connection))
+        return connection
+
+    worker = ProtocolWorker(
+        manual_connection_factory=manual_factory,
+        poll_interval_s=0.001,
+    )
+    example = (
+        Path(__file__).resolve().parents[1]
+        / "examples"
+        / "manual_messages"
+        / "instruction.json"
+    )
+    try:
+        assert worker.manual_connect(device="COM2", skip_system_info=True)
+        _wait_for_manual_state(worker, ManualSessionState.READY)
+        assert created[0][0].device == "COM2"
+        assert created[0][1].skip_system_info
+        assert not worker.submit(example)
+
+        assert worker.manual_send(example, transport_only=True)
+        _wait_for_manual_result(worker)
+        snapshot = worker.manual_snapshot()
+        assert snapshot.last_result is not None
+        assert snapshot.last_result.success
+        assert not snapshot.last_result.application_response_required
+
+        assert worker.manual_disconnect()
+        assert worker.wait_until_idle(5)
+        assert worker.manual_snapshot().state is ManualSessionState.DISCONNECTED
+        assert created[0][1].closed
+    finally:
+        worker.shutdown()
+
+
 def _wait_for_state(worker: ProtocolWorker, state: WorkerState) -> None:
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
@@ -298,3 +396,22 @@ def _wait_for_next_operation(worker: ProtocolWorker, label: str) -> None:
             return
         time.sleep(0.001)
     raise AssertionError(f"worker did not pause before {label}: {worker.snapshot()}")
+
+
+def _wait_for_manual_state(worker: ProtocolWorker, state: ManualSessionState) -> None:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if worker.manual_snapshot().state is state:
+            return
+        time.sleep(0.001)
+    raise AssertionError(f"manual session did not reach {state.value}: {worker.manual_snapshot()}")
+
+
+def _wait_for_manual_result(worker: ProtocolWorker) -> None:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        snapshot = worker.manual_snapshot()
+        if snapshot.state is ManualSessionState.READY and snapshot.last_result is not None:
+            return
+        time.sleep(0.001)
+    raise AssertionError(f"manual send did not complete: {worker.manual_snapshot()}")
