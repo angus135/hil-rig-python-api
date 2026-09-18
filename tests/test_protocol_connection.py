@@ -44,6 +44,8 @@ from hilrig import (
     ProtocolSessionError,
     ProtocolWorkflowState,
     StartMode,
+    UploadAdvanceMode,
+    UploadOperationKind,
 )
 from hilrig import Test as HilRigTest
 
@@ -64,8 +66,9 @@ def _drive_fake_rig_to_state(
     application: FixedIOProtocolAdapter,
     transport: FakeTransport,
     target: ProtocolWorkflowState = ProtocolWorkflowState.RUNNING,
-) -> None:
-    responded = 0
+    *,
+    responded: int = 0,
+) -> int:
     instructions = connection.active_upload.instructions
     last_sparse_tick = instructions[-1].tick_number if instructions else None
     for _ in range(500):
@@ -126,8 +129,101 @@ def _drive_fake_rig_to_state(
                 ]
             transport.application_data.extend(application.codec.encode(item) for item in responses)
         if connection.workflow_state is target:
-            return
+            return responded
     raise AssertionError(f"fake protocol workflow did not reach {target.name}")
+
+
+def test_operator_gate_steps_configuration_tick_and_start_as_semantic_operations() -> None:
+    application = FixedIOProtocolAdapter(protocol_module=FakeProtocol)
+    transport = FakeTransport()
+    connection = FixedIOProtocolConnection(
+        serial_port=FakeSerial(),
+        application=application,
+        transport=transport,
+    )
+    connection.queue_upload(
+        _compiled_digital_test(),
+        advance_mode=UploadAdvanceMode.OPERATOR_GATED,
+    )
+
+    responded = _drive_fake_rig_to_state(
+        connection,
+        application,
+        transport,
+        ProtocolWorkflowState.WAITING_FOR_OPERATOR,
+    )
+    assert connection.next_upload_operation.kind is UploadOperationKind.CONFIGURATION
+    assert [type(application.codec.decode(item)).__name__ for item in transport.submitted] == [
+        "SystemInfoRequest"
+    ]
+
+    released = connection.release_next_operation()
+    assert released.kind is UploadOperationKind.CONFIGURATION
+    responded = _drive_fake_rig_to_state(
+        connection,
+        application,
+        transport,
+        ProtocolWorkflowState.WAITING_FOR_OPERATOR,
+        responded=responded,
+    )
+    assert connection.next_upload_operation.kind is UploadOperationKind.TICK
+    assert connection.next_upload_operation.tick == 5
+
+    connection.release_next_operation()
+    responded = _drive_fake_rig_to_state(
+        connection,
+        application,
+        transport,
+        ProtocolWorkflowState.WAITING_FOR_OPERATOR,
+        responded=responded,
+    )
+    assert connection.upload_accepted
+    assert connection.next_upload_operation.kind is UploadOperationKind.START
+    assert not connection.execution_started
+
+    connection.release_next_operation()
+    _drive_fake_rig_to_state(
+        connection,
+        application,
+        transport,
+        ProtocolWorkflowState.RUNNING,
+        responded=responded,
+    )
+    assert connection.execution_started
+
+
+def test_continue_releases_gate_and_runs_remaining_operations_automatically() -> None:
+    application = FixedIOProtocolAdapter(protocol_module=FakeProtocol)
+    transport = FakeTransport()
+    connection = FixedIOProtocolConnection(
+        serial_port=FakeSerial(),
+        application=application,
+        transport=transport,
+    )
+    connection.queue_upload(
+        _compiled_digital_test(),
+        advance_mode=UploadAdvanceMode.OPERATOR_GATED,
+    )
+    responded = _drive_fake_rig_to_state(
+        connection,
+        application,
+        transport,
+        ProtocolWorkflowState.WAITING_FOR_OPERATOR,
+    )
+
+    released = connection.continue_upload()
+    assert released.kind is UploadOperationKind.CONFIGURATION
+    assert connection.advance_mode is UploadAdvanceMode.AUTOMATIC
+    _drive_fake_rig_to_state(
+        connection,
+        application,
+        transport,
+        ProtocolWorkflowState.RUNNING,
+        responded=responded,
+    )
+
+    assert connection.execution_started
+    assert not connection.waiting_for_operator
 
 
 def test_connection_preserves_partial_writes_and_sends_one_message_at_a_time() -> None:

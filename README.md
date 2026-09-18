@@ -80,11 +80,14 @@ def build_test() -> Test:
 Test-definition files are trusted Python code. Loading one executes its top-level code
 before `build_test()` is called. Do not run files from untrusted sources.
 
-The initial terminal provides five commands:
+The terminal provides these commands:
 
 ```text
 help
 run <path>
+run --step <path>
+step
+continue
 status
 abort
 quit
@@ -106,7 +109,43 @@ Results: 412/1751 ticks
 version confirmation, correlated Application Responses for configuration and sparse
 ticks, Complete Test acceptance, START completion, and the complete ordered result
 set. `HOST_COMMAND` tests are started automatically by this automatic runner after
-upload acceptance. `EXTERNAL_TRIGGER` is not supported by this first terminal version.
+upload acceptance.
+
+Use `run --step <path>` when debugging the upload/start sequence. Discovery and version
+confirmation still happen automatically. The terminal then pauses before each semantic
+operation in this order:
+
+```text
+configuration -> tick <n> -> tick <n> -> ... -> START
+```
+
+At a pause, `step` releases exactly that one operation. An operation may contain more
+than one wire message in future protocol versions; it remains one terminal step. After
+release, the worker waits for Transport delivery and the operation's correlated
+Application Response before offering the next step. Firmware Complete Test validation
+is passive and automatic, so there is no separate step for it. START is always a manual
+step in stepped mode, including for tests configured with `StartMode.IMMEDIATE`.
+
+`continue` releases the currently paused operation and disables stepping for the rest
+of that run. It does not disable delivery checks, Application acknowledgements,
+correlation, or timeouts. Test results are received continuously after START; individual
+result messages are not stepped. `step` and `continue` report an error if no stepped run
+is currently paused. `status` shows the next operation while a run is waiting:
+
+```text
+HIL-RIG> run --step "examples\terminal_test.py"
+Stepped run queued: examples\terminal_test.py
+
+Paused before configuration. Enter 'step' to release it or 'continue' to finish automatically.
+HIL-RIG> step
+Step requested.
+
+Paused before tick 100. Enter 'step' to release it or 'continue' to finish automatically.
+HIL-RIG> continue
+Continue requested; the remainder will run automatically.
+```
+
+`EXTERNAL_TRIGGER` is not supported by the terminal runner.
 
 Each run creates a unique directory beside the test file:
 
@@ -450,8 +489,10 @@ measurements. The capture database retains both the wire ID and immutable logica
 
 ## Fixed-I/O protocol and USB CDC connection
 
-`FixedIOProtocolAdapter` turns a `CompiledTestIR` and `UploadAttempt` into the public
-`hil-rig-protocol` values. Configuration arrays are always complete; unconfigured
+`FixedIOProtocolAdapter` turns a `CompiledTestIR` and `UploadAttempt` into an
+`UploadPlan` of semantic `UploadOperation` objects and the public `hil-rig-protocol`
+values. Each operation owns all its encoded messages and its expected response
+correlation. Configuration arrays are always complete; unconfigured
 channels use canonical disabled records. Communication peripheral configuration and
 instructions stay in the host IR but are deliberately not emitted yet.
 
@@ -509,7 +550,10 @@ and their correlated Application Response before the next operation is submitted
 After the final sparse tick is accepted, the connection waits for the firmware's
 Complete Test Response.
 
-`IMMEDIATE` automatically queues `START`; `HOST_COMMAND` exposes `connection.start()`.
+By default, `IMMEDIATE` automatically queues `START`; `HOST_COMMAND` exposes
+`connection.start()`. Passing `advance_mode=UploadAdvanceMode.OPERATOR_GATED` to
+`queue_upload()` instead pauses configuration, each tick operation, and START behind
+`release_next_operation()`/`continue_upload()` while retaining all response checks.
 `connection.abort()` and `connection.reset_application()` send the corresponding
 response-gated controls. `EXTERNAL_TRIGGER` remains representable in the compiled IR
 but intentionally performs no protocol action. Responses are correlated by scope,

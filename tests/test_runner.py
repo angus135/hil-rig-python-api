@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from hilrig import PWMMeasurement, TickResult
-from hilrig.protocol import ProtocolWorkflowState
+from hilrig.protocol import ProtocolWorkflowState, UploadAdvanceMode, UploadOperationKind
 from hilrig.runner import DefinitionFileError, ProtocolWorker, WorkerState, load_test_definition
 
 
@@ -45,6 +45,12 @@ class _AutomaticConnection:
         self.start_called = False
         self.abort_called = False
         self.closed = False
+        self.advance_mode = UploadAdvanceMode.AUTOMATIC
+        self.next_upload_operation = None
+
+    @property
+    def waiting_for_operator(self) -> bool:
+        return self.next_upload_operation is not None
 
     def service(self):
         stored = ()
@@ -56,7 +62,14 @@ class _AutomaticConnection:
             )
             self.workflow_state = ProtocolWorkflowState.READY
         elif self.workflow_state is ProtocolWorkflowState.CONFIGURING:
-            self.workflow_state = ProtocolWorkflowState.READY_TO_START
+            if self.advance_mode is UploadAdvanceMode.OPERATOR_GATED:
+                self.next_upload_operation = SimpleNamespace(
+                    kind=UploadOperationKind.START,
+                    label="START",
+                )
+                self.workflow_state = ProtocolWorkflowState.WAITING_FOR_OPERATOR
+            else:
+                self.workflow_state = ProtocolWorkflowState.READY_TO_START
         elif self.workflow_state is ProtocolWorkflowState.STARTING:
             self.workflow_state = ProtocolWorkflowState.RUNNING
         elif self.workflow_state is ProtocolWorkflowState.RUNNING and not self.block_results:
@@ -72,10 +85,45 @@ class _AutomaticConnection:
     def bind_result_builder(self, builder) -> None:
         self.builder = builder
 
-    def queue_upload(self, compiled, *, upload_attempt) -> None:
+    def queue_upload(
+        self,
+        compiled,
+        *,
+        upload_attempt,
+        advance_mode=UploadAdvanceMode.AUTOMATIC,
+    ) -> None:
         self.compiled = compiled
         self.active_upload = SimpleNamespace(upload_attempt=upload_attempt)
-        self.workflow_state = ProtocolWorkflowState.CONFIGURING
+        self.advance_mode = advance_mode
+        if advance_mode is UploadAdvanceMode.OPERATOR_GATED:
+            self.next_upload_operation = SimpleNamespace(
+                kind=UploadOperationKind.CONFIGURATION,
+                label="configuration",
+            )
+            self.workflow_state = ProtocolWorkflowState.WAITING_FOR_OPERATOR
+        else:
+            self.workflow_state = ProtocolWorkflowState.CONFIGURING
+
+    def release_next_operation(self):
+        operation = self.next_upload_operation
+        self.next_upload_operation = None
+        if operation.kind is UploadOperationKind.START:
+            self.start_called = True
+            self.workflow_state = ProtocolWorkflowState.STARTING
+        else:
+            self.workflow_state = ProtocolWorkflowState.CONFIGURING
+        return operation
+
+    def continue_upload(self):
+        operation = self.next_upload_operation
+        self.advance_mode = UploadAdvanceMode.AUTOMATIC
+        self.next_upload_operation = None
+        if operation.kind is UploadOperationKind.START:
+            self.start_called = True
+            self.workflow_state = ProtocolWorkflowState.STARTING
+        else:
+            self.workflow_state = ProtocolWorkflowState.CONFIGURING
+        return operation
 
     def start(self) -> None:
         self.start_called = True
@@ -194,6 +242,42 @@ def test_worker_abort_retains_partial_capture(tmp_path: Path) -> None:
         worker.shutdown()
 
 
+def test_worker_steps_configuration_and_start_then_finishes_results(tmp_path: Path) -> None:
+    definition = _write_test_file(tmp_path / "stepped.py")
+    connection = _AutomaticConnection()
+    worker = ProtocolWorker(connection_factory=lambda: connection, poll_interval_s=0.001)
+    try:
+        assert worker.submit(definition, stepped=True)
+        _wait_for_next_operation(worker, "configuration")
+        assert worker.step()
+        _wait_for_next_operation(worker, "START")
+        assert worker.step()
+        assert worker.wait_until_idle(5)
+
+        snapshot = worker.snapshot()
+        assert snapshot.state is WorkerState.COMPLETED
+        assert snapshot.stepped
+        assert connection.start_called
+    finally:
+        worker.shutdown()
+
+
+def test_worker_continue_makes_remainder_automatic(tmp_path: Path) -> None:
+    definition = _write_test_file(tmp_path / "continued.py")
+    connection = _AutomaticConnection()
+    worker = ProtocolWorker(connection_factory=lambda: connection, poll_interval_s=0.001)
+    try:
+        assert worker.submit(definition, stepped=True)
+        _wait_for_next_operation(worker, "configuration")
+        assert worker.continue_run()
+        assert worker.wait_until_idle(5)
+
+        assert worker.snapshot().state is WorkerState.COMPLETED
+        assert connection.start_called
+    finally:
+        worker.shutdown()
+
+
 def _wait_for_state(worker: ProtocolWorker, state: WorkerState) -> None:
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
@@ -201,3 +285,16 @@ def _wait_for_state(worker: ProtocolWorker, state: WorkerState) -> None:
             return
         time.sleep(0.001)
     raise AssertionError(f"worker did not reach {state.value}: {worker.snapshot()}")
+
+
+def _wait_for_next_operation(worker: ProtocolWorker, label: str) -> None:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        snapshot = worker.snapshot()
+        if (
+            snapshot.state is WorkerState.WAITING_FOR_OPERATOR
+            and snapshot.next_operation == label
+        ):
+            return
+        time.sleep(0.001)
+    raise AssertionError(f"worker did not pause before {label}: {worker.snapshot()}")

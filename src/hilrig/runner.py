@@ -1,4 +1,4 @@
-"""Automatic test execution on one dedicated protocol-owner thread."""
+"""Automatic and operator-stepped execution on one protocol-owner thread."""
 
 from __future__ import annotations
 
@@ -18,7 +18,11 @@ from typing import Any
 from hilrig.api import Test
 from hilrig.evaluation import evaluate_assertions
 from hilrig.models.execution import CompiledTestIR
-from hilrig.protocol import FixedIOProtocolConnection, ProtocolWorkflowState
+from hilrig.protocol import (
+    FixedIOProtocolConnection,
+    ProtocolWorkflowState,
+    UploadAdvanceMode,
+)
 from hilrig.results import CapturedRunBuilder, CapturedRunIR, CaptureStatus
 
 
@@ -33,6 +37,7 @@ class WorkerState(str, Enum):
     QUEUED = "queued"
     LOADING = "loading"
     CONNECTING = "connecting"
+    WAITING_FOR_OPERATOR = "waiting_for_operator"
     UPLOADING = "uploading"
     STARTING = "starting"
     RUNNING = "running"
@@ -49,6 +54,7 @@ _BUSY_STATES = frozenset(
         WorkerState.QUEUED,
         WorkerState.LOADING,
         WorkerState.CONNECTING,
+        WorkerState.WAITING_FOR_OPERATOR,
         WorkerState.UPLOADING,
         WorkerState.STARTING,
         WorkerState.RUNNING,
@@ -73,6 +79,8 @@ class RunSnapshot:
     expected_tick_count: int = 0
     verdict: str | None = None
     error: str | None = None
+    stepped: bool = False
+    next_operation: str | None = None
 
     @property
     def busy(self) -> bool:
@@ -82,6 +90,12 @@ class RunSnapshot:
 @dataclass(frozen=True, slots=True)
 class _RunCommand:
     path: Path
+    stepped: bool
+
+
+class _AdvanceCommand(str, Enum):
+    STEP = "step"
+    CONTINUE = "continue"
 
 
 class _StopWorker:
@@ -98,7 +112,7 @@ _NotificationCallback = Callable[[str], None]
 
 
 class ProtocolWorker:
-    """Execute automatic runs while owning all protocol objects on one thread.
+    """Execute terminal runs while owning all protocol objects on one thread.
 
     The public methods only exchange immutable status and thread-safe signals. The
     worker thread creates, services, and closes ``FixedIOProtocolConnection`` so the
@@ -124,6 +138,7 @@ class ProtocolWorker:
         self._poll_interval_s = float(poll_interval_s)
         self._abort_timeout_s = float(abort_timeout_s)
         self._commands: queue.Queue[_Command] = queue.Queue()
+        self._advance_commands: queue.Queue[_AdvanceCommand] = queue.Queue()
         self._snapshot_lock = threading.Lock()
         self._snapshot = RunSnapshot()
         self._abort_requested = threading.Event()
@@ -131,6 +146,7 @@ class ProtocolWorker:
         self._idle.set()
         self._started = False
         self._stopping = False
+        self._advance_request_pending = False
         self._thread = threading.Thread(
             target=self._worker_loop,
             name="hilrig-protocol-worker",
@@ -147,22 +163,35 @@ class ProtocolWorker:
             self._started = True
             self._thread.start()
 
-    def submit(self, path: str | Path) -> bool:
-        """Queue one automatic run, returning ``False`` when another run is active."""
+    def submit(self, path: str | Path, *, stepped: bool = False) -> bool:
+        """Queue one run, optionally pausing before each semantic upload operation."""
+        if not isinstance(stepped, bool):
+            raise TypeError("stepped must be a bool")
         self.start()
         candidate = Path(path).expanduser()
         with self._snapshot_lock:
             if self._stopping or self._snapshot.busy:
                 return False
             self._abort_requested.clear()
+            self._discard_advance_commands()
+            self._advance_request_pending = False
             self._idle.clear()
             self._snapshot = RunSnapshot(
                 state=WorkerState.QUEUED,
                 detail="Waiting for the protocol worker.",
                 test_path=candidate,
+                stepped=stepped,
             )
-            self._commands.put(_RunCommand(candidate))
+            self._commands.put(_RunCommand(candidate, stepped))
         return True
+
+    def step(self) -> bool:
+        """Release one operation when a stepped run is paused at its gate."""
+        return self._request_advance(_AdvanceCommand.STEP)
+
+    def continue_run(self) -> bool:
+        """Release the gate and make the remainder of the run automatic."""
+        return self._request_advance(_AdvanceCommand.CONTINUE)
 
     def abort(self) -> bool:
         """Request cancellation of the active run without touching protocol objects."""
@@ -175,6 +204,23 @@ class ProtocolWorker:
                 state=WorkerState.ABORTING,
                 detail="Abort requested; waiting for the protocol worker.",
             )
+        return True
+
+    def _request_advance(self, command: _AdvanceCommand) -> bool:
+        with self._snapshot_lock:
+            if (
+                self._snapshot.state is not WorkerState.WAITING_FOR_OPERATOR
+                or self._snapshot.next_operation is None
+                or self._advance_request_pending
+            ):
+                return False
+            self._advance_request_pending = True
+            self._snapshot = _updated_snapshot(
+                self._snapshot,
+                detail=f"{command.value.capitalize()} requested for "
+                f"{self._snapshot.next_operation}.",
+            )
+            self._advance_commands.put(command)
         return True
 
     def snapshot(self) -> RunSnapshot:
@@ -208,12 +254,12 @@ class ProtocolWorker:
             if isinstance(command, _StopWorker):
                 break
             try:
-                self._execute_run(command.path)
+                self._execute_run(command.path, stepped=command.stepped)
             finally:
                 self._idle.set()
         self._set_snapshot(state=WorkerState.STOPPED, detail="Protocol worker stopped.")
 
-    def _execute_run(self, requested_path: Path) -> None:
+    def _execute_run(self, requested_path: Path, *, stepped: bool) -> None:
         connection: Any | None = None
         builder: CapturedRunBuilder | None = None
         output_directory: Path | None = None
@@ -223,11 +269,13 @@ class ProtocolWorker:
                 state=WorkerState.LOADING,
                 detail="Loading and compiling the test definition.",
                 test_path=requested_path,
+                stepped=stepped,
+                next_operation=None,
             )
             path, compiled = load_test_definition(requested_path)
             if compiled.start_mode == "EXTERNAL_TRIGGER":
                 raise DefinitionFileError(
-                    "Automatic terminal runs do not yet support EXTERNAL_TRIGGER start mode"
+                    "Terminal runs do not yet support EXTERNAL_TRIGGER start mode"
                 )
             run_id = secrets.randbits(128)
             output_directory = create_run_directory(path, compiled, run_id=run_id)
@@ -262,12 +310,21 @@ class ProtocolWorker:
                 firmware_version=info.firmware_version,
             )
             connection.bind_result_builder(builder)
-            connection.queue_upload(compiled, upload_attempt=attempt)
+            connection.queue_upload(
+                compiled,
+                upload_attempt=attempt,
+                advance_mode=(
+                    UploadAdvanceMode.OPERATOR_GATED
+                    if stepped
+                    else UploadAdvanceMode.AUTOMATIC
+                ),
+            )
             self._notify(f"Connected to firmware {info.firmware_version}; uploading the test...")
 
             host_start_requested = False
             while not connection.results_complete:
                 self._raise_if_aborted()
+                advance_applied = self._apply_operator_command(connection)
                 service_report = connection.service()
                 received_tick_count += len(service_report.stored_tick_results)
                 if (
@@ -281,6 +338,9 @@ class ProtocolWorker:
                     connection,
                     received_tick_count,
                 )
+                if advance_applied:
+                    with self._snapshot_lock:
+                        self._advance_request_pending = False
                 self._pause()
 
             self._set_snapshot(
@@ -340,6 +400,9 @@ class ProtocolWorker:
                 with suppress(BaseException):
                     connection.close()
             self._abort_requested.clear()
+            with self._snapshot_lock:
+                self._advance_request_pending = False
+            self._discard_advance_commands()
 
     def _record_protocol_progress(
         self,
@@ -347,13 +410,54 @@ class ProtocolWorker:
         received_tick_count: int,
     ) -> None:
         protocol_state = connection.workflow_state
-        state, detail = _worker_state_for_protocol(protocol_state, received_tick_count)
+        previous = self.snapshot()
+        next_operation = None
+        if connection.waiting_for_operator:
+            operation = connection.next_upload_operation
+            next_operation = operation.label if operation is not None else None
+            state = WorkerState.WAITING_FOR_OPERATOR
+            detail = f"Paused before {next_operation}; enter 'step' or 'continue'."
+        else:
+            state, detail = _worker_state_for_protocol(protocol_state, received_tick_count)
         self._set_snapshot(
             state=state,
             detail=detail,
             protocol_state=protocol_state.value,
             received_tick_count=received_tick_count,
+            next_operation=next_operation,
         )
+        if state is WorkerState.WAITING_FOR_OPERATOR and (
+            previous.state is not WorkerState.WAITING_FOR_OPERATOR
+            or previous.next_operation != next_operation
+        ):
+            self._notify(
+                f"Paused before {next_operation}. Enter 'step' to release it or "
+                "'continue' to finish automatically."
+            )
+
+    def _apply_operator_command(self, connection: Any) -> bool:
+        if not connection.waiting_for_operator:
+            return False
+        try:
+            command = self._advance_commands.get_nowait()
+        except queue.Empty:
+            return False
+        if command is _AdvanceCommand.STEP:
+            operation = connection.release_next_operation()
+            self._notify(f"Released {operation.label}.")
+        else:
+            operation = connection.continue_upload()
+            self._notify(
+                f"Released {operation.label}; the remainder of the run is automatic."
+            )
+        return True
+
+    def _discard_advance_commands(self) -> None:
+        while True:
+            try:
+                self._advance_commands.get_nowait()
+            except queue.Empty:
+                return
 
     def _attempt_protocol_abort(self, connection: Any) -> None:
         if connection.active_upload is None:
@@ -493,6 +597,8 @@ def _updated_snapshot(snapshot: RunSnapshot, **changes: object) -> RunSnapshot:
         "expected_tick_count": snapshot.expected_tick_count,
         "verdict": snapshot.verdict,
         "error": snapshot.error,
+        "stepped": snapshot.stepped,
+        "next_operation": snapshot.next_operation,
     }
     values.update(changes)
     return RunSnapshot(**values)  # type: ignore[arg-type]

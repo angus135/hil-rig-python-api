@@ -1,4 +1,4 @@
-"""Persistent command-line application for automatic HIL-RIG runs."""
+"""Persistent command-line application for automatic or stepped HIL-RIG runs."""
 
 from __future__ import annotations
 
@@ -30,15 +30,17 @@ class HilRigShell(cmd.Cmd):
         self.worker.start()
 
     def do_run(self, argument: str) -> None:
-        """run <path> -- Load and automatically execute one Python test definition."""
-        path = _path_argument(argument)
-        if path is None:
-            self._write_line('Usage: run "path to test.py"')
+        """run [--step] <path> -- Execute a Python test definition."""
+        parsed = _run_argument(argument)
+        if parsed is None:
+            self._write_line('Usage: run [--step] "path to test.py"')
             return
-        if not self.worker.submit(path):
+        path, stepped = parsed
+        if not self.worker.submit(path, stepped=stepped):
             self._write_line("A test is already active. Use 'status' or 'abort'.")
             return
-        self._write_line(f"Run queued: {path}")
+        mode = "Stepped run" if stepped else "Run"
+        self._write_line(f"{mode} queued: {path}")
 
     def do_help(self, argument: str) -> None:
         """help -- Show the commands available in this first terminal version."""
@@ -47,12 +49,35 @@ class HilRigShell(cmd.Cmd):
             return
         self._write_line(
             "Commands:\n"
-            "  run <path>  Load and automatically execute a test-definition file.\n"
-            "  status      Show the current or most recently completed run.\n"
-            "  abort       Request cancellation of the active run.\n"
-            "  help        Show this command list.\n"
-            "  quit        Abort any active run and close the terminal."
+            "  run <path>         Load and automatically execute a test-definition file.\n"
+            "  run --step <path>  Pause before configuration, each tick, and START.\n"
+            "  step               Release exactly one paused operation.\n"
+            "  continue           Release the gate and finish automatically.\n"
+            "  status             Show the current or most recently completed run.\n"
+            "  abort              Request cancellation of the active run.\n"
+            "  help               Show this command list.\n"
+            "  quit               Abort any active run and close the terminal."
         )
+
+    def do_step(self, argument: str) -> None:
+        """step -- Release one operation in a paused stepped run."""
+        if argument.strip():
+            self._write_line("Usage: step")
+            return
+        if self.worker.step():
+            self._write_line("Step requested.")
+        else:
+            self._write_line("No stepped run is currently paused.")
+
+    def do_continue(self, argument: str) -> None:
+        """continue -- Make the remainder of a paused stepped run automatic."""
+        if argument.strip():
+            self._write_line("Usage: continue")
+            return
+        if self.worker.continue_run():
+            self._write_line("Continue requested; the remainder will run automatically.")
+        else:
+            self._write_line("No stepped run is currently paused.")
 
     def do_status(self, argument: str) -> None:
         """status -- Show the current or most recently completed run."""
@@ -133,6 +158,20 @@ def _path_argument(argument: str) -> Path | None:
     return Path(value)
 
 
+def _run_argument(argument: str) -> tuple[Path, bool] | None:
+    value = argument.strip()
+    stepped = False
+    if value == "--step":
+        return None
+    if value.startswith("--step") and len(value) > len("--step"):
+        separator = value[len("--step")]
+        if separator.isspace():
+            stepped = True
+            value = value[len("--step") :].strip()
+    path = _path_argument(value)
+    return None if path is None else (path, stepped)
+
+
 def _format_status(snapshot: RunSnapshot) -> str:
     lines = [f"State: {snapshot.state.value}", f"Detail: {snapshot.detail}"]
     if snapshot.test_name is not None:
@@ -141,6 +180,10 @@ def _format_status(snapshot: RunSnapshot) -> str:
         lines.append(f"Definition: {snapshot.test_path}")
     if snapshot.protocol_state is not None:
         lines.append(f"Protocol: {snapshot.protocol_state}")
+    if snapshot.stepped:
+        lines.append("Mode: stepped")
+    if snapshot.next_operation is not None:
+        lines.append(f"Next operation: {snapshot.next_operation}")
     if snapshot.expected_tick_count:
         lines.append(
             f"Results: {snapshot.received_tick_count}/{snapshot.expected_tick_count} ticks"

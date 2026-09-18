@@ -206,16 +206,16 @@ state, and the merged state is emitted once for tick zero.
 The installed terminal application adds a deliberately thin layer above this
 connection. The main thread owns command input and immutable status rendering. A
 dedicated protocol worker thread creates and exclusively owns every
-`FixedIOProtocolConnection`, receives `run` and `abort` requests through thread-safe
-signals, and publishes immutable snapshots and user-facing notifications. Test files
+`FixedIOProtocolConnection`, receives run, step, continue, and abort requests through
+thread-safe signals, and publishes immutable snapshots and user-facing notifications. Test files
 expose `build_test() -> Test`; they do not own protocol or artifact lifetimes.
 
-The worker currently executes only the automatic strict workflow. Its boundary is
-operation-oriented rather than encoded-message-oriented: it observes public workflow
-states and never reaches into the connection's pending message queue. A later semantic
-gate can therefore release one complete configuration or tick operation, even when a
-future operation contains several variable-peripheral messages followed by one
-Application Response, without changing the terminal/worker threading model.
+The worker supports the automatic strict workflow and an operator-stepped variant. Its
+boundary is operation-oriented rather than encoded-message-oriented: it observes public
+workflow states and releases public `UploadOperation` objects, never individual encoded
+messages. One gate release therefore covers a complete configuration, tick, or START
+operation. A future operation can contain several variable-peripheral messages followed
+by one Application Response without changing the terminal/worker threading model.
 
 The caller repeatedly invokes non-blocking `service()`. The connection retains partial
 Transport input and serial output, advances Transport with monotonic wrapped
@@ -227,11 +227,15 @@ contains one fixed instruction today and can later contain declared communicatio
 without changing the stop-and-wait state machine.
 
 Every established Transport session begins with BASIC System Information discovery and
-an exact major/minor/patch compatibility check. The response-gated sequence is Test
-Configuration, each non-consecutive sparse tick, automatic Complete Test validation,
-and optional START. IMMEDIATE queues START automatically; HOST_COMMAND waits for an
-explicit `start()` call. EXTERNAL_TRIGGER remains in the protocol-neutral IR but has no
-protocol behavior. ABORT and RESET_APPLICATION use the same single-outstanding-operation
+an exact major/minor/patch compatibility check. `UploadPlan` then supplies ordered,
+immutable operations containing their wire-message group and response-correlation
+metadata. The response-gated sequence is Test Configuration, each non-consecutive sparse
+tick, passive Complete Test validation, and optional START. Automatic mode preserves the
+start-mode behavior: IMMEDIATE queues START automatically and HOST_COMMAND waits for an
+explicit `start()` call. Operator-gated mode pauses configuration, every tick, and START;
+Complete Test remains automatic. `continue_upload()` switches the remaining plan back to
+automatic advancement without bypassing acknowledgements. EXTERNAL_TRIGGER remains in
+the protocol-neutral IR but has no protocol behavior. ABORT and RESET_APPLICATION use the same single-outstanding-operation
 mechanism. Session reset, delivery failure, response timeout, negative response, or
 correlation mismatch abandons the workflow; an upload is never blindly replayed.
 

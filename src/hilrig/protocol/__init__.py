@@ -3,6 +3,10 @@
 from hilrig.protocol.application import (
     FixedIOProtocolAdapter,
     FixedIOUploadMessages,
+    ResponseCorrelation,
+    UploadOperation,
+    UploadOperationKind,
+    UploadPlan,
     application_test_id_from_bytes,
     application_test_id_to_bytes,
 )
@@ -11,6 +15,7 @@ from hilrig.protocol.connection import (
     ProtocolServiceReport,
     ProtocolWorkflowState,
     RigSystemInfo,
+    UploadAdvanceMode,
     monotonic_now_ms,
 )
 from hilrig.protocol.serial import (
@@ -26,7 +31,12 @@ __all__ = [
     "ProtocolServiceReport",
     "ProtocolWorkflowState",
     "RigSystemInfo",
+    "ResponseCorrelation",
     "SerialConnectionSettings",
+    "UploadAdvanceMode",
+    "UploadOperation",
+    "UploadOperationKind",
+    "UploadPlan",
     "application_test_id_from_bytes",
     "application_test_id_to_bytes",
     "discover_serial_port",
