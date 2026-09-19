@@ -24,8 +24,13 @@ class SerialConnectionSettings:
     write_timeout_s: float = 1.0
     dtr: bool = False
     rts: bool = False
+    device: str | None = None
 
     def __post_init__(self) -> None:
+        if self.device is not None and (
+            not isinstance(self.device, str) or not self.device.strip()
+        ):
+            raise ValueError("device must be a non-empty string or None")
         if not isinstance(self.device_description, str) or not self.device_description:
             raise ValueError("device_description must be a non-empty string")
         if self.baud_rate != 115_200:
@@ -80,7 +85,7 @@ def open_serial_port(
     elif not isinstance(settings, SerialConnectionSettings):
         raise TypeError("settings must be SerialConnectionSettings or None")
 
-    device = discover_serial_port(
+    device = settings.device or discover_serial_port(
         description=settings.device_description,
         comports=comports,
     )

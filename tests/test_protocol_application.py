@@ -15,6 +15,7 @@ from hilrig import (
     LogicVoltage,
     StartMode,
     UploadAttempt,
+    UploadOperationKind,
 )
 from hilrig import Test as HilRigTest
 
@@ -130,6 +131,28 @@ def test_upload_encoding_keeps_configuration_first() -> None:
     assert len(encoded) == len(upload.instructions) + 1
     assert adapter.codec.encoded[encoded[0]] is upload.configuration
     assert adapter.codec.encoded[encoded[1]] is upload.instructions[0]
+
+
+def test_upload_plan_groups_messages_by_semantic_operation_and_owns_correlation() -> None:
+    adapter = FixedIOProtocolAdapter(protocol_module=FakeProtocol)
+
+    plan = adapter.build_upload_plan(_compiled_fixed_io_test())
+
+    assert [operation.kind for operation in plan.operations] == [
+        UploadOperationKind.CONFIGURATION,
+        *([UploadOperationKind.TICK] * len(plan.upload.instructions)),
+        UploadOperationKind.START,
+    ]
+    assert all(len(operation.encoded_messages) == 1 for operation in plan.operations)
+    assert (
+        plan.transfer_operations[0].response.scope
+        is FakeProtocol.ResponseScope.TEST_CONFIGURATION
+    )
+    assert [operation.tick for operation in plan.transfer_operations[1:]] == [
+        instruction.tick_number for instruction in plan.upload.instructions
+    ]
+    assert plan.start_operation is not None
+    assert plan.start_operation.response.control_command is ControlCommand.START
 
 
 def test_control_flow_builders_use_the_upload_attempt_wire_id() -> None:

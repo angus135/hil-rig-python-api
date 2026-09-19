@@ -68,3 +68,34 @@ def test_open_declares_requested_line_settings_and_disables_dtr_rts() -> None:
         "dsrdtr": False,
     }
     assert serial_port.opened_with == ("COM12", False, False)
+
+
+def test_open_uses_an_explicit_device_without_running_discovery() -> None:
+    discovered = False
+
+    class SerialPort:
+        def __init__(self, **kwargs: object) -> None:
+            self.dtr = True
+            self.rts = True
+            self.port = None
+            self.opened_with: tuple[str | None, bool, bool] | None = None
+
+        def open(self) -> None:
+            self.opened_with = (self.port, self.dtr, self.rts)
+
+        def close(self) -> None:
+            pass
+
+    def comports() -> list[object]:
+        nonlocal discovered
+        discovered = True
+        return []
+
+    serial_port = open_serial_port(
+        SerialConnectionSettings(device="COM2"),
+        serial_factory=SerialPort,
+        comports=comports,
+    )
+
+    assert not discovered
+    assert serial_port.opened_with == ("COM2", False, False)

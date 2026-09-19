@@ -41,6 +41,205 @@ python -m pip install -e ".[dev]"
 The editable install (`-e`) means changes under `src/hilrig/` are used immediately
 without reinstalling the package.
 
+## HIL-RIG terminal application
+
+The installed `hil-rig` command starts a persistent terminal application. It runs one
+test at a time on a dedicated protocol worker thread, so the terminal stays responsive
+to status and abort commands while the worker owns and services the USB connection.
+
+Start it from an activated development environment:
+
+```powershell
+hil-rig
+```
+
+It can also be started without activating the environment:
+
+```powershell
+.\.venv\Scripts\hil-rig.exe
+```
+
+A terminal-loadable Python test file must define a no-argument `build_test()` function
+that creates and returns a fresh `hilrig.Test`. The file describes the test only; the
+terminal owns compilation, connection, upload, capture, evaluation, and output files:
+
+```python
+from hilrig import FrequencyMode, LogicVoltage, StartMode, Test
+
+
+def build_test() -> Test:
+    test = Test(name="Observation test")
+    test.configure(
+        frequency_mode=FrequencyMode.HZ_1K,
+        start_mode=StartMode.IMMEDIATE,
+    )
+    test.digital_input(channel=0).configure(voltage=LogicVoltage.V3_3)
+    return test
+```
+
+Test-definition files are trusted Python code. Loading one executes its top-level code
+before `build_test()` is called. Do not run files from untrusted sources.
+
+The terminal provides these commands:
+
+```text
+help
+run <path>
+run --step <path>
+step
+continue
+status
+abort
+manual connect [COM=<n>] [--skip-system-info]
+manual send <message-file> [--transport-only]
+manual inbox
+manual status
+manual disconnect
+quit
+```
+
+Paths containing spaces may be quoted. For example:
+
+```text
+HIL-RIG> run "C:\HIL-RIG Tests\motor-startup.py"
+Run queued: C:\HIL-RIG Tests\motor-startup.py
+
+HIL-RIG> status
+State: running
+Detail: Receiving test results (412 received).
+Results: 412/1751 ticks
+```
+
+`run` uses the strict protocol-v0.2 workflow: System Information discovery, exact
+version confirmation, correlated Application Responses for configuration and sparse
+ticks, Complete Test acceptance, START completion, and the complete ordered result
+set. `HOST_COMMAND` tests are started automatically by this automatic runner after
+upload acceptance.
+
+Use `run --step <path>` when debugging the upload/start sequence. Discovery and version
+confirmation still happen automatically. The terminal then pauses before each semantic
+operation in this order:
+
+```text
+configuration -> tick <n> -> tick <n> -> ... -> START
+```
+
+At a pause, `step` releases exactly that one operation. An operation may contain more
+than one wire message in future protocol versions; it remains one terminal step. After
+release, the worker waits for Transport delivery and the operation's correlated
+Application Response before offering the next step. Firmware Complete Test validation
+is passive and automatic, so there is no separate step for it. START is always a manual
+step in stepped mode, including for tests configured with `StartMode.IMMEDIATE`.
+
+`continue` releases the currently paused operation and disables stepping for the rest
+of that run. It does not disable delivery checks, Application acknowledgements,
+correlation, or timeouts. Test results are received continuously after START; individual
+result messages are not stepped. `step` and `continue` report an error if no stepped run
+is currently paused. `status` shows the next operation while a run is waiting:
+
+```text
+HIL-RIG> run --step "examples\terminal_test.py"
+Stepped run queued: examples\terminal_test.py
+
+Paused before configuration. Enter 'step' to release it or 'continue' to finish automatically.
+HIL-RIG> step
+Step requested.
+
+Paused before tick 100. Enter 'step' to release it or 'continue' to finish automatically.
+HIL-RIG> continue
+Continue requested; the remainder will run automatically.
+```
+
+`EXTERNAL_TRIGGER` is not supported by the terminal runner.
+
+### Manual Application-message mode
+
+Manual mode is independent of test definitions, upload plans, captured-run databases,
+and evaluation. It keeps one protocol connection open so standalone JSON Application
+messages can be sent for firmware debugging.
+
+Connect using automatic COM-port discovery:
+
+```text
+HIL-RIG> manual connect
+```
+
+Or select a Windows COM port explicitly and optionally skip the Application-level
+System Information request/version check:
+
+```text
+HIL-RIG> manual connect COM=2 --skip-system-info
+```
+
+`COM=2` opens `COM2` directly. When it is omitted, the host retains its normal behavior
+of selecting the first port whose description is exactly `USB Serial Device`.
+`--skip-system-info` does not skip COM discovery or Transport session establishment.
+
+Send one message and require both Transport delivery and its correlated Application
+Response:
+
+```text
+HIL-RIG> manual send "examples\manual_messages\instruction.json"
+```
+
+To finish the send after reliable Transport delivery without requiring an Application
+Response, add `--transport-only`:
+
+```text
+HIL-RIG> manual send "examples\manual_messages\instruction.json" --transport-only
+```
+
+Inbound messages—including responses received after a Transport-only send—are retained
+in a bounded terminal inbox:
+
+```text
+HIL-RIG> manual inbox
+HIL-RIG> manual status
+HIL-RIG> manual disconnect
+```
+
+A manual session and a normal test run cannot own the serial connection at the same
+time. The current standalone JSON loader supports `test_configuration`,
+`test_instruction`, `execution_control`, and `global_control`. Example files are in
+[`examples/manual_messages`](examples/manual_messages). Configuration channels omitted
+from a file are disabled. Instruction outputs omitted from a file are encoded as their
+protocol zero/false values, so the JSON describes the complete emitted message rather
+than modifying a retained test definition.
+
+Each run creates a unique directory beside the test file:
+
+```text
+runs/
+`-- 20260916-184200-observation-test-<run-id>/
+    |-- test-definition.json
+    |-- test-review.xlsx
+    |-- captured-run.sqlite3
+    |-- run-manifest.json
+    |-- fixed-results.csv
+    |-- communication-results.csv
+    |-- application-errors.csv
+    |-- evaluation-report.json
+    `-- evaluation-report.md
+```
+
+The terminal prints that directory when the run finishes. An aborted run retains and
+reports any partial capture. A failed run writes `run-error.txt` when its output
+directory had already been created. After a run completes, fails, or is aborted, the
+same terminal can run another test. The initial implementation opens a fresh protocol
+connection for every run.
+
+See [`examples/terminal_test.py`](examples/terminal_test.py) for a dedicated terminal
+definition. The existing [`examples/basic_digital_test.py`](examples/basic_digital_test.py)
+also follows the contract and can either be loaded by the terminal or executed directly:
+
+```text
+HIL-RIG> run "examples\basic_digital_test.py"
+```
+
+`examples/captured_run.py` and `examples/assertion_evaluator.py` are offline
+demonstrations that fabricate captured data, so they are not terminal-loadable hardware
+test definitions. `examples/example_test.py` also retains its older standalone form.
+
 ## Current API example
 
 ```python
@@ -349,8 +548,10 @@ measurements. The capture database retains both the wire ID and immutable logica
 
 ## Fixed-I/O protocol and USB CDC connection
 
-`FixedIOProtocolAdapter` turns a `CompiledTestIR` and `UploadAttempt` into the public
-`hil-rig-protocol` values. Configuration arrays are always complete; unconfigured
+`FixedIOProtocolAdapter` turns a `CompiledTestIR` and `UploadAttempt` into an
+`UploadPlan` of semantic `UploadOperation` objects and the public `hil-rig-protocol`
+values. Each operation owns all its encoded messages and its expected response
+correlation. Configuration arrays are always complete; unconfigured
 channels use canonical disabled records. Communication peripheral configuration and
 instructions stay in the host IR but are deliberately not emitted yet.
 
@@ -408,7 +609,10 @@ and their correlated Application Response before the next operation is submitted
 After the final sparse tick is accepted, the connection waits for the firmware's
 Complete Test Response.
 
-`IMMEDIATE` automatically queues `START`; `HOST_COMMAND` exposes `connection.start()`.
+By default, `IMMEDIATE` automatically queues `START`; `HOST_COMMAND` exposes
+`connection.start()`. Passing `advance_mode=UploadAdvanceMode.OPERATOR_GATED` to
+`queue_upload()` instead pauses configuration, each tick operation, and START behind
+`release_next_operation()`/`continue_upload()` while retaining all response checks.
 `connection.abort()` and `connection.reset_application()` send the corresponding
 response-gated controls. `EXTERNAL_TRIGGER` remains representable in the compiled IR
 but intentionally performs no protocol action. Responses are correlated by scope,
@@ -547,8 +751,11 @@ python -m ruff format .
 |-- .github/workflows/ci.yml       Pull request and main-branch checks
 |-- docs/architecture.md           Model boundaries and extension guide
 |-- examples/basic_digital_test.py Small runnable example
+|-- reference.md                   Teammate-oriented repository and change guide
 |-- src/hilrig/                    Installable Python package
 |   |-- api.py                     Public Test and channel-handle API
+|   |-- runner.py                  Automatic run controller and protocol worker
+|   |-- terminal.py                Persistent `hil-rig` command shell
 |   |-- timing.py                  Exact conversion into ticks
 |   |-- compiler.py                Validation and immutable IR snapshot construction
 |   |-- exporters/                 JSON machine IR and human-readable Excel export
@@ -561,7 +768,8 @@ python -m ruff format .
 `-- pyproject.toml                 Package, dependency, and tool configuration
 ```
 
-See [docs/architecture.md](docs/architecture.md) for the current model boundaries.
+See [reference.md](reference.md) for a practical repository map and change guide, and
+[docs/architecture.md](docs/architecture.md) for the detailed model boundaries.
 
 ## Continuous integration
 

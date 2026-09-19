@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from enum import Enum
 from importlib import import_module
 from itertools import groupby
 from types import ModuleType
@@ -58,6 +59,78 @@ class FixedIOUploadMessages:
     def messages(self) -> tuple[object, ...]:
         """Return the configuration followed by every sparse instruction state."""
         return (self.configuration, *self.instructions)
+
+
+class UploadOperationKind(str, Enum):
+    """Semantic host operations that may be released through an operator gate."""
+
+    CONFIGURATION = "configuration"
+    TICK = "tick"
+    START = "start"
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseCorrelation:
+    """Application Response fields expected for one semantic operation."""
+
+    scope: object
+    successful_outcome: object
+    application_test_id: int | None
+    tick: int | None = None
+    control_command: object | None = None
+    global_control_command: object | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class UploadOperation:
+    """One semantic upload action and every wire message needed to perform it."""
+
+    kind: UploadOperationKind
+    encoded_messages: tuple[bytes, ...]
+    response: ResponseCorrelation
+
+    @property
+    def tick(self) -> int | None:
+        """Return the correlated tick for a tick operation, otherwise ``None``."""
+        return self.response.tick
+
+    @property
+    def label(self) -> str:
+        """Return a concise operator-facing description."""
+        if self.kind is UploadOperationKind.TICK:
+            return f"tick {self.tick}"
+        if self.kind is UploadOperationKind.START:
+            return "START"
+        return "configuration"
+
+
+@dataclass(frozen=True, slots=True)
+class UploadPlan:
+    """Ordered semantic operations for one fixed-I/O upload and execution start."""
+
+    upload: FixedIOUploadMessages
+    operations: tuple[UploadOperation, ...]
+
+    @property
+    def transfer_operations(self) -> tuple[UploadOperation, ...]:
+        """Return configuration and tick operations, excluding START."""
+        return tuple(
+            operation
+            for operation in self.operations
+            if operation.kind is not UploadOperationKind.START
+        )
+
+    @property
+    def start_operation(self) -> UploadOperation | None:
+        """Return the planned START operation, when this start mode uses one."""
+        return next(
+            (
+                operation
+                for operation in self.operations
+                if operation.kind is UploadOperationKind.START
+            ),
+            None,
+        )
 
 
 @dataclass(slots=True)
@@ -130,6 +203,62 @@ class FixedIOProtocolAdapter:
         if not isinstance(upload, FixedIOUploadMessages):
             raise TypeError("upload must be FixedIOUploadMessages")
         return tuple(self.codec.encode(message) for message in upload.messages)
+
+    def build_upload_plan(
+        self,
+        compiled_test: CompiledTestIR,
+        *,
+        upload_attempt: UploadAttempt | None = None,
+    ) -> UploadPlan:
+        """Build response-correlated semantic operations for one test attempt.
+
+        Each operation currently contains one encoded message. Keeping that grouping
+        here means a future tick can contain several wire messages without changing
+        connection gating or terminal stepping.
+        """
+        upload = self.build_upload(compiled_test, upload_attempt=upload_attempt)
+        encoded = self.encode_upload(upload)
+        p = self.protocol
+        application_test_id = upload.upload_attempt.application_test_id
+        operations = [
+            UploadOperation(
+                kind=UploadOperationKind.CONFIGURATION,
+                encoded_messages=(encoded[0],),
+                response=ResponseCorrelation(
+                    scope=p.ResponseScope.TEST_CONFIGURATION,
+                    successful_outcome=p.ResponseOutcome.ACCEPTED,
+                    application_test_id=application_test_id,
+                ),
+            )
+        ]
+        operations.extend(
+            UploadOperation(
+                kind=UploadOperationKind.TICK,
+                encoded_messages=(wire,),
+                response=ResponseCorrelation(
+                    scope=p.ResponseScope.TICK,
+                    successful_outcome=p.ResponseOutcome.ACCEPTED,
+                    application_test_id=application_test_id,
+                    tick=message.tick_number,
+                ),
+            )
+            for message, wire in zip(upload.instructions, encoded[1:], strict=True)
+        )
+        if upload.start_mode != "EXTERNAL_TRIGGER":
+            start = self.build_start(upload.upload_attempt)
+            operations.append(
+                UploadOperation(
+                    kind=UploadOperationKind.START,
+                    encoded_messages=(self.encode(start),),
+                    response=ResponseCorrelation(
+                        scope=p.ResponseScope.EXECUTION_CONTROL,
+                        successful_outcome=p.ResponseOutcome.COMPLETED,
+                        application_test_id=application_test_id,
+                        control_command=p.ControlCommand.START,
+                    ),
+                )
+            )
+        return UploadPlan(upload=upload, operations=tuple(operations))
 
     def decode(self, data: bytes) -> object:
         """Decode one complete Application message received from Transport."""
@@ -469,6 +598,10 @@ def _apply_instruction(
 __all__ = [
     "FixedIOProtocolAdapter",
     "FixedIOUploadMessages",
+    "ResponseCorrelation",
+    "UploadOperation",
+    "UploadOperationKind",
+    "UploadPlan",
     "application_test_id_from_bytes",
     "application_test_id_to_bytes",
 ]
