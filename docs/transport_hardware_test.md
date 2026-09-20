@@ -2,16 +2,17 @@
 
 This package is temporary test infrastructure for exercising the shared HIL-RIG protocol
 against the MCU over USB CDC. It retains the Transport hardware-test scenarios from PR #2
-and adds fixed Application Test Configuration, Test Instruction, and Test Result coverage.
+and adds the v0.3.0 Application upload, finalization, deferred-result, and variable-result
+coverage.
 It is intentionally kept under `hilrig.protocol_test` and is not integrated into the
 production-facing `hilrig` execution API.
 
 ## Compatibility
 
 The protocol source of truth is the submodule at `external/hil-rig-protocol`. This checkout
-pins protocol commit `49431179c7ba30cbce09c1d20df8cde7780b0840` (version **0.2.0**), and the paired firmware advertises
-compatibility profile **`0x41505031`**. The harness fails STATUS compatibility checks if
-those runtime values do not match, if STATUS is not schema 2, or if the firmware reports
+pins protocol commit `cc1e6f29c7deb39c0dffc7edd1f4defc10fc1674` (version **0.3.0**), and the paired firmware advertises
+compatibility profile **`0x41505032`**. The harness fails STATUS compatibility checks if
+those runtime values do not match, if STATUS is not schema 3, or if the firmware reports
 that its Application codec failed to initialize.
 
 Git commits are evidence, not compatibility gates. A ZIP may contain no `.git` metadata.
@@ -88,7 +89,6 @@ The hardware-test `ApplicationCodec` is constructed with:
 ```text
 max_encoded_message_size = 512
 max_variable_data_size = 255
-max_variable_transfers_per_tick = 8
 max_expected_tick_count = 1,000,000
 ```
 
@@ -99,17 +99,20 @@ Expected encoded sizes are:
 
 | Message | Bytes |
 | --- | ---: |
-| All-disabled Test Configuration | 226 |
-| Representative Test Configuration | 242 |
-| Maximum-extension Test Configuration | 481 |
+| All-disabled Test Configuration | 194 |
+| Representative Test Configuration | 210 |
+| Maximum-extension Test Configuration | 449 |
 | Fixed Test Instruction | 73 |
 | Fixed Test Result | 62 |
+| Variable result sample | 99 |
+| Update Instruction (maximum fixture) | 73 |
+| Finalize Test Upload | 27 |
 | Fixed Application Response | 36 |
 | Application Error | 35 + diagnostic byte count |
 
 Semantic digests use unsigned 32-bit FNV-1a over explicitly typed values in protocol wire
 widths and little-endian order. Test IDs are deliberately excluded. Configuration golden
-digests are `0x98E57BA3`, `0xDF35534C`, and `0x60672F03` for all-disabled,
+digests are `0xBA7FAE23`, `0xE5B6A67E`, and `0x71EF1F9D` for all-disabled,
 representative, and maximum-extension fixtures respectively. The three representative
 instruction digests produced by that same serialization contract are `0x80089EF8`,
 `0x8DE22BBE`, and `0x6AC9DD7A`.
@@ -121,12 +124,12 @@ digital inputs and PWM outputs to PWM inputs, and requires `condition=OK` with
 - analogue input 0: `configuration_semantic_digest(configuration) % 20_000_001`;
 - analogue input 1: `instruction_semantic_digest(instruction) % 20_000_001`.
 
-Representative analogue input 0 is `4_813_713`; analogue input 1 values for ticks 0 to 2
+Representative analogue input 0 is `13_952_446`; analogue input 1 values for ticks 0 to 2
 are `8_048_525`, `409_671`, and `11_614_241`. Maximum-extension analogue input 0 is
-`17_374_899`. Disabled captured channels, including both analogue inputs, use their
+`11_496_510`. Disabled captured channels, including both analogue inputs, use their
 canonical zero values.
 
-## HRTP and STATUS schema 2
+## HRTP and STATUS schema 3
 
 HRTP remains a test-only diagnostic envelope. Its 16-byte little-endian header is:
 
@@ -141,12 +144,12 @@ HRTP remains a test-only diagnostic envelope. Its 16-byte little-endian header i
 | 16 | N | payload |
 
 Opcodes are `0x01` ECHO request, `0x81` ECHO response, `0x02` STATUS request, and `0x82`
-STATUS response. STATUS schema 2 is exactly 128 bytes: 32 consecutive little-endian
-`uint32_t` fields. The complete HRTP STATUS response is therefore 144 bytes.
+STATUS response. STATUS schema 3 is exactly 192 bytes: 48 consecutive little-endian
+`uint32_t` fields. The complete HRTP STATUS response is therefore 208 bytes.
 
 | Index | Field |
 | ---: | --- |
-| 0 | schema version = 2 |
+| 0 | schema version = 3 |
 | 1 | link state |
 | 2 | link generation |
 | 3 | Transport event count |
@@ -158,9 +161,9 @@ STATUS response. STATUS schema 2 is exactly 128 bytes: 32 consecutive little-end
 | 9 | invalid HRTP messages |
 | 10 | maximum service gap milliseconds |
 | 11 | Transport session state |
-| 12 | compatibility profile ID = `0x41505031` |
+| 12 | compatibility profile ID = `0x41505032` |
 | 13 | protocol version major = 0 |
-| 14 | protocol version minor = 2 |
+| 14 | protocol version minor = 3 |
 | 15 | protocol version patch = 0 |
 | 16 | Application codec initialized |
 | 17 | Application initialization status |
@@ -178,6 +181,22 @@ STATUS response. STATUS schema 2 is exactly 128 bytes: 32 consecutive little-end
 | 29 | last successfully decoded Application message type |
 | 30 | current/last configuration digest |
 | 31 | last instruction digest |
+| 32 | selected instruction family |
+| 33 | selected result family |
+| 34 | completed instruction ticks |
+| 35 | current upload chunk count |
+| 36 | maximum chunks per tick (8) |
+| 37 | finalization requests |
+| 38 | accepted finalizations |
+| 39 | accepted variable operations |
+| 40 | emitted result records |
+| 41 | capture overflow events |
+| 42 | I2C NOT_IMPLEMENTED rejections |
+| 43 | maximum decode storage required |
+| 44 | decode storage used |
+| 45 | selected test profile |
+| 46 | selected fault mode |
+| 47 | spontaneous output pending |
 
 The runner does not dual-decode STATUS v1. A schema/version/profile mismatch is an explicit
 compatibility failure.
@@ -194,12 +213,14 @@ Fixed Test Results are correlated by Test ID and tick, and duplicate `(Test ID, 
 results fail the scenario. Only one outbound reliable Application payload is active at a
 time.
 
-Configuration acceptance is not inferred from delivery. After delivery, STATUS must show
-that `configurations_accepted` increased, the configuration digest matches, state is
-`ACCEPTING_INSTRUCTIONS`, next tick is zero, and expected tick count is correct. After an
-instruction is delivered, exactly one non-HRTP message must decode as `TestResult` and
-match the deterministic oracle. The final result must leave the firmware state `COMPLETE`.
-Cumulative counters are checked with baseline/delta assertions.
+Configuration acceptance is not inferred from delivery. The firmware responds with an
+accepted configuration Response, then each fixed instruction or final variable update
+chunk receives an accepted response. Variable continuation chunks intentionally receive no
+response. The host sends `FINALIZE_TEST_UPLOAD`, waits for the accepted complete-test
+response, and then sends START. Results are emitted asynchronously through the single
+Transport pending slot; result acknowledgements are not sent. The runner correlates fixed
+or variable results by Test ID and tick, enforces at most eight chunks, and requires an
+empty result for an omitted sparse variable tick.
 
 ## CLI scenarios
 
@@ -220,14 +241,15 @@ Application commands are:
 hilrig-protocol-test application-smoke --port /dev/ttyACM0
 hilrig-protocol-test application-boundaries --port /dev/ttyACM0
 hilrig-protocol-test application-negative --port /dev/ttyACM0
-hilrig-protocol-test application-v02 --port /dev/ttyACM0
+hilrig-protocol-test application-v03 --port /dev/ttyACM0
 hilrig-protocol-test application-repeat --port /dev/ttyACM0 --count 100
 hilrig-protocol-test application-reset-reconnect --port /dev/ttyACM0
 ```
 
-`application-smoke` checks STATUS compatibility, accepts the representative configuration,
-sends ticks 0 to 2, validates all three deterministic results, and requires final state
-`COMPLETE`.
+`application-v03` checks STATUS compatibility, discovers the exact protocol version, runs a
+three-tick fixed transaction, and runs a three-tick sparse variable transaction using ticks
+0 and 2 only. It validates configuration/instruction/finalizer/start Responses, deferred
+fixed and variable results, result-family independence, and final `COMPLETE` state.
 
 `application-boundaries` independently completes the all-disabled configuration and the
 maximum-extension configuration, checks exact wire sizes/results, and proves an oversized
@@ -239,17 +261,9 @@ bytes, proves the decode-failure counter increments without changing the invalid
 counter, follows with a valid configuration, rejects a wrong-Test-ID instruction, and
 then completes the valid transaction.
 
-`application-v02` first performs the existing STATUS profile/version check and Application
-System Information discovery. It sends START, ABORT, and RESET_APPLICATION and requires
-their correlated synthetic Responses; round-trips all five Application Response scopes; and
-round-trips global, test-wide, and tick-specific Application Errors with empty, binary, and
-255-byte diagnostics. It finishes with STATUS and requires zero deltas in Application
-decode, semantic, and encode failure counters. Its trace records message family, scope/form,
-Test ID (or its absence), tick, wire size/hash, and delivery/response latency.
-
-The synthetic control Responses and inbound Response/Error round trips validate only the
-Application protocol data path added in v0.2.0. They do not implement or prove real
-execution, hardware abort behavior, or the final production state machine.
+The application harness is deterministic and synthetic. It validates the public protocol
+codec, Transport delivery, lifecycle gating, upload retention, backpressure, and result
+correlation; it does not drive or prove real GPIO, ADC, PWM, UART, SPI, I2C, or CAN behavior.
 
 `application-repeat` runs the requested number of complete one-tick transactions with
 fresh 16-byte Test IDs and records result latency/counter evidence.
@@ -272,7 +286,7 @@ seed, logging, and deterministic fault-injection controls.
 Every run writes a JSONL trace plus a final summary. In addition to Transport and serial
 information, Application runs record scenario, Test ID as hex, encoded message type and
 size, SHA-256 payload hash, configuration/instruction semantic digest, decoded result tick
-and condition, delivery-confirmation latency, STATUS v2 snapshots, expected versus actual
+and condition, delivery-confirmation latency, STATUS v3 snapshots, expected versus actual
 result details on failures, Application codec configuration, protocol version, and
 compatibility profile ID. Git commit/dirty information is recorded when observable and is
 explicitly unavailable otherwise.
@@ -281,7 +295,7 @@ explicitly unavailable otherwise.
 
 Physical tests are under `tests/hardware/` and use the `hardware` marker. They skip unless
 `HILRIG_TEST_PORT` or explicit USB identity variables are supplied. Application smoke,
-boundary, negative, v0.2.0, and repeat tests use the same opt-in. Set
+v0.3, boundary, negative, and repeat tests use the same opt-in. Set
 `HILRIG_TEST_APPLICATION_REPEAT_COUNT` to change the default repeat count of 10.
 
 Manual reset tests remain separately opt-in with `HILRIG_TEST_MANUAL_RESET=1`. Long soak

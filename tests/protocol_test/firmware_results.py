@@ -33,10 +33,10 @@ def firmware_result(
         ("analog_out", "B"),
         ("pwm_in", "BB"),
         ("pwm_out", "BBIH"),
-        ("can", "BIIHH"),
-        ("spi", "BIBBBBBI"),
-        ("uart", "BIBBBBBBI"),
-        ("i2c", "BIBHBBI"),
+        ("can", "BIHH"),
+        ("spi", "BIBBBBB"),
+        ("uart", "BIBBBBBB"),
+        ("i2c", "BIBHBB"),
     ):
         for channel in getattr(configuration, family):
             configuration_data += struct.pack("<" + widths, *astuple(channel))

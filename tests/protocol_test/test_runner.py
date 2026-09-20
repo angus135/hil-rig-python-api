@@ -158,8 +158,8 @@ class ScenarioConnection:
         )
 
     def _status_payload(self) -> bytes:
-        values = [0] * 32
-        values[0] = 2
+        values = [0] * 48
+        values[0] = 3
         values[1] = 1
         values[2] = self.link_generation or 0
         values[11] = int(SessionState.ESTABLISHED)
@@ -168,7 +168,7 @@ class ScenarioConnection:
         values[16] = 1
         values[17] = 0
         values[25] = int(ApplicationHarnessState.WAITING_FOR_CONFIGURATION)
-        return struct.pack("<32I", *values)
+        return struct.pack("<48I", *values)
 
     def submit_application_data(self, data: bytes) -> TransportStatus:
         self.submissions += 1
@@ -296,7 +296,7 @@ def test_disconnect_during_request(tmp_path: Path) -> None:
 def test_status_request_and_typed_decode(tmp_path: Path) -> None:
     runner, connection, trace, _ = make_runner(tmp_path)
     status = runner.run_status()
-    assert status.schema_version == 2
+    assert status.schema_version == 3
     assert status.link_generation == 1
     assert status.compatibility_profile_id == COMPATIBILITY_PROFILE_ID
     assert (
@@ -306,7 +306,7 @@ def test_status_request_and_typed_decode(tmp_path: Path) -> None:
     ) == PROTOCOL_VERSION
     records = [json.loads(line) for line in trace.trace_path.read_text().splitlines()]
     raw = next(record for record in records if record["kind"] == "status_raw")
-    assert len(bytes.fromhex(raw["payload_hex"])) == 128
+    assert len(bytes.fromhex(raw["payload_hex"])) == 192
     runner.close()
     finish(trace, connection, passed=True)
 

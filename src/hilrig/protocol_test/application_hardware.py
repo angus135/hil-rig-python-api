@@ -11,25 +11,24 @@ import hil_rig_protocol as protocol
 APPLICATION_CODEC_CONFIG = protocol.ApplicationConfig(
     max_encoded_message_size=512,
     max_variable_data_size=255,
-    max_variable_transfers_per_tick=8,
     max_expected_tick_count=1_000_000,
 )
 
-PROTOCOL_VERSION = (0, 2, 0)
-COMPATIBILITY_PROFILE_ID = 0x41505031
+PROTOCOL_VERSION = (0, 3, 0)
+COMPATIBILITY_PROFILE_ID = 0x41505032
 
-REPRESENTATIVE_CONFIGURATION_SIZE = 242
-ALL_DISABLED_CONFIGURATION_SIZE = 226
-MAX_EXTENSION_CONFIGURATION_SIZE = 481
+REPRESENTATIVE_CONFIGURATION_SIZE = 210
+ALL_DISABLED_CONFIGURATION_SIZE = 194
+MAX_EXTENSION_CONFIGURATION_SIZE = 449
 FIXED_INSTRUCTION_SIZE = 73
 FIXED_RESULT_SIZE = 62
 FIXED_RESPONSE_SIZE = 36
 ERROR_FIXED_SIZE = 35
 ERROR_DIAGNOSTIC_SIZE_BASE = ERROR_FIXED_SIZE
 
-REPRESENTATIVE_CONFIGURATION_DIGEST = 0xDF35534C
-ALL_DISABLED_CONFIGURATION_DIGEST = 0x98E57BA3
-MAX_EXTENSION_CONFIGURATION_DIGEST = 0x60672F03
+REPRESENTATIVE_CONFIGURATION_DIGEST = 0xE5B6A67E
+ALL_DISABLED_CONFIGURATION_DIGEST = 0xBA7FAE23
+MAX_EXTENSION_CONFIGURATION_DIGEST = 0x71EF1F9D
 INSTRUCTION_DIGESTS = (0x80089EF8, 0x8DE22BBE, 0x6AC9DD7A)
 
 REPRESENTATIVE_EXTENSION = bytes.fromhex("00 01 7E 7F 80 FE FF 48 52 54 50 00 A5 5A C3 3C")
@@ -97,8 +96,8 @@ def representative_configuration(test_id: bytes | protocol.TestId) -> protocol.T
             protocol.PWMOutputConfig(True, protocol.PeripheralVoltage.V_24V, 2_000_000, 7_500),
         ),
         can=(
-            protocol.CANConfig(True, 500_000, 64, 0x123, 0x7FF),
-            protocol.CANConfig(True, 250_000, 64, 0x400, 0x700),
+            protocol.CANConfig(True, 500_000, 0x123, 0x7FF),
+            protocol.CANConfig(True, 250_000, 0x400, 0x700),
         ),
         spi=(
             protocol.SPIConfig(
@@ -109,7 +108,6 @@ def representative_configuration(test_id: bytes | protocol.TestId) -> protocol.T
                 protocol.SPIBitOrder.MSB_FIRST,
                 protocol.SPIClockPolarity.IDLE_LOW,
                 protocol.SPIClockPhase.FIRST_EDGE,
-                64,
             ),
             protocol.SPIConfig(
                 True,
@@ -119,7 +117,6 @@ def representative_configuration(test_id: bytes | protocol.TestId) -> protocol.T
                 protocol.SPIBitOrder.LSB_FIRST,
                 protocol.SPIClockPolarity.IDLE_HIGH,
                 protocol.SPIClockPhase.SECOND_EDGE,
-                64,
             ),
         ),
         uart=(
@@ -132,7 +129,6 @@ def representative_configuration(test_id: bytes | protocol.TestId) -> protocol.T
                 protocol.UARTStopBits.BITS_1,
                 True,
                 True,
-                64,
             ),
             protocol.UARTConfig(
                 True,
@@ -143,29 +139,11 @@ def representative_configuration(test_id: bytes | protocol.TestId) -> protocol.T
                 protocol.UARTStopBits.BITS_2,
                 True,
                 True,
-                64,
             ),
         ),
-        i2c=(
-            protocol.I2CConfig(
-                True,
-                100_000,
-                protocol.BusRole.MASTER,
-                0,
-                protocol.I2CVoltage.V_3V3,
-                protocol.I2CPullUp.OHM_4K7,
-                64,
-            ),
-            protocol.I2CConfig(
-                True,
-                400_000,
-                protocol.BusRole.SLAVE,
-                0x42,
-                protocol.I2CVoltage.V_5V,
-                protocol.I2CPullUp.OHM_2K2,
-                64,
-            ),
-        ),
+        # Enabled I2C is intentionally covered only by raw-negative tests;
+        # the representative supported fixture keeps both channels disabled.
+        i2c=(protocol.I2CConfig(), protocol.I2CConfig()),
         extension_data=REPRESENTATIVE_EXTENSION,
     )
 
@@ -215,6 +193,97 @@ def all_disabled_configuration(test_id: bytes | protocol.TestId) -> protocol.Tes
 def zero_instruction(test_id: bytes | protocol.TestId) -> protocol.TestInstruction:
     """Build the zero-valued tick used with the all-disabled boundary configuration."""
     return protocol.TestInstruction(test_id=_test_id(test_id), tick_number=0)
+
+
+def test_profile(*, result_family: int = 0, fault_mode: int = 0, capacity: int = 0) -> bytes:
+    """Build the documented test-only HTV3 extension marker.
+
+    The marker is consumed only by the temporary firmware harness. Other
+    extension bytes remain opaque to the protocol and are intentionally left
+    available for the boundary fixture.
+    """
+    if result_family not in (0, 1) or fault_mode not in (0, 1, 2):
+        raise ValueError("invalid HTV3 profile selector")
+    if not 0 <= capacity <= 0xFFFF:
+        raise ValueError("capacity must fit the HTV3 uint16 field")
+    return b"HTV3" + bytes((result_family, fault_mode)) + struct.pack("<H", capacity)
+
+
+def variable_operations(
+    test_id: bytes | protocol.TestId, tick: int = 0
+) -> tuple[protocol.UpdateInstruction, ...]:
+    """Build a two-chunk Type 21 sparse upload covering every supported family."""
+    test_id = _test_id(test_id)
+    operations = (
+        protocol.LogicalOperation(
+            protocol.PeripheralType.DIGITAL_OUTPUT, 0, struct.pack("<H", tick & 1)
+        ),
+        protocol.LogicalOperation(
+            protocol.PeripheralType.ANALOG_OUTPUT, 0, struct.pack("<I", 3300 + tick)
+        ),
+        protocol.LogicalOperation(
+            protocol.PeripheralType.PWM_OUTPUT, 0, struct.pack("<IH", 1_000_000, 2500)
+        ),
+        protocol.LogicalOperation(protocol.PeripheralType.UART, 0, b"HT-UART"),
+        protocol.LogicalOperation(protocol.PeripheralType.SPI, 0, b"\x01\x02HT"),
+        protocol.LogicalOperation(
+            protocol.PeripheralType.CAN,
+            0,
+            struct.pack("<HB", 0x123, 3) + b"CAN" + bytes(5) + b"\x00",
+        ),
+    )
+    return (
+        protocol.UpdateInstruction(test_id, tick, 1, operations[:3]),
+        protocol.UpdateInstruction(test_id, tick, 0, operations[3:]),
+    )
+
+
+def sparse_variable_upload(
+    test_id: bytes | protocol.TestId,
+) -> tuple[protocol.UpdateInstruction, ...]:
+    """Build ticks 0 and 2, deliberately omitting sparse tick 1."""
+    return variable_operations(test_id, 0) + variable_operations(test_id, 2)
+
+
+def finalize_upload(
+    test_id: bytes | protocol.TestId, flags: int = 0
+) -> protocol.FinalizeTestUpload:
+    """Build the explicit Type 22 upload finalizer."""
+    return protocol.FinalizeTestUpload(_test_id(test_id), flags)
+
+
+def variable_result_oracle(
+    test_id: bytes | protocol.TestId,
+    tick: int,
+    *,
+    condition: protocol.ResultCondition = protocol.ResultCondition.OK,
+    problem_detail: int = 0,
+) -> protocol.VariableTestResult:
+    """Build the synthetic Type 34 capture oracle for one result tick."""
+    test_id = _test_id(test_id)
+    records = (
+        ()
+        if condition is not protocol.ResultCondition.OK
+        else (
+            protocol.CapturedRecord(
+                protocol.PeripheralType.DIGITAL_INPUT, 0, struct.pack("<H", tick & 1)
+            ),
+            protocol.CapturedRecord(
+                protocol.PeripheralType.ANALOG_INPUT, 0, struct.pack("<I", 3300 + tick)
+            ),
+            protocol.CapturedRecord(
+                protocol.PeripheralType.PWM_INPUT, 0, struct.pack("<IH", 1_000_000, 2500)
+            ),
+            protocol.CapturedRecord(protocol.PeripheralType.UART, 0, b"HT-UART"),
+            protocol.CapturedRecord(protocol.PeripheralType.SPI, 0, b"\x01\x02HT"),
+            protocol.CapturedRecord(
+                protocol.PeripheralType.CAN,
+                0,
+                struct.pack("<HB", 0x123, 3) + b"CAN" + bytes(5) + b"\x00",
+            ),
+        )
+    )
+    return protocol.VariableTestResult(test_id, tick, condition, 0, problem_detail, records)
 
 
 def maximum_extension_configuration(
@@ -437,7 +506,6 @@ def configuration_semantic_digest(configuration: protocol.TestConfiguration) -> 
             (
                 _u8(item.enabled),
                 _u32(item.bit_rate),
-                _u32(item.capture_limit_bytes),
                 _u16(item.filter_id),
                 _u16(item.filter_mask),
             )
@@ -452,7 +520,6 @@ def configuration_semantic_digest(configuration: protocol.TestConfiguration) -> 
                 _u8(item.bit_order),
                 _u8(item.clock_polarity),
                 _u8(item.clock_phase),
-                _u32(item.capture_limit_bytes),
             )
         )
     for item in configuration.uart:
@@ -466,7 +533,6 @@ def configuration_semantic_digest(configuration: protocol.TestConfiguration) -> 
                 _u8(item.stop_bits),
                 _u8(item.rx_enabled),
                 _u8(item.tx_enabled),
-                _u32(item.capture_limit_bytes),
             )
         )
     for item in configuration.i2c:
@@ -478,7 +544,6 @@ def configuration_semantic_digest(configuration: protocol.TestConfiguration) -> 
                 _u16(item.own_address_7bit),
                 _u8(item.voltage_level),
                 _u8(item.pull_up),
-                _u32(item.capture_limit_bytes),
             )
         )
     parts.extend((_u8(len(configuration.extension_data)), configuration.extension_data))
@@ -504,12 +569,18 @@ def application_message_name(message: protocol.ApplicationMessage) -> str:
         return "TEST_CONFIGURATION"
     if type(message) is protocol.TestInstruction:
         return "TEST_INSTRUCTION"
+    if type(message) is protocol.UpdateInstruction:
+        return "UPDATE_INSTRUCTION"
+    if type(message) is protocol.FinalizeTestUpload:
+        return "FINALIZE_TEST_UPLOAD"
     if type(message) is protocol.ExecutionControl:
         return "EXECUTION_CONTROL"
     if type(message) is protocol.GlobalControl:
         return "GLOBAL_CONTROL"
     if type(message) is protocol.TestResult:
         return "TEST_RESULT"
+    if type(message) is protocol.VariableTestResult:
+        return "VARIABLE_TEST_RESULT"
     if type(message) is protocol.ApplicationResponse:
         return "RESPONSE"
     if type(message) is protocol.ApplicationErrorMessage:

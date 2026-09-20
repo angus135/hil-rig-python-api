@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from dataclasses import replace
 
 import pytest
 
@@ -29,6 +30,8 @@ from hilrig.protocol_test.application_hardware import (  # noqa: E402
     representative_configuration,
     representative_instructions,
     response_fixtures,
+    variable_result_oracle,
+    zero_instruction,
 )
 from hilrig.protocol_test.connection import ProtocolTestConnection  # noqa: E402
 from hilrig.protocol_test.harness_codec import (  # noqa: E402
@@ -110,6 +113,10 @@ class InMemoryRigSerial:
                     progress = True
                 elif submit not in {TransportStatus.NOT_READY, TransportStatus.CAPACITY_EXHAUSTED}:
                     raise AssertionError(submit)
+            if self.pending_response is None and hasattr(self, "behavior"):
+                follow_on = self.behavior.poll_output()
+                if follow_on is not None:
+                    self.pending_response = follow_on
             output = self.rig.peek_output()
             if output is not None:
                 self.rig_to_host.extend(output)
@@ -178,6 +185,10 @@ class ApplicationRigBehavior:
         self.state = ApplicationHarnessState.WAITING_FOR_CONFIGURATION
         self.next_tick = 0
         self.active_expected_tick_count = 0
+        self.v03_mode = False
+        self.v03_instructions: dict[int, protocol.TestInstruction] = {}
+        self.v03_updates: dict[int, list[protocol.LogicalOperation]] = {}
+        self.v03_result_queue: deque[bytes] = deque()
 
     def reset_session(self) -> None:
         self.protocol_version_confirmed = False
@@ -185,12 +196,16 @@ class ApplicationRigBehavior:
         self.state = ApplicationHarnessState.WAITING_FOR_CONFIGURATION
         self.next_tick = 0
         self.active_expected_tick_count = 0
+        self.v03_mode = False
+        self.v03_instructions.clear()
+        self.v03_updates.clear()
+        self.v03_result_queue.clear()
 
     def status_payload(self) -> bytes:
         import struct
 
-        values = [0] * 32
-        values[0] = 2
+        values = [0] * 48
+        values[0] = 3
         values[1] = 1
         values[3] = self.total_application_received
         values[6] = self.total_application_received
@@ -214,7 +229,31 @@ class ApplicationRigBehavior:
         values[29] = self.last_message_type
         values[30] = self.configuration_digest
         values[31] = self.last_instruction_digest
-        return struct.pack("<32I", *values)
+        return struct.pack("<48I", *values)
+
+    def poll_output(self) -> bytes | None:
+        if self.v03_result_queue:
+            return self.v03_result_queue.popleft()
+        return None
+
+    def _queue_v03_results(self) -> None:
+        assert self.active_configuration is not None
+        test_id = self.active_configuration.test_id
+        variable = (
+            self.active_configuration.extension_data.startswith(b"HTV3")
+            and self.active_configuration.extension_data[4] == 1
+        )
+        for tick in range(self.active_expected_tick_count):
+            if variable:
+                result = variable_result_oracle(test_id, tick)
+                if tick not in self.v03_updates:
+                    result = replace(result, records=())
+            else:
+                result = firmware_result(
+                    self.active_configuration,
+                    self.v03_instructions.get(tick, zero_instruction(test_id)),
+                )
+            self.v03_result_queue.append(self.codec.encode(result))
 
     def _hrtp(self, data: bytes) -> bytes | None:
         try:
@@ -271,6 +310,71 @@ class ApplicationRigBehavior:
             self.semantic_rejections += 1
             self.last_application_status = int(protocol.ApplicationStatus.VERSION_MISMATCH)
             return None
+        if (
+            type(message) is protocol.TestConfiguration
+            and message.expected_tick_count == 3
+            and (message.extension_data == b"" or message.extension_data.startswith(b"HTV3"))
+        ):
+            self.v03_mode = True
+        if self.v03_mode and type(message) is protocol.TestConfiguration:
+            self.active_configuration = message
+            self.configurations_accepted += 1
+            self.configuration_digest = configuration_semantic_digest(message)
+            self.state = ApplicationHarnessState.ACCEPTING_INSTRUCTIONS
+            self.next_tick = 0
+            self.active_expected_tick_count = message.expected_tick_count
+            return self.codec.encode(
+                protocol.ApplicationResponse(
+                    message.test_id,
+                    protocol.ResponseScope.TEST_CONFIGURATION,
+                    protocol.ResponseOutcome.ACCEPTED,
+                    protocol.ResponseReason.NONE,
+                )
+            )
+        if self.v03_mode and type(message) is protocol.TestInstruction:
+            assert self.active_configuration is not None
+            self.v03_instructions[message.tick_number] = message
+            self.instructions_accepted += 1
+            self.last_instruction_digest = instruction_semantic_digest(message)
+            self.next_tick = message.tick_number + 1
+            return self.codec.encode(
+                protocol.ApplicationResponse(
+                    message.test_id,
+                    protocol.ResponseScope.TICK,
+                    protocol.ResponseOutcome.ACCEPTED,
+                    protocol.ResponseReason.NONE,
+                    tick_number=message.tick_number,
+                )
+            )
+        if self.v03_mode and type(message) is protocol.UpdateInstruction:
+            self.v03_updates.setdefault(message.tick_number, []).extend(message.operations)
+            if message.flags == 0:
+                return self.codec.encode(
+                    protocol.ApplicationResponse(
+                        message.test_id,
+                        protocol.ResponseScope.TICK,
+                        protocol.ResponseOutcome.ACCEPTED,
+                        protocol.ResponseReason.NONE,
+                        tick_number=message.tick_number,
+                    )
+                )
+            return None
+        if self.v03_mode and type(message) is protocol.FinalizeTestUpload:
+            assert self.active_configuration is not None
+            self.state = ApplicationHarnessState.READY_TO_START
+            return self.codec.encode(
+                protocol.ApplicationResponse(
+                    self.active_configuration.test_id,
+                    protocol.ResponseScope.COMPLETE_TEST,
+                    protocol.ResponseOutcome.ACCEPTED,
+                    protocol.ResponseReason.NONE,
+                )
+            )
+        if self.v03_mode and type(message) is protocol.ExecutionControl:
+            if message.command is protocol.ControlCommand.START:
+                self.state = ApplicationHarnessState.EMITTING_RESULTS
+                self._queue_v03_results()
+            return self.codec.encode(execution_control_response(message))
         if type(message) is protocol.TestConfiguration:
             if self.state not in {
                 ApplicationHarnessState.WAITING_FOR_CONFIGURATION,
@@ -520,7 +624,7 @@ def test_real_transport_fake_version_gate_and_message_type_diagnostics() -> None
 
     foreign_request = bytearray(behavior.codec.encode(protocol.SystemInfoRequest()))
     foreign_request[1] = 3
-    foreign_request[27] = 3
+    foreign_request[29] = 3
     foreign_wire = behavior._application(bytes(foreign_request))
     assert foreign_wire is not None
     foreign_response = behavior.codec.decode(foreign_wire)
@@ -539,7 +643,7 @@ def test_real_transport_fake_version_gate_and_message_type_diagnostics() -> None
         "application-boundaries",
         "application-negative",
         "application-repeat",
-        "application-v02",
+        "application-v03",
         "oracle-regression",
     ],
 )
@@ -552,7 +656,7 @@ def test_real_protocol_application_runner_over_both_transport_endpoints(
         tmp_path,
         scenario,
         seed=1,
-        source_evidence={"protocol_declared_version": "0.2.0"},
+        source_evidence={"protocol_declared_version": "0.3.0"},
     )
     runner = ProtocolTestRunner(connection, trace, request_timeout_ms=1000)
     try:
@@ -573,26 +677,15 @@ def test_real_protocol_application_runner_over_both_transport_endpoints(
             )
         elif scenario == "application-boundaries":
             result = runner.run_application_boundaries()
-            assert result["encoded_sizes"] == [226, 242, 481, 73, 62]
+            assert result["encoded_sizes"] == [194, 210, 449, 73, 62]
         elif scenario == "application-negative":
             result = runner.run_application_negative()
             assert result["decode_failures_delta"] == 1
             assert result["semantic_rejections_delta"] == 1
-        elif scenario == "application-v02":
-            result = runner.run_application_v02()
-            assert result["case_counts"] == {
-                "system_information": 1,
-                "execution_control": 2,
-                "global_control": 1,
-                "response_scopes": 5,
-                "error_forms": 3,
-                "total": 12,
-            }
-            assert result["failure_deltas"] == {
-                "decode_failures": 0,
-                "semantic_rejections": 0,
-                "encode_failures": 0,
-            }
+        elif scenario == "application-v03":
+            result = runner.run_application_v03()
+            assert result["application_scenario"] == "application-v03"
+            assert [case["result_ticks"] for case in result["cases"]] == [[0, 1, 2], [0, 1, 2]]
         else:
             result = runner.run_application_repeat(3)
             assert result["completed"] == 3

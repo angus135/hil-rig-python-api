@@ -1,9 +1,9 @@
 {
   "protocol_submodule_path": "external/hil-rig-protocol",
   "compatibility_authority": "Runtime STATUS compatibility profile/version and the protocol files supplied with the checkout or ZIP are authoritative. Git revisions are evidence only when observable.",
-  "protocol_version": "0.2.0",
-  "pinned_protocol_commit": "49431179c7ba30cbce09c1d20df8cde7780b0840",
-  "compatibility_profile_id": "0x41505031",
+  "protocol_version": "0.3.0",
+  "pinned_protocol_commit": "cc1e6f29c7deb39c0dffc7edd1f4defc10fc1674",
+  "compatibility_profile_id": "0x41505032",
   "observed_revision_evidence": "Trace source_evidence records Python/protocol Git commit and dirty state when Git metadata is available, otherwise records them as unavailable.",
   "python_versions": [
     "3.12",
@@ -27,32 +27,35 @@
   "application_codec_configuration": {
     "max_encoded_message_size": 512,
     "max_variable_data_size": 255,
-    "max_variable_transfers_per_tick": 8,
     "max_expected_tick_count": 1000000
   },
   "application_fixed_encoded_sizes": {
-    "all_disabled_configuration": 226,
-    "representative_configuration": 242,
-    "maximum_extension_configuration": 481,
+    "all_disabled_configuration": 194,
+    "representative_configuration": 210,
+    "maximum_extension_configuration": 449,
     "instruction": 73,
     "result": 62,
+    "variable_result_sample": 99,
+    "update_instruction": 73,
+    "finalize_test_upload": 27,
     "response": 36,
     "error": "35 + diagnostic_data length"
   },
-  "application_v02": {
-    "command": "application-v02",
+  "application_v03": {
+    "command": "application-v03",
     "coverage": [
       "System Information discovery with exact protocol-version validation",
-      "synthetic START, ABORT, and RESET_APPLICATION responses",
-      "all five Response scopes",
-      "global, test-wide, and tick-specific Error forms including a 255-byte diagnostic"
+      "fixed instruction upload with explicit finalization and deferred results",
+      "two-chunk variable upload covering digital, analog, PWM, UART, SPI, and CAN operations",
+      "sparse variable tick upload with an empty result for an omitted tick",
+      "bounded result polling with one pending output and no result acknowledgements"
     ],
-    "scope_limit": "Synthetic control responses and inbound Response/Error round trips validate only the protocol data path; they do not prove execution, hardware abort behavior, or the production state machine."
+    "scope_limit": "The firmware harness is a deterministic synthetic loopback and does not drive physical peripherals; hardware commands are evidence-gathering only until a real board is connected."
   },
   "test_envelope_version": 1,
-  "status_schema_version": 2,
-  "status_payload_size_bytes": 128,
-  "status_response_size_bytes": 144,
+  "status_schema_version": 3,
+  "status_payload_size_bytes": 192,
+  "status_response_size_bytes": 208,
   "expected_usb_identity": {
     "port": "runtime-selected",
     "vid": "project hardware value or explicit selector",

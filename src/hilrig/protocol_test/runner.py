@@ -7,7 +7,7 @@ import random
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import hil_rig_protocol as protocol
 from hil_rig_protocol import EventType, SessionState, TransportStatus
@@ -33,6 +33,7 @@ from .application_hardware import (
     execution_control_response,
     execution_controls,
     expected_result,
+    finalize_upload,
     global_control_response,
     instruction_semantic_digest,
     make_application_codec,
@@ -42,6 +43,9 @@ from .application_hardware import (
     representative_instructions,
     reset_application_control,
     response_fixtures,
+    sparse_variable_upload,
+    test_profile,
+    variable_result_oracle,
     zero_instruction,
 )
 from .connection import LinkDisconnectedError, ProtocolTestConnection
@@ -655,6 +659,7 @@ class ProtocolTestRunner:
         expected_type: type[object],
         expected_value: protocol.ApplicationMessage | None,
         deadline: float,
+        allow_follow_on_results: bool = False,
     ) -> tuple[protocol.ApplicationMessage, float]:
         """Wait for exactly one current-generation non-HRTP Application response."""
         started = self._monotonic()
@@ -699,7 +704,7 @@ class ProtocolTestRunner:
                     **self._application_message_evidence(decoded, received.data),
                 )
                 self._service()
-                if expected_value is not None:
+                if expected_value is not None and not allow_follow_on_results:
                     self._raise_for_unexpected_application_queue(
                         expected_name=expected_type.__name__, expected_value=expected_value
                     )
@@ -713,6 +718,7 @@ class ProtocolTestRunner:
         expected: protocol.ApplicationMessage,
         *,
         kind: str,
+        allow_follow_on_results: bool = False,
     ) -> tuple[float, float]:
         """Send one Application value and require one exact public-codec response value."""
         self._require_application_discovery()
@@ -726,6 +732,7 @@ class ProtocolTestRunner:
             expected_type=type(expected),
             expected_value=expected,
             deadline=self._deadline(self.request_timeout_ms),
+            allow_follow_on_results=allow_follow_on_results,
         )
         if decoded != expected:  # Defensive: the wait enforces exact equality above.
             raise AssertionError("Application response equality was not enforced")
@@ -771,6 +778,232 @@ class ProtocolTestRunner:
             **self._application_message_evidence(decoded, self.application_codec.encode(decoded)),
         )
         return decoded
+
+    def _application_response(
+        self,
+        test_id: protocol.TestId,
+        scope: protocol.ResponseScope,
+        outcome: protocol.ResponseOutcome,
+        *,
+        tick_number: int = 0,
+        control_command: protocol.ControlCommand = protocol.ControlCommand.INVALID,
+    ) -> protocol.ApplicationResponse:
+        return protocol.ApplicationResponse(
+            test_id,
+            scope,
+            outcome,
+            protocol.ResponseReason.NONE,
+            tick_number=tick_number,
+            control_command=control_command,
+        )
+
+    def _send_and_expect_response(
+        self,
+        message: protocol.ApplicationMessage,
+        expected: protocol.ApplicationResponse,
+        *,
+        kind: str,
+        allow_follow_on_results: bool = False,
+    ) -> float:
+        _, latency = self._exchange_application(
+            message,
+            expected,
+            kind=kind,
+            allow_follow_on_results=allow_follow_on_results,
+        )
+        return latency
+
+    def _wait_application_results(
+        self,
+        test_id: protocol.TestId,
+        expected: dict[int, protocol.ApplicationMessage],
+        *,
+        variable: bool,
+    ) -> dict[int, protocol.ApplicationMessage]:
+        """Collect one complete result tick at a time without sending result ACKs."""
+        started = self._monotonic()
+        chunks: dict[int, list[protocol.CapturedRecord]] = {}
+        conditions: dict[int, tuple[protocol.ResultCondition, int]] = {}
+        chunk_counts: dict[int, int] = {}
+        complete: dict[int, protocol.ApplicationMessage] = {}
+        deadline = self._deadline(self.request_timeout_ms)
+        while self._monotonic() <= deadline and len(complete) < len(expected):
+            self._service()
+            received = self._take_pending(hrtp=False)
+            if received is None:
+                self._pause()
+                continue
+            decoded = self.application_codec.decode(received.data)
+            if getattr(decoded, "test_id", None) != test_id:
+                raise ScenarioFailure("result Test ID mismatch")
+            tick = getattr(decoded, "tick_number", None)
+            if tick not in expected or tick in complete:
+                raise ScenarioFailure(f"duplicate or unexpected result tick {tick}")
+            if variable:
+                if type(decoded) is not protocol.VariableTestResult:
+                    raise ScenarioFailure("fixed result received for variable result profile")
+                chunk_counts[tick] = chunk_counts.get(tick, 0) + 1
+                if chunk_counts[tick] > 8:
+                    raise ScenarioFailure("firmware emitted more than eight result chunks")
+                marker = (decoded.condition, decoded.problem_detail)
+                if tick in conditions and conditions[tick] != marker:
+                    raise ScenarioFailure("Type 34 condition/detail changed across chunks")
+                conditions[tick] = marker
+                chunks.setdefault(tick, []).extend(decoded.records)
+                if decoded.flags == 1:
+                    continue
+                assembled = replace(decoded, records=tuple(chunks[tick]), flags=0)
+                if assembled != expected[tick]:
+                    raise ScenarioFailure(f"variable result mismatch at tick {tick}")
+                complete[tick] = assembled
+            else:
+                if type(decoded) is not protocol.TestResult:
+                    raise ScenarioFailure("variable result received for fixed result profile")
+                if decoded != expected[tick]:
+                    raise ScenarioFailure(f"fixed result mismatch at tick {tick}")
+                complete[tick] = decoded
+            self.trace.record(
+                "application_result_tick",
+                elapsed_ms=(self._monotonic() - started) * 1000,
+                tick=tick,
+                result_family="VARIABLE" if variable else "FIXED",
+                chunk_index=chunk_counts.get(tick, 1),
+                records=len(getattr(decoded, "records", ())),
+                condition=getattr(getattr(decoded, "condition", None), "name", None),
+                problem_detail=getattr(decoded, "problem_detail", 0),
+            )
+        if len(complete) != len(expected):
+            raise ScenarioFailure(
+                "timed out waiting for results; "
+                f"expected ticks {sorted(expected)}, received {sorted(complete)}"
+            )
+        return complete
+
+    def _run_application_transaction(
+        self,
+        configuration: protocol.TestConfiguration,
+        instructions: tuple[protocol.ApplicationMessage, ...],
+        expected_results: dict[int, protocol.ApplicationMessage],
+        *,
+        variable_instruction: bool,
+        variable_result: bool,
+    ) -> dict[str, object]:
+        self._require_application_discovery()
+        test_id = configuration.test_id
+        self._send_and_expect_response(
+            configuration,
+            self._application_response(
+                test_id,
+                protocol.ResponseScope.TEST_CONFIGURATION,
+                protocol.ResponseOutcome.ACCEPTED,
+            ),
+            kind="APPLICATION_TEST_CONFIGURATION",
+        )
+        for message in instructions:
+            if variable_instruction and type(message) is protocol.UpdateInstruction:
+                if message.flags == 1:
+                    encoded = self._encode_application_message(message)
+                    self._submit_and_confirm(
+                        encoded,
+                        kind="APPLICATION_UPDATE_INSTRUCTION_CONTINUATION",
+                        evidence=self._application_message_evidence(message, encoded),
+                    )
+                else:
+                    self._send_and_expect_response(
+                        message,
+                        self._application_response(
+                            test_id,
+                            protocol.ResponseScope.TICK,
+                            protocol.ResponseOutcome.ACCEPTED,
+                            tick_number=message.tick_number,
+                        ),
+                        kind="APPLICATION_UPDATE_INSTRUCTION_FINAL",
+                    )
+            else:
+                self._send_and_expect_response(
+                    message,
+                    self._application_response(
+                        test_id,
+                        protocol.ResponseScope.TICK,
+                        protocol.ResponseOutcome.ACCEPTED,
+                        tick_number=message.tick_number,
+                    ),
+                    kind="APPLICATION_TEST_INSTRUCTION",
+                )
+        finalizer = finalize_upload(test_id)
+        self._send_and_expect_response(
+            finalizer,
+            self._application_response(
+                test_id, protocol.ResponseScope.COMPLETE_TEST, protocol.ResponseOutcome.ACCEPTED
+            ),
+            kind="APPLICATION_FINALIZE_TEST_UPLOAD",
+        )
+        start = protocol.ExecutionControl(test_id, protocol.ControlCommand.START)
+        self._send_and_expect_response(
+            start,
+            self._application_response(
+                test_id,
+                protocol.ResponseScope.EXECUTION_CONTROL,
+                protocol.ResponseOutcome.COMPLETED,
+                control_command=protocol.ControlCommand.START,
+            ),
+            kind="APPLICATION_EXECUTION_CONTROL_START",
+            allow_follow_on_results=True,
+        )
+        results = self._wait_application_results(
+            test_id, expected_results, variable=variable_result
+        )
+        return {
+            "test_id_hex": test_id.bytes.hex(),
+            "instruction_family": "VARIABLE" if variable_instruction else "FIXED",
+            "result_family": "VARIABLE" if variable_result else "FIXED",
+            "result_ticks": sorted(results),
+            "result_count": len(results),
+        }
+
+    def run_application_v03(self) -> dict[str, object]:
+        """Run the bounded v0.3 lifecycle and family-independence smoke matrix."""
+        self.run_status()
+        self.discover_application()
+        cases: list[dict[str, object]] = []
+
+        fixed_id = new_test_id()
+        fixed_config = replace(all_disabled_configuration(fixed_id), expected_tick_count=3)
+        fixed_instructions = representative_instructions(fixed_id)
+        cases.append(
+            self._run_application_transaction(
+                fixed_config,
+                fixed_instructions,
+                {
+                    item.tick_number: expected_result(fixed_config, item)
+                    for item in fixed_instructions
+                },
+                variable_instruction=False,
+                variable_result=False,
+            )
+        )
+
+        variable_id = new_test_id()
+        variable_config = replace(
+            all_disabled_configuration(variable_id),
+            expected_tick_count=3,
+            extension_data=test_profile(result_family=1),
+        )
+        variable_messages = sparse_variable_upload(variable_id)
+        variable_expected = {tick: variable_result_oracle(variable_id, tick) for tick in range(3)}
+        # Tick 1 is intentionally omitted from upload and must still have a zero-record result.
+        variable_expected[1] = replace(variable_result_oracle(variable_id, 1), records=())
+        cases.append(
+            self._run_application_transaction(
+                variable_config,
+                variable_messages,
+                variable_expected,
+                variable_instruction=True,
+                variable_result=True,
+            )
+        )
+
+        return {"application_scenario": "application-v03", "cases": cases}
 
     def _send_configuration(
         self,
@@ -1047,9 +1280,6 @@ class ProtocolTestRunner:
             protocol.ApplicationConfig(
                 max_encoded_message_size=MAX_EXTENSION_CONFIGURATION_SIZE - 1,
                 max_variable_data_size=APPLICATION_CODEC_CONFIG.max_variable_data_size,
-                max_variable_transfers_per_tick=(
-                    APPLICATION_CODEC_CONFIG.max_variable_transfers_per_tick
-                ),
                 max_expected_tick_count=APPLICATION_CODEC_CONFIG.max_expected_tick_count,
             )
         )
@@ -1201,8 +1431,8 @@ class ProtocolTestRunner:
             "final_status": status,
         }
 
-    def run_application_v02(self) -> dict[str, object]:
-        """Exercise the v0.2.0 Application additions without changing production semantics."""
+    def run_application_message_fixtures(self) -> dict[str, object]:
+        """Exercise control, response, and error message fixtures over v0.3.0."""
         baseline = self.run_status()
         discovery = self.discover_application()
         control_test_id = new_test_id()
@@ -1293,11 +1523,11 @@ class ProtocolTestRunner:
         }
         if any(failure_deltas.values()):
             raise ScenarioFailure(
-                "Application v0.2.0 scenario changed failure counters",
+                "Application message-fixture scenario changed failure counters",
                 details={"failure_deltas": failure_deltas, "final_status": final_status},
             )
         return {
-            "application_scenario": "application-v02",
+            "application_scenario": "application-message-fixtures",
             "case_counts": {
                 "system_information": 1,
                 "execution_control": 2,

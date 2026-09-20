@@ -58,9 +58,9 @@ def test_hardware_application_negative(hardware_runner) -> None:
     runner.run_application_negative()
 
 
-def test_hardware_application_v02(hardware_runner) -> None:
+def test_hardware_application_v03(hardware_runner) -> None:
     runner, _ = hardware_runner
-    runner.run_application_v02()
+    runner.run_application_v03()
 
 
 def test_hardware_application_repeat(hardware_runner) -> None:

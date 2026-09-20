@@ -43,14 +43,13 @@ def test_application_codec_configuration_matches_hardware_profile() -> None:
         protocol.ApplicationConfig(
             max_encoded_message_size=512,
             max_variable_data_size=255,
-            max_variable_transfers_per_tick=8,
             max_expected_tick_count=1_000_000,
         )
         == APPLICATION_CODEC_CONFIG
     )
 
 
-def test_v02_control_response_and_error_fixtures_round_trip_with_exact_wire_sizes() -> None:
+def test_v03_control_response_and_error_fixtures_round_trip_with_exact_wire_sizes() -> None:
     codec = make_application_codec()
     start, abort = execution_controls(TEST_ID)
     reset = reset_application_control()
@@ -107,7 +106,7 @@ def test_representative_configuration_populates_every_family() -> None:
     assert all(item.enabled for item in configuration.can)
     assert all(item.enabled for item in configuration.spi)
     assert all(item.enabled for item in configuration.uart)
-    assert all(item.enabled for item in configuration.i2c)
+    assert not any(item.enabled for item in configuration.i2c)
 
 
 def test_can_configuration_has_filters_and_no_termination_property() -> None:
@@ -115,7 +114,6 @@ def test_can_configuration_has_filters_and_no_termination_property() -> None:
     assert field_names == {
         "enabled",
         "bit_rate",
-        "capture_limit_bytes",
         "filter_id",
         "filter_mask",
     }
@@ -182,7 +180,7 @@ def test_expected_result_oracle_matches_deterministic_values() -> None:
     results = [
         expected_result(configuration, item) for item in representative_instructions(TEST_ID)
     ]
-    assert [item.analog_inputs[0].microvolts for item in results] == [4_813_713] * 3
+    assert [item.analog_inputs[0].microvolts for item in results] == [13_952_446] * 3
     assert [item.analog_inputs[1].microvolts for item in results] == [
         8_048_525,
         409_671,
@@ -243,8 +241,8 @@ def test_representative_configuration_matches_required_field_values() -> None:
         protocol.PWMOutputConfig(True, protocol.PeripheralVoltage.V_24V, 2_000_000, 7_500),
     )
     assert configuration.can == (
-        protocol.CANConfig(True, 500_000, 64, 0x123, 0x7FF),
-        protocol.CANConfig(True, 250_000, 64, 0x400, 0x700),
+        protocol.CANConfig(True, 500_000, 0x123, 0x7FF),
+        protocol.CANConfig(True, 250_000, 0x400, 0x700),
     )
     assert configuration.spi == (
         protocol.SPIConfig(
@@ -255,7 +253,6 @@ def test_representative_configuration_matches_required_field_values() -> None:
             protocol.SPIBitOrder.MSB_FIRST,
             protocol.SPIClockPolarity.IDLE_LOW,
             protocol.SPIClockPhase.FIRST_EDGE,
-            64,
         ),
         protocol.SPIConfig(
             True,
@@ -265,7 +262,6 @@ def test_representative_configuration_matches_required_field_values() -> None:
             protocol.SPIBitOrder.LSB_FIRST,
             protocol.SPIClockPolarity.IDLE_HIGH,
             protocol.SPIClockPhase.SECOND_EDGE,
-            64,
         ),
     )
     assert configuration.uart == (
@@ -278,7 +274,6 @@ def test_representative_configuration_matches_required_field_values() -> None:
             protocol.UARTStopBits.BITS_1,
             True,
             True,
-            64,
         ),
         protocol.UARTConfig(
             True,
@@ -289,29 +284,9 @@ def test_representative_configuration_matches_required_field_values() -> None:
             protocol.UARTStopBits.BITS_2,
             True,
             True,
-            64,
         ),
     )
-    assert configuration.i2c == (
-        protocol.I2CConfig(
-            True,
-            100_000,
-            protocol.BusRole.MASTER,
-            0,
-            protocol.I2CVoltage.V_3V3,
-            protocol.I2CPullUp.OHM_4K7,
-            64,
-        ),
-        protocol.I2CConfig(
-            True,
-            400_000,
-            protocol.BusRole.SLAVE,
-            0x42,
-            protocol.I2CVoltage.V_5V,
-            protocol.I2CPullUp.OHM_2K2,
-            64,
-        ),
-    )
+    assert configuration.i2c == (protocol.I2CConfig(), protocol.I2CConfig())
 
 
 def test_all_disabled_configuration_uses_canonical_disabled_values() -> None:
@@ -344,11 +319,7 @@ def test_all_disabled_configuration_uses_canonical_disabled_values() -> None:
         for item in configuration.pwm_out
     )
     assert all(
-        not item.enabled
-        and item.bit_rate == 0
-        and item.capture_limit_bytes == 0
-        and item.filter_id == 0
-        and item.filter_mask == 0
+        not item.enabled and item.bit_rate == 0 and item.filter_id == 0 and item.filter_mask == 0
         for item in configuration.can
     )
     assert all(
@@ -359,7 +330,6 @@ def test_all_disabled_configuration_uses_canonical_disabled_values() -> None:
         and item.bit_order is protocol.SPIBitOrder.INVALID
         and item.clock_polarity is protocol.SPIClockPolarity.INVALID
         and item.clock_phase is protocol.SPIClockPhase.INVALID
-        and item.capture_limit_bytes == 0
         for item in configuration.spi
     )
     assert all(
@@ -371,7 +341,6 @@ def test_all_disabled_configuration_uses_canonical_disabled_values() -> None:
         and item.stop_bits is protocol.UARTStopBits.INVALID
         and not item.rx_enabled
         and not item.tx_enabled
-        and item.capture_limit_bytes == 0
         for item in configuration.uart
     )
     assert all(
@@ -381,7 +350,6 @@ def test_all_disabled_configuration_uses_canonical_disabled_values() -> None:
         and item.own_address_7bit == 0
         and item.voltage_level is protocol.I2CVoltage.INVALID
         and item.pull_up is protocol.I2CPullUp.INVALID
-        and item.capture_limit_bytes == 0
         for item in configuration.i2c
     )
 
@@ -470,7 +438,7 @@ def test_maximum_extension_result_uses_configuration_digest() -> None:
     result = expected_result(
         maximum_extension_configuration(TEST_ID), representative_instructions(TEST_ID)[0]
     )
-    assert result.analog_inputs[0].microvolts == 17_374_899
+    assert result.analog_inputs[0].microvolts == 11_496_510
 
 
 def test_non_golden_instruction_result_uses_semantics_at_same_and_later_tick() -> None:

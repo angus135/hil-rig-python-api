@@ -8,7 +8,7 @@ from hilrig.protocol_test.harness_codec import (
     HarnessCodecError,
     Opcode,
     RequestIdAllocator,
-    StatusPayloadV2,
+    StatusPayloadV3,
     decode_message,
     decode_status_payload,
     encode_echo_request,
@@ -20,8 +20,8 @@ from hilrig.protocol_test.harness_codec import (
 LIMIT = 512
 
 
-def test_status_v2_field_order_is_exact() -> None:
-    assert [field.name for field in fields(StatusPayloadV2)] == [
+def test_status_v3_field_order_is_exact() -> None:
+    assert [field.name for field in fields(StatusPayloadV3)] == [
         "schema_version",
         "link_state",
         "link_generation",
@@ -54,6 +54,22 @@ def test_status_v2_field_order_is_exact() -> None:
         "last_decoded_application_message_type",
         "configuration_digest",
         "last_instruction_digest",
+        "selected_instruction_family",
+        "selected_result_family",
+        "completed_instruction_ticks",
+        "current_chunk_count",
+        "maximum_chunk_count",
+        "finalization_requests",
+        "accepted_finalizations",
+        "variable_operations_accepted",
+        "result_records_emitted",
+        "capture_overflow_events",
+        "i2c_not_implemented_rejections",
+        "maximum_decode_storage_required",
+        "decode_storage_used",
+        "selected_test_profile",
+        "selected_fault_mode",
+        "spontaneous_output_pending",
     ]
 
 
@@ -93,10 +109,10 @@ def test_status_request_has_empty_payload() -> None:
 def test_status_response_decoding() -> None:
     import struct
 
-    payload = struct.pack("<32I", 2, *range(1, 32))
+    payload = struct.pack("<48I", 3, *range(1, 48))
     status = decode_status_payload(payload)
-    assert status == StatusPayloadV2(2, *range(1, 32))
-    assert len(payload) == 128
+    assert status == StatusPayloadV3(3, *range(1, 48))
+    assert len(payload) == 192
 
     encoded = encode_message(
         Opcode.STATUS_RESPONSE,
@@ -104,19 +120,19 @@ def test_status_response_decoding() -> None:
         payload,
         max_application_message_size=LIMIT,
     )
-    assert len(encoded) == 144
+    assert len(encoded) == 208
 
 
-@pytest.mark.parametrize("size", [124, 127, 129])
+@pytest.mark.parametrize("size", [188, 191, 193])
 def test_incorrect_status_payload_size_rejected(size: int) -> None:
-    with pytest.raises(HarnessCodecError, match="128 bytes"):
+    with pytest.raises(HarnessCodecError, match="192 bytes"):
         decode_status_payload(bytes(size))
 
 
 def test_unsupported_status_schema_version_rejected() -> None:
     import struct
 
-    payload = struct.pack("<32I", 1, *range(1, 32))
+    payload = struct.pack("<48I", 1, *range(1, 48))
     with pytest.raises(HarnessCodecError, match="schema version 1"):
         decode_status_payload(payload)
 

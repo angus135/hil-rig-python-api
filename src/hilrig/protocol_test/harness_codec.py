@@ -11,7 +11,7 @@ from .models import ENVELOPE_VERSION, UINT32_MASK
 MAGIC = b"HRTP"
 HEADER = struct.Struct("<4sBBHII")
 HEADER_SIZE = HEADER.size
-STATUS_V2 = struct.Struct("<32I")
+STATUS_V3 = struct.Struct("<48I")
 SUPPORTED_FLAGS = 0
 
 
@@ -36,16 +36,19 @@ class HarnessMessage:
 
 
 class ApplicationHarnessState(IntEnum):
-    """Stable STATUS v2 state values shared with the MCU hardware harness."""
+    """Stable STATUS v3 state values shared with the MCU hardware harness."""
 
     UNINITIALIZED = 0
     WAITING_FOR_CONFIGURATION = 1
     ACCEPTING_INSTRUCTIONS = 2
-    COMPLETE = 3
+    READY_TO_START = 3
+    EMITTING_RESULTS = 4
+    COMPLETE = 5
+    UPLOAD_INVALID = 6
 
 
 @dataclass(frozen=True, slots=True)
-class StatusPayloadV2:
+class StatusPayloadV3:
     schema_version: int
     link_state: int
     link_generation: int
@@ -78,6 +81,27 @@ class StatusPayloadV2:
     last_decoded_application_message_type: int
     configuration_digest: int
     last_instruction_digest: int
+    selected_instruction_family: int
+    selected_result_family: int
+    completed_instruction_ticks: int
+    current_chunk_count: int
+    maximum_chunk_count: int
+    finalization_requests: int
+    accepted_finalizations: int
+    variable_operations_accepted: int
+    result_records_emitted: int
+    capture_overflow_events: int
+    i2c_not_implemented_rejections: int
+    maximum_decode_storage_required: int
+    decode_storage_used: int
+    selected_test_profile: int
+    selected_fault_mode: int
+    spontaneous_output_pending: int
+
+
+# Kept as an import-compatible alias for focused callers while the wire schema
+# is explicitly v3 and older payloads are rejected.
+StatusPayloadV2 = StatusPayloadV3
 
 
 class RequestIdAllocator:
@@ -185,12 +209,12 @@ def encode_status_request(request_id: int, *, max_application_message_size: int)
 
 
 def decode_status_payload(payload: bytes) -> StatusPayloadV2:
-    if len(payload) != STATUS_V2.size:
+    if len(payload) != STATUS_V3.size:
         raise HarnessCodecError(
-            f"STATUS v2 payload must be {STATUS_V2.size} bytes, received {len(payload)}"
+            f"STATUS v3 payload must be {STATUS_V3.size} bytes, received {len(payload)}"
         )
-    values = STATUS_V2.unpack(payload)
+    values = STATUS_V3.unpack(payload)
     version = values[0]
-    if version != 2:
+    if version != 3:
         raise HarnessCodecError(f"unsupported STATUS schema version {version}")
-    return StatusPayloadV2(*values)
+    return StatusPayloadV3(*values)

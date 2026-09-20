@@ -88,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
         "application-smoke",
         "application-boundaries",
         "application-negative",
-        "application-v02",
+        "application-v03",
     ):
         sub = subparsers.add_parser(name)
         _add_common(sub)
@@ -206,8 +206,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = runner.run_application_boundaries()
         elif args.scenario == "application-negative":
             result = runner.run_application_negative()
-        elif args.scenario == "application-v02":
-            result = runner.run_application_v02()
+        elif args.scenario == "application-v03":
+            result = runner.run_application_v03()
         elif args.scenario == "application-repeat":
             result = runner.run_application_repeat(args.count)
         elif args.scenario == "application-reset-reconnect":

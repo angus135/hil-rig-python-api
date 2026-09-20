@@ -56,7 +56,7 @@ def test_protocol_version_declared_by_supplied_files_is_compatibility_gate(tmp_p
 
 def test_observed_protocol_commit_is_evidence_not_a_gate() -> None:
     validate_protocol_compatibility(
-        {"protocol_declared_version": "0.2.0", "protocol_observed_commit": "deadbeef"}
+        {"protocol_declared_version": "0.3.0", "protocol_observed_commit": "deadbeef"}
     )
 
 
@@ -75,12 +75,12 @@ def test_trace_summary_contains_application_compatibility_metadata(tmp_path: Pat
         tmp_path,
         "unit",
         seed=1,
-        source_evidence={"protocol_declared_version": "0.2.0"},
+        source_evidence={"protocol_declared_version": "0.3.0"},
     )
     trace.finish(passed=True, failure_reason=None, diagnostics={})
     summary = json.loads(trace.summary_path.read_text(encoding="utf-8"))
-    assert summary["protocol_version"] == [0, 2, 0]
-    assert summary["compatibility_profile_id"] == 0x41505031
+    assert summary["protocol_version"] == [0, 3, 0]
+    assert summary["compatibility_profile_id"] == 0x41505032
     assert summary["application_codec_config"]["max_encoded_message_size"] == 512
 
 
