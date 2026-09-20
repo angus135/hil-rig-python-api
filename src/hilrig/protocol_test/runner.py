@@ -29,7 +29,7 @@ from .application_hardware import (
     all_disabled_configuration,
     application_error_fixtures,
     application_message_name,
-    configuration_semantic_digest,
+    configured_initial_instruction,
     execution_control_response,
     execution_controls,
     expected_result,
@@ -38,6 +38,8 @@ from .application_hardware import (
     instruction_semantic_digest,
     make_application_codec,
     maximum_extension_configuration,
+    multi_chunk_variable_result_oracle,
+    multi_chunk_variable_upload,
     new_test_id,
     representative_configuration,
     representative_instructions,
@@ -45,6 +47,7 @@ from .application_hardware import (
     response_fixtures,
     sparse_variable_upload,
     test_profile,
+    variable_operations,
     variable_result_oracle,
     zero_instruction,
 )
@@ -781,20 +784,27 @@ class ProtocolTestRunner:
 
     def _application_response(
         self,
-        test_id: protocol.TestId,
+        test_id: protocol.TestId | None,
         scope: protocol.ResponseScope,
         outcome: protocol.ResponseOutcome,
         *,
         tick_number: int = 0,
         control_command: protocol.ControlCommand = protocol.ControlCommand.INVALID,
+        reason: protocol.ResponseReason = protocol.ResponseReason.NONE,
+        global_control_command: protocol.GlobalControlCommand = (
+            protocol.GlobalControlCommand.INVALID
+        ),
+        detail: int = 0,
     ) -> protocol.ApplicationResponse:
         return protocol.ApplicationResponse(
             test_id,
             scope,
             outcome,
-            protocol.ResponseReason.NONE,
+            reason,
             tick_number=tick_number,
             control_command=control_command,
+            global_control_command=global_control_command,
+            detail=detail,
         )
 
     def _send_and_expect_response(
@@ -820,25 +830,35 @@ class ProtocolTestRunner:
         *,
         variable: bool,
     ) -> dict[int, protocol.ApplicationMessage]:
-        """Collect one complete result tick at a time without sending result ACKs."""
+        """Collect a contiguous, non-interleaved result stream without ACKs."""
+        expected_ticks = sorted(expected)
+        if expected_ticks != list(range(len(expected_ticks))):
+            raise ScenarioFailure(f"expected result ticks are not contiguous: {expected_ticks}")
         started = self._monotonic()
         chunks: dict[int, list[protocol.CapturedRecord]] = {}
         conditions: dict[int, tuple[protocol.ResultCondition, int]] = {}
         chunk_counts: dict[int, int] = {}
         complete: dict[int, protocol.ApplicationMessage] = {}
+        next_tick = 0
         deadline = self._deadline(self.request_timeout_ms)
-        while self._monotonic() <= deadline and len(complete) < len(expected):
+        while self._monotonic() <= deadline and next_tick < len(expected_ticks):
             self._service()
             received = self._take_pending(hrtp=False)
             if received is None:
                 self._pause()
                 continue
+            if len(received.data) > APPLICATION_CODEC_CONFIG.max_encoded_message_size:
+                raise ScenarioFailure("Application result exceeded the configured message limit")
             decoded = self.application_codec.decode(received.data)
             if getattr(decoded, "test_id", None) != test_id:
                 raise ScenarioFailure("result Test ID mismatch")
             tick = getattr(decoded, "tick_number", None)
-            if tick not in expected or tick in complete:
-                raise ScenarioFailure(f"duplicate or unexpected result tick {tick}")
+            if tick is not None and tick < next_tick:
+                raise ScenarioFailure("duplicate TestResult received")
+            if tick != next_tick:
+                raise ScenarioFailure(
+                    f"result ticks were not contiguous/in order: expected {next_tick}, got {tick}"
+                )
             if variable:
                 if type(decoded) is not protocol.VariableTestResult:
                     raise ScenarioFailure("fixed result received for variable result profile")
@@ -851,17 +871,26 @@ class ProtocolTestRunner:
                 conditions[tick] = marker
                 chunks.setdefault(tick, []).extend(decoded.records)
                 if decoded.flags == 1:
-                    continue
-                assembled = replace(decoded, records=tuple(chunks[tick]), flags=0)
-                if assembled != expected[tick]:
-                    raise ScenarioFailure(f"variable result mismatch at tick {tick}")
-                complete[tick] = assembled
+                    pass
+                elif decoded.flags == 0:
+                    assembled = replace(decoded, records=tuple(chunks[tick]), flags=0)
+                    if assembled != expected[tick]:
+                        raise ScenarioFailure(
+                            f"variable result did not match deterministic oracle at tick {tick}"
+                        )
+                    complete[tick] = assembled
+                    next_tick += 1
+                else:
+                    raise ScenarioFailure(f"invalid Type 34 flags for tick {tick}")
             else:
                 if type(decoded) is not protocol.TestResult:
                     raise ScenarioFailure("variable result received for fixed result profile")
                 if decoded != expected[tick]:
-                    raise ScenarioFailure(f"fixed result mismatch at tick {tick}")
+                    raise ScenarioFailure(
+                        f"fixed result did not match deterministic oracle at tick {tick}"
+                    )
                 complete[tick] = decoded
+                next_tick += 1
             self.trace.record(
                 "application_result_tick",
                 elapsed_ms=(self._monotonic() - started) * 1000,
@@ -872,11 +901,30 @@ class ProtocolTestRunner:
                 condition=getattr(getattr(decoded, "condition", None), "name", None),
                 problem_detail=getattr(decoded, "problem_detail", 0),
             )
-        if len(complete) != len(expected):
+            self.trace.record(
+                "application_result_decoded",
+                tick=tick,
+                chunk_index=chunk_counts.get(tick, 1),
+                result_family="VARIABLE" if variable else "FIXED",
+            )
+        if next_tick != len(expected_ticks):
             raise ScenarioFailure(
                 "timed out waiting for results; "
                 f"expected ticks {sorted(expected)}, received {sorted(complete)}"
             )
+        self._service()
+        extra = self._take_pending(hrtp=False)
+        if extra is not None:
+            try:
+                extra_message = self.application_codec.decode(extra.data)
+            except protocol.ApplicationDecodeError as exc:
+                raise ScenarioFailure("malformed trailing Application result") from exc
+            if type(extra_message) in {
+                protocol.TestResult,
+                protocol.VariableTestResult,
+            }:
+                raise ScenarioFailure("duplicate TestResult received")
+            raise ScenarioFailure("unexpected trailing Application message after results")
         return complete
 
     def _run_application_transaction(
@@ -890,15 +938,17 @@ class ProtocolTestRunner:
     ) -> dict[str, object]:
         self._require_application_discovery()
         test_id = configuration.test_id
-        self._send_and_expect_response(
-            configuration,
-            self._application_response(
-                test_id,
-                protocol.ResponseScope.TEST_CONFIGURATION,
-                protocol.ResponseOutcome.ACCEPTED,
-            ),
-            kind="APPLICATION_TEST_CONFIGURATION",
-        )
+        response_latencies = [
+            self._send_and_expect_response(
+                configuration,
+                self._application_response(
+                    test_id,
+                    protocol.ResponseScope.TEST_CONFIGURATION,
+                    protocol.ResponseOutcome.ACCEPTED,
+                ),
+                kind="APPLICATION_TEST_CONFIGURATION",
+            )
+        ]
         for message in instructions:
             if variable_instruction and type(message) is protocol.UpdateInstruction:
                 if message.flags == 1:
@@ -909,6 +959,20 @@ class ProtocolTestRunner:
                         evidence=self._application_message_evidence(message, encoded),
                     )
                 else:
+                    response_latencies.append(
+                        self._send_and_expect_response(
+                            message,
+                            self._application_response(
+                                test_id,
+                                protocol.ResponseScope.TICK,
+                                protocol.ResponseOutcome.ACCEPTED,
+                                tick_number=message.tick_number,
+                            ),
+                            kind="APPLICATION_UPDATE_INSTRUCTION_FINAL",
+                        ),
+                    )
+            else:
+                response_latencies.append(
                     self._send_and_expect_response(
                         message,
                         self._application_response(
@@ -917,38 +981,32 @@ class ProtocolTestRunner:
                             protocol.ResponseOutcome.ACCEPTED,
                             tick_number=message.tick_number,
                         ),
-                        kind="APPLICATION_UPDATE_INSTRUCTION_FINAL",
-                    )
-            else:
-                self._send_and_expect_response(
-                    message,
-                    self._application_response(
-                        test_id,
-                        protocol.ResponseScope.TICK,
-                        protocol.ResponseOutcome.ACCEPTED,
-                        tick_number=message.tick_number,
+                        kind="APPLICATION_TEST_INSTRUCTION",
                     ),
-                    kind="APPLICATION_TEST_INSTRUCTION",
                 )
         finalizer = finalize_upload(test_id)
-        self._send_and_expect_response(
-            finalizer,
-            self._application_response(
-                test_id, protocol.ResponseScope.COMPLETE_TEST, protocol.ResponseOutcome.ACCEPTED
+        response_latencies.append(
+            self._send_and_expect_response(
+                finalizer,
+                self._application_response(
+                    test_id, protocol.ResponseScope.COMPLETE_TEST, protocol.ResponseOutcome.ACCEPTED
+                ),
+                kind="APPLICATION_FINALIZE_TEST_UPLOAD",
             ),
-            kind="APPLICATION_FINALIZE_TEST_UPLOAD",
         )
         start = protocol.ExecutionControl(test_id, protocol.ControlCommand.START)
-        self._send_and_expect_response(
-            start,
-            self._application_response(
-                test_id,
-                protocol.ResponseScope.EXECUTION_CONTROL,
-                protocol.ResponseOutcome.COMPLETED,
-                control_command=protocol.ControlCommand.START,
+        response_latencies.append(
+            self._send_and_expect_response(
+                start,
+                self._application_response(
+                    test_id,
+                    protocol.ResponseScope.EXECUTION_CONTROL,
+                    protocol.ResponseOutcome.COMPLETED,
+                    control_command=protocol.ControlCommand.START,
+                ),
+                kind="APPLICATION_EXECUTION_CONTROL_START",
+                allow_follow_on_results=True,
             ),
-            kind="APPLICATION_EXECUTION_CONTROL_START",
-            allow_follow_on_results=True,
         )
         results = self._wait_application_results(
             test_id, expected_results, variable=variable_result
@@ -959,6 +1017,7 @@ class ProtocolTestRunner:
             "result_family": "VARIABLE" if variable_result else "FIXED",
             "result_ticks": sorted(results),
             "result_count": len(results),
+            "response_latencies_ms": response_latencies,
         }
 
     def run_application_v03(self) -> dict[str, object]:
@@ -983,9 +1042,29 @@ class ProtocolTestRunner:
             )
         )
 
+        fixed_variable_id = new_test_id()
+        fixed_variable_config = replace(
+            representative_configuration(fixed_variable_id),
+            expected_tick_count=3,
+            extension_data=test_profile(result_family=1),
+        )
+        fixed_variable_instructions = representative_instructions(fixed_variable_id)
+        cases.append(
+            self._run_application_transaction(
+                fixed_variable_config,
+                fixed_variable_instructions,
+                {
+                    tick: replace(variable_result_oracle(fixed_variable_id, tick), records=())
+                    for tick in range(3)
+                },
+                variable_instruction=False,
+                variable_result=True,
+            )
+        )
+
         variable_id = new_test_id()
         variable_config = replace(
-            all_disabled_configuration(variable_id),
+            representative_configuration(variable_id),
             expected_tick_count=3,
             extension_data=test_profile(result_family=1),
         )
@@ -1003,255 +1082,81 @@ class ProtocolTestRunner:
             )
         )
 
+        multi_chunk_id = new_test_id()
+        multi_chunk_config = replace(
+            representative_configuration(multi_chunk_id),
+            expected_tick_count=1,
+            extension_data=test_profile(result_family=1),
+        )
+        multi_chunk_messages = multi_chunk_variable_upload(multi_chunk_id)
+        cases.append(
+            self._run_application_transaction(
+                multi_chunk_config,
+                multi_chunk_messages,
+                {0: multi_chunk_variable_result_oracle(multi_chunk_id)},
+                variable_instruction=True,
+                variable_result=True,
+            )
+        )
+
+        variable_fixed_id = new_test_id()
+        variable_fixed_config = replace(
+            representative_configuration(variable_fixed_id),
+            expected_tick_count=1,
+            extension_data=test_profile(result_family=0),
+        )
+        variable_fixed_messages = variable_operations(variable_fixed_id)
+        variable_fixed_initial = configured_initial_instruction(variable_fixed_config)
+        cases.append(
+            self._run_application_transaction(
+                variable_fixed_config,
+                variable_fixed_messages,
+                {0: expected_result(variable_fixed_config, variable_fixed_initial)},
+                variable_instruction=True,
+                variable_result=False,
+            )
+        )
+
         return {"application_scenario": "application-v03", "cases": cases}
 
-    def _send_configuration(
-        self,
-        configuration: protocol.TestConfiguration,
-        baseline: StatusPayloadV2,
-        *,
-        expected_size: int,
-        expected_digest: int,
-    ) -> StatusPayloadV2:
-        self._require_application_discovery()
-        digest = configuration_semantic_digest(configuration)
-        if digest != expected_digest:
-            raise ScenarioFailure(
-                f"configuration semantic digest mismatch: expected 0x{expected_digest:08X}, "
-                f"computed 0x{digest:08X}"
-            )
-        encoded = self._encode_application_message(configuration, semantic_digest=digest)
-        if len(encoded) != expected_size:
-            raise ScenarioFailure(
-                f"configuration encoded size mismatch: expected {expected_size}, got {len(encoded)}"
-            )
-        self._submit_and_confirm(
-            encoded,
-            kind="APPLICATION_TEST_CONFIGURATION",
-            evidence={
-                "test_id_hex": configuration.test_id.bytes.hex(),
-                "configuration_digest": digest,
-            },
-        )
-        status = self.run_status()
-        if status.configurations_accepted != baseline.configurations_accepted + 1:
-            raise ScenarioFailure("configuration acceptance counter did not increase by one")
-        if status.configuration_digest != digest:
-            raise ScenarioFailure(
-                f"firmware configuration digest mismatch: expected 0x{digest:08X}, "
-                f"got 0x{status.configuration_digest:08X}"
-            )
-        if status.application_harness_state != int(ApplicationHarnessState.ACCEPTING_INSTRUCTIONS):
-            raise ScenarioFailure("firmware did not enter ACCEPTING_INSTRUCTIONS")
-        if status.next_expected_tick != 0:
-            raise ScenarioFailure("firmware next expected tick is not zero after configuration")
-        if status.active_expected_tick_count != configuration.expected_tick_count:
-            raise ScenarioFailure(
-                "firmware active expected tick count does not match configuration"
-            )
-        return status
-
-    def _wait_expected_result(
-        self,
-        expected: protocol.TestResult,
-        *,
-        deadline: float,
-    ) -> float:
-        started = self._monotonic()
-        while self._monotonic() <= deadline:
-            self._service()
-            received = self._take_pending(hrtp=False)
-            if received is not None:
-                try:
-                    decoded = self.application_codec.decode(received.data)
-                except protocol.ApplicationDecodeError as exc:
-                    self.trace.record(
-                        "unexpected_message",
-                        expected="TestResult",
-                        actual="undecodable Application message",
-                        reason=str(exc),
-                        payload_size=len(received.data),
-                        payload_sha256=payload_hash(received.data),
-                    )
-                    raise ScenarioFailure(
-                        f"failed to decode firmware Application result: {exc}"
-                    ) from exc
-                if type(decoded) is not protocol.TestResult:
-                    self.trace.record(
-                        "unexpected_message",
-                        expected="TestResult",
-                        actual=application_message_name(decoded),
-                        decoded_message=decoded,
-                    )
-                    raise ScenarioFailure(
-                        f"unexpected Application message family {application_message_name(decoded)}"
-                    )
-                key = (decoded.test_id.bytes, decoded.tick_number)
-                if key in self._seen_results:
-                    raise ScenarioFailure(
-                        f"duplicate TestResult for Test ID {decoded.test_id.bytes.hex()} "
-                        f"tick {decoded.tick_number}"
-                    )
-                self._seen_results.add(key)
-                self.trace.record(
-                    "application_result_decoded",
-                    test_id_hex=decoded.test_id.bytes.hex(),
-                    tick=decoded.tick_number,
-                    condition=decoded.condition,
-                    payload_size=len(received.data),
-                    payload_sha256=payload_hash(received.data),
-                )
-                if decoded != expected:
-                    details = {"expected_result": expected, "actual_result": decoded}
-                    self.trace.record("application_result_mismatch", **details)
-                    raise ScenarioFailure(
-                        "decoded TestResult did not match deterministic oracle", details=details
-                    )
-                self._service()
-                extra = self._take_pending(hrtp=False)
-                if extra is not None:
-                    try:
-                        duplicate = self.application_codec.decode(extra.data)
-                    except protocol.ApplicationDecodeError as exc:
-                        raise ScenarioFailure(
-                            f"unexpected extra Application payload after TestResult: {exc}"
-                        ) from exc
-                    if type(duplicate) is protocol.TestResult:
-                        duplicate_key = (duplicate.test_id.bytes, duplicate.tick_number)
-                        if duplicate_key == key or duplicate_key in self._seen_results:
-                            raise ScenarioFailure(
-                                f"duplicate TestResult for Test ID {duplicate.test_id.bytes.hex()} "
-                                f"tick {duplicate.tick_number}"
-                            )
-                    raise ScenarioFailure(
-                        "more than one non-HRTP Application message followed instruction"
-                    )
-                return (self._monotonic() - started) * 1000
-            if any(item.data.startswith(MAGIC) for item in self._pending_messages):
-                unexpected = next(
-                    item for item in self._pending_messages if item.data.startswith(MAGIC)
-                )
-                self.trace.record(
-                    "unexpected_message",
-                    expected="TestResult",
-                    actual="HRTP response",
-                    payload_size=len(unexpected.data),
-                    payload_sha256=payload_hash(unexpected.data),
-                )
-                raise ScenarioFailure("unexpected HRTP message while waiting for TestResult")
-            self._pause()
-        raise ScenarioFailure("timed out waiting for TestResult")
-
-    def _send_instruction(
-        self,
-        configuration: protocol.TestConfiguration,
-        instruction: protocol.TestInstruction,
-        baseline: StatusPayloadV2,
-    ) -> tuple[StatusPayloadV2, float]:
-        self._require_application_discovery()
-        digest = instruction_semantic_digest(instruction)
-        encoded = self._encode_application_message(instruction, semantic_digest=digest)
-        if len(encoded) != FIXED_INSTRUCTION_SIZE:
-            raise ScenarioFailure(
-                "instruction encoded size mismatch: "
-                f"expected {FIXED_INSTRUCTION_SIZE}, got {len(encoded)}"
-            )
-        delivery_ms = self._submit_and_confirm(
-            encoded,
-            kind="APPLICATION_TEST_INSTRUCTION",
-            evidence={
-                "test_id_hex": instruction.test_id.bytes.hex(),
-                "tick": instruction.tick_number,
-                "instruction_digest": digest,
-            },
-        )
-        expected = expected_result(configuration, instruction)
-        result_latency_ms = self._wait_expected_result(
-            expected, deadline=self._deadline(self.request_timeout_ms)
-        )
-        result_wire = self.application_codec.encode(expected)
-        if len(result_wire) != FIXED_RESULT_SIZE:
-            raise ScenarioFailure(
-                "result encoded size mismatch: "
-                f"expected {FIXED_RESULT_SIZE}, got {len(result_wire)}"
-            )
-        status = self.run_status()
-        if status.instructions_accepted != baseline.instructions_accepted + 1:
-            raise ScenarioFailure("instruction acceptance counter did not increase by one")
-        if status.results_encoded != baseline.results_encoded + 1:
-            raise ScenarioFailure("results encoded counter did not increase by one")
-        if status.last_instruction_digest != digest:
-            raise ScenarioFailure(
-                f"firmware instruction digest mismatch: expected 0x{digest:08X}, "
-                f"got 0x{status.last_instruction_digest:08X}"
-            )
-        next_tick = instruction.tick_number + 1
-        if status.next_expected_tick != next_tick:
-            raise ScenarioFailure(
-                "next expected tick mismatch: "
-                f"expected {next_tick}, got {status.next_expected_tick}"
-            )
-        expected_state = (
-            ApplicationHarnessState.COMPLETE
-            if next_tick == configuration.expected_tick_count
-            else ApplicationHarnessState.ACCEPTING_INSTRUCTIONS
-        )
-        if status.application_harness_state != int(expected_state):
-            raise ScenarioFailure(
-                f"firmware harness state mismatch after tick {instruction.tick_number}: "
-                f"expected {expected_state.name}, got {status.application_harness_state}"
-            )
-        self.trace.record(
-            "application_tick_complete",
-            test_id_hex=instruction.test_id.bytes.hex(),
-            tick=instruction.tick_number,
-            instruction_digest=digest,
-            delivery_confirmation_latency_ms=delivery_ms,
-            result_latency_ms=result_latency_ms,
-            status=status,
-        )
-        return status, result_latency_ms
-
     def run_application_smoke(self) -> dict[str, object]:
-        baseline = self.run_status()
+        self.run_status()
         self.discover_application()
         test_id = new_test_id()
         configuration = representative_configuration(test_id)
-        status = self._send_configuration(
+        instructions = representative_instructions(test_id)
+        transaction = self._run_application_transaction(
             configuration,
-            baseline,
-            expected_size=REPRESENTATIVE_CONFIGURATION_SIZE,
-            expected_digest=REPRESENTATIVE_CONFIGURATION_DIGEST,
+            instructions,
+            {item.tick_number: expected_result(configuration, item) for item in instructions},
+            variable_instruction=False,
+            variable_result=False,
         )
-        latencies: list[float] = []
-        for instruction in representative_instructions(test_id):
-            status, latency = self._send_instruction(configuration, instruction, status)
-            latencies.append(latency)
+        status = self.run_status()
         if status.application_harness_state != int(ApplicationHarnessState.COMPLETE):
             raise ScenarioFailure("Application smoke did not finish in COMPLETE state")
         return {
             "application_scenario": "application-smoke",
             "test_id_hex": test_id.bytes.hex(),
             "configuration_digest": REPRESENTATIVE_CONFIGURATION_DIGEST,
-            "instruction_digests": [
-                instruction_semantic_digest(item) for item in representative_instructions(test_id)
-            ],
-            "result_latencies_ms": latencies,
+            "instruction_digests": [instruction_semantic_digest(item) for item in instructions],
+            "result_latencies_ms": transaction["response_latencies_ms"],
             "final_status": status,
         }
 
     def run_application_boundaries(self) -> dict[str, object]:
-        baseline = self.run_status()
+        self.run_status()
         self.discover_application()
         first_id = new_test_id()
         disabled = all_disabled_configuration(first_id)
-        status = self._send_configuration(
+        first_instruction = zero_instruction(first_id)
+        self._run_application_transaction(
             disabled,
-            baseline,
-            expected_size=ALL_DISABLED_CONFIGURATION_SIZE,
-            expected_digest=ALL_DISABLED_CONFIGURATION_DIGEST,
+            (first_instruction,),
+            {0: expected_result(disabled, first_instruction)},
+            variable_instruction=False,
+            variable_result=False,
         )
-        status, _ = self._send_instruction(disabled, zero_instruction(first_id), status)
 
         representative_id = new_test_id()
         representative = representative_configuration(representative_id)
@@ -1264,17 +1169,29 @@ class ProtocolTestRunner:
                 f"expected {REPRESENTATIVE_CONFIGURATION_SIZE}, "
                 f"got {len(representative_wire)}"
             )
+        representative_instructions_for_transaction = representative_instructions(representative_id)
+        self._run_application_transaction(
+            representative,
+            representative_instructions_for_transaction,
+            {
+                item.tick_number: expected_result(representative, item)
+                for item in representative_instructions_for_transaction
+            },
+            variable_instruction=False,
+            variable_result=False,
+        )
 
         second_id = new_test_id()
         maximum = maximum_extension_configuration(second_id)
-        status = self._send_configuration(
-            maximum,
-            status,
-            expected_size=MAX_EXTENSION_CONFIGURATION_SIZE,
-            expected_digest=MAX_EXTENSION_CONFIGURATION_DIGEST,
-        )
         instruction = representative_instructions(second_id)[0]
-        status, _ = self._send_instruction(maximum, instruction, status)
+        self._run_application_transaction(
+            maximum,
+            (instruction,),
+            {0: expected_result(maximum, instruction)},
+            variable_instruction=False,
+            variable_result=False,
+        )
+        status = self.run_status()
 
         restricted = protocol.ApplicationCodec(
             protocol.ApplicationConfig(
@@ -1346,41 +1263,62 @@ class ProtocolTestRunner:
         if after_malformed.configurations_accepted != baseline.configurations_accepted:
             raise ScenarioFailure("malformed Application message was accepted as a configuration")
 
-        status = self._send_configuration(
+        self._send_and_expect_response(
             configuration,
-            after_malformed,
-            expected_size=REPRESENTATIVE_CONFIGURATION_SIZE,
-            expected_digest=REPRESENTATIVE_CONFIGURATION_DIGEST,
+            self._application_response(
+                test_id,
+                protocol.ResponseScope.TEST_CONFIGURATION,
+                protocol.ResponseOutcome.ACCEPTED,
+            ),
+            kind="APPLICATION_TEST_CONFIGURATION",
         )
         wrong_id = new_test_id()
         while wrong_id == test_id:
             wrong_id = new_test_id()
         wrong_instruction = representative_instructions(wrong_id)[0]
         wrong_digest = instruction_semantic_digest(wrong_instruction)
-        wrong_wire = self._encode_application_message(
-            wrong_instruction, semantic_digest=wrong_digest
-        )
-        self._submit_and_confirm(
-            wrong_wire,
+        self._send_and_expect_response(
+            wrong_instruction,
+            self._application_response(
+                wrong_id,
+                protocol.ResponseScope.TICK,
+                protocol.ResponseOutcome.REJECTED,
+                tick_number=0,
+                reason=protocol.ResponseReason.INCONSISTENT_TEST_ID,
+            ),
             kind="APPLICATION_SEMANTIC_REJECTION",
-            evidence={
-                "test_id_hex": wrong_id.bytes.hex(),
-                "tick": 0,
-                "instruction_digest": wrong_digest,
-                "reason_expected": "wrong_test_id",
-            },
         )
         rejected = self.run_status()
-        if rejected.application_semantic_rejections != status.application_semantic_rejections + 1:
+        if (
+            rejected.application_semantic_rejections
+            != after_malformed.application_semantic_rejections + 1
+        ):
             raise ScenarioFailure("Application semantic-rejection counter did not increase")
-        if rejected.instructions_accepted != status.instructions_accepted:
+        if rejected.instructions_accepted != after_malformed.instructions_accepted:
             raise ScenarioFailure("wrong-Test-ID instruction was incorrectly accepted")
         if rejected.next_expected_tick != 0:
             raise ScenarioFailure("semantic rejection corrupted next expected tick")
 
+        reset = reset_application_control()
+        self._send_and_expect_response(
+            reset,
+            self._application_response(
+                None,
+                protocol.ResponseScope.GLOBAL_CONTROL,
+                protocol.ResponseOutcome.COMPLETED,
+                global_control_command=protocol.GlobalControlCommand.RESET_APPLICATION,
+            ),
+            kind="APPLICATION_GLOBAL_CONTROL_RESET_APPLICATION",
+        )
         instructions = representative_instructions(test_id)
-        for instruction in instructions:
-            rejected, _ = self._send_instruction(configuration, instruction, rejected)
+        self._run_application_transaction(
+            configuration,
+            instructions,
+            {item.tick_number: expected_result(configuration, item) for item in instructions},
+            variable_instruction=False,
+            variable_result=False,
+        )
+        rejected = self.run_status()
         return {
             "application_scenario": "application-negative",
             "test_id_hex": test_id.bytes.hex(),
@@ -1402,7 +1340,7 @@ class ProtocolTestRunner:
     def run_application_repeat(self, count: int) -> dict[str, object]:
         if count < 1:
             raise ValueError("application repeat count must be positive")
-        status = self.run_status()
+        self.run_status()
         self.discover_application()
         latencies: list[float] = []
         test_ids: list[str] = []
@@ -1410,16 +1348,16 @@ class ProtocolTestRunner:
             test_id = new_test_id()
             test_ids.append(test_id.bytes.hex())
             configuration = all_disabled_configuration(test_id)
-            status = self._send_configuration(
+            instruction = zero_instruction(test_id)
+            transaction = self._run_application_transaction(
                 configuration,
-                status,
-                expected_size=ALL_DISABLED_CONFIGURATION_SIZE,
-                expected_digest=ALL_DISABLED_CONFIGURATION_DIGEST,
+                (instruction,),
+                {0: expected_result(configuration, instruction)},
+                variable_instruction=False,
+                variable_result=False,
             )
-            status, latency = self._send_instruction(
-                configuration, zero_instruction(test_id), status
-            )
-            latencies.append(latency)
+            latencies.extend(transaction["response_latencies_ms"])
+        status = self.run_status()
         return {
             "application_scenario": "application-repeat",
             "completed": count,
@@ -1480,10 +1418,21 @@ class ProtocolTestRunner:
                 }
             )
 
-        for control in execution_controls(control_test_id):
+        controls = execution_controls(control_test_id)
+        control_expectations = (
+            self._application_response(
+                control_test_id,
+                protocol.ResponseScope.EXECUTION_CONTROL,
+                protocol.ResponseOutcome.REJECTED,
+                control_command=protocol.ControlCommand.START,
+                reason=protocol.ResponseReason.OPERATION_NOT_ALLOWED,
+            ),
+            execution_control_response(controls[1]),
+        )
+        for control, expected_control in zip(controls, control_expectations, strict=True):
             exchange(
                 control,
-                execution_control_response(control),
+                expected_control,
                 kind=f"APPLICATION_EXECUTION_CONTROL_{control.command.name}",
             )
         reset = reset_application_control()
@@ -1521,7 +1470,7 @@ class ProtocolTestRunner:
                 final_status.application_encode_failures - baseline.application_encode_failures
             ),
         }
-        if any(failure_deltas.values()):
+        if failure_deltas["decode_failures"] or failure_deltas["encode_failures"]:
             raise ScenarioFailure(
                 "Application message-fixture scenario changed failure counters",
                 details={"failure_deltas": failure_deltas, "final_status": final_status},
@@ -1681,14 +1630,26 @@ class ProtocolTestRunner:
         self.discover_application()
         old_id = new_test_id()
         configuration = representative_configuration(old_id)
-        status = self._send_configuration(
+        self._send_and_expect_response(
             configuration,
-            status,
-            expected_size=REPRESENTATIVE_CONFIGURATION_SIZE,
-            expected_digest=REPRESENTATIVE_CONFIGURATION_DIGEST,
+            self._application_response(
+                old_id,
+                protocol.ResponseScope.TEST_CONFIGURATION,
+                protocol.ResponseOutcome.ACCEPTED,
+            ),
+            kind="APPLICATION_TEST_CONFIGURATION",
         )
         instructions = representative_instructions(old_id)
-        status, _ = self._send_instruction(configuration, instructions[0], status)
+        self._send_and_expect_response(
+            instructions[0],
+            self._application_response(
+                old_id,
+                protocol.ResponseScope.TICK,
+                protocol.ResponseOutcome.ACCEPTED,
+                tick_number=0,
+            ),
+            kind="APPLICATION_TEST_INSTRUCTION",
+        )
         reconnect = self._reset_and_reconnect(
             prompt=prompt,
             allow_unobserved_reset=allow_unobserved_reset,
@@ -1703,14 +1664,16 @@ class ProtocolTestRunner:
         if reset_status.next_expected_tick != 0 or reset_status.active_expected_tick_count != 0:
             raise ScenarioFailure("Application transaction state was not cleared after reconnect")
 
-        old_wire = self._encode_application_message(
-            instructions[1], semantic_digest=instruction_semantic_digest(instructions[1])
-        )
-        self._require_application_discovery()
-        self._submit_and_confirm(
-            old_wire,
+        self._send_and_expect_response(
+            instructions[1],
+            self._application_response(
+                old_id,
+                protocol.ResponseScope.TICK,
+                protocol.ResponseOutcome.REJECTED,
+                tick_number=1,
+                reason=protocol.ResponseReason.OPERATION_NOT_ALLOWED,
+            ),
             kind="APPLICATION_STALE_TEST_INSTRUCTION",
-            evidence={"test_id_hex": old_id.bytes.hex(), "tick": 1},
         )
         rejected = self.run_status()
         if (
@@ -1725,13 +1688,15 @@ class ProtocolTestRunner:
 
         new_id = new_test_id()
         new_configuration = all_disabled_configuration(new_id)
-        status = self._send_configuration(
+        new_instruction = zero_instruction(new_id)
+        self._run_application_transaction(
             new_configuration,
-            rejected,
-            expected_size=ALL_DISABLED_CONFIGURATION_SIZE,
-            expected_digest=ALL_DISABLED_CONFIGURATION_DIGEST,
+            (new_instruction,),
+            {0: expected_result(new_configuration, new_instruction)},
+            variable_instruction=False,
+            variable_result=False,
         )
-        status, _ = self._send_instruction(new_configuration, zero_instruction(new_id), status)
+        status = self.run_status()
         return {
             "application_scenario": "application-reset-reconnect",
             "old_test_id_hex": old_id.bytes.hex(),
@@ -1739,7 +1704,7 @@ class ProtocolTestRunner:
             "old_configuration_digest": REPRESENTATIVE_CONFIGURATION_DIGEST,
             "old_instruction_digest": instruction_semantic_digest(instructions[0]),
             "new_configuration_digest": ALL_DISABLED_CONFIGURATION_DIGEST,
-            "new_instruction_digest": instruction_semantic_digest(zero_instruction(new_id)),
+            "new_instruction_digest": instruction_semantic_digest(new_instruction),
             **reconnect,
             "post_reconnect_transaction_succeeded": True,
             "final_status": status,

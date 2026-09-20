@@ -246,10 +246,24 @@ hilrig-protocol-test application-repeat --port /dev/ttyACM0 --count 100
 hilrig-protocol-test application-reset-reconnect --port /dev/ttyACM0
 ```
 
-`application-v03` checks STATUS compatibility, discovers the exact protocol version, runs a
-three-tick fixed transaction, and runs a three-tick sparse variable transaction using ticks
-0 and 2 only. It validates configuration/instruction/finalizer/start Responses, deferred
-fixed and variable results, result-family independence, and final `COMPLETE` state.
+To collect and exercise the pytest hardware category without a serial device, override
+the default marker selection explicitly:
+
+```sh
+python -m pytest --collect-only -q -m hardware tests/hardware
+python -m pytest -q -m hardware tests/hardware
+```
+
+With no `HILRIG_TEST_PORT` or explicit USB identity variables, the collected hardware cases
+skip during setup with the intended "set HILRIG_TEST_PORT or explicit USB identity fields"
+reason.
+
+`application-v03` checks STATUS compatibility, discovers the exact protocol version, and
+runs the shared v0.3 lifecycle for fixed and variable transactions. It covers fixed results,
+variable results, fixed-instruction/variable-result and variable-instruction/fixed-result
+transactions, sparse omitted ticks, and a genuine eight-chunk Type 34 result stream with
+repeated UART, SPI, and CAN records. It validates correlated configuration/tick/finalizer/
+start Responses, deferred results, result-family independence, and final `COMPLETE` state.
 
 `application-boundaries` independently completes the all-disabled configuration and the
 maximum-extension configuration, checks exact wire sizes/results, and proves an oversized
@@ -261,9 +275,11 @@ bytes, proves the decode-failure counter increments without changing the invalid
 counter, follows with a valid configuration, rejects a wrong-Test-ID instruction, and
 then completes the valid transaction.
 
-The application harness is deterministic and synthetic. It validates the public protocol
-codec, Transport delivery, lifecycle gating, upload retention, backpressure, and result
-correlation; it does not drive or prove real GPIO, ADC, PWM, UART, SPI, I2C, or CAN behavior.
+The application harness is deterministic synthetic on-target protocol validation. It validates
+the public protocol codec, Transport delivery, lifecycle gating, upload retention, backpressure,
+multi-chunk result correlation, and semantic rejection behavior; it does not drive or prove real
+GPIO, ADC, PWM, UART, SPI, I2C, or CAN behavior. Physical peripheral and electrical validation
+remains pending a board test.
 
 `application-repeat` runs the requested number of complete one-tick transactions with
 fresh 16-byte Test IDs and records result latency/counter evidence.

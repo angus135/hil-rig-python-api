@@ -23,6 +23,7 @@ from hilrig.protocol_test.application_hardware import (  # noqa: E402
     COMPATIBILITY_PROFILE_ID,
     PROTOCOL_VERSION,
     configuration_semantic_digest,
+    configured_initial_instruction,
     execution_control_response,
     global_control_response,
     instruction_semantic_digest,
@@ -30,8 +31,6 @@ from hilrig.protocol_test.application_hardware import (  # noqa: E402
     representative_configuration,
     representative_instructions,
     response_fixtures,
-    variable_result_oracle,
-    zero_instruction,
 )
 from hilrig.protocol_test.connection import ProtocolTestConnection  # noqa: E402
 from hilrig.protocol_test.harness_codec import (  # noqa: E402
@@ -188,10 +187,21 @@ class ApplicationRigBehavior:
         self.v03_mode = False
         self.v03_instructions: dict[int, protocol.TestInstruction] = {}
         self.v03_updates: dict[int, list[protocol.LogicalOperation]] = {}
+        self.current_update_tick: int | None = None
         self.v03_result_queue: deque[bytes] = deque()
+        self.selected_instruction_family = 0
+        self.selected_result_family = 0
+        self.completed_instruction_ticks = 0
+        self.current_chunk_count = 0
+        self.maximum_chunk_count = 0
+        self.finalization_requests = 0
+        self.accepted_finalizations = 0
+        self.variable_operations_accepted = 0
+        self.result_records_emitted = 0
+        self.selected_test_profile = 0
+        self.selected_fault_mode = 0
 
-    def reset_session(self) -> None:
-        self.protocol_version_confirmed = False
+    def _reset_transaction(self) -> None:
         self.active_configuration = None
         self.state = ApplicationHarnessState.WAITING_FOR_CONFIGURATION
         self.next_tick = 0
@@ -199,7 +209,157 @@ class ApplicationRigBehavior:
         self.v03_mode = False
         self.v03_instructions.clear()
         self.v03_updates.clear()
+        self.current_update_tick = None
         self.v03_result_queue.clear()
+        self.selected_instruction_family = 0
+        self.selected_result_family = 0
+        self.current_chunk_count = 0
+        self.selected_test_profile = 0
+        self.selected_fault_mode = 0
+
+    def reset_session(self) -> None:
+        self.protocol_version_confirmed = False
+        self._reset_transaction()
+
+    @staticmethod
+    def _application_response(
+        test_id: protocol.TestId | None,
+        scope: protocol.ResponseScope,
+        outcome: protocol.ResponseOutcome,
+        *,
+        tick_number: int = 0,
+        control_command: protocol.ControlCommand = protocol.ControlCommand.INVALID,
+        reason: protocol.ResponseReason = protocol.ResponseReason.NONE,
+        global_control_command: protocol.GlobalControlCommand = (
+            protocol.GlobalControlCommand.INVALID
+        ),
+    ) -> protocol.ApplicationResponse:
+        return protocol.ApplicationResponse(
+            test_id,
+            scope,
+            outcome,
+            reason,
+            tick_number=tick_number,
+            control_command=control_command,
+            global_control_command=global_control_command,
+        )
+
+    def _reject(
+        self,
+        message: object,
+        scope: protocol.ResponseScope,
+        reason: protocol.ResponseReason,
+        *,
+        tick_number: int = 0,
+    ) -> bytes:
+        self.semantic_rejections += 1
+        self.last_application_status = int(protocol.ApplicationStatus.VALIDATION_FAILED)
+        self.current_update_tick = None
+        self.current_chunk_count = 0
+        if self.state in {
+            ApplicationHarnessState.ACCEPTING_INSTRUCTIONS,
+            ApplicationHarnessState.READY_TO_START,
+        }:
+            self.state = ApplicationHarnessState.UPLOAD_INVALID
+        test_id = getattr(message, "test_id", None)
+        control_command = (
+            message.command
+            if isinstance(message, protocol.ExecutionControl)
+            else protocol.ControlCommand.INVALID
+        )
+        global_control_command = (
+            message.command
+            if isinstance(message, protocol.GlobalControl)
+            else protocol.GlobalControlCommand.INVALID
+        )
+        return self.codec.encode(
+            self._application_response(
+                None if isinstance(message, protocol.GlobalControl) else test_id,
+                scope,
+                protocol.ResponseOutcome.REJECTED,
+                tick_number=tick_number,
+                control_command=control_command,
+                reason=reason,
+                global_control_command=global_control_command,
+            )
+        )
+
+    def _unconfirmed_response(self, message: object) -> bytes | None:
+        if isinstance(message, protocol.TestConfiguration):
+            response = self._application_response(
+                message.test_id,
+                protocol.ResponseScope.TEST_CONFIGURATION,
+                protocol.ResponseOutcome.REJECTED,
+                reason=protocol.ResponseReason.OPERATION_NOT_ALLOWED,
+            )
+        elif isinstance(message, (protocol.TestInstruction, protocol.UpdateInstruction)):
+            response = self._application_response(
+                message.test_id,
+                protocol.ResponseScope.TICK,
+                protocol.ResponseOutcome.REJECTED,
+                tick_number=message.tick_number,
+                reason=protocol.ResponseReason.OPERATION_NOT_ALLOWED,
+            )
+        elif isinstance(message, protocol.FinalizeTestUpload):
+            response = self._application_response(
+                message.test_id,
+                protocol.ResponseScope.COMPLETE_TEST,
+                protocol.ResponseOutcome.REJECTED,
+                reason=protocol.ResponseReason.OPERATION_NOT_ALLOWED,
+            )
+        elif isinstance(message, protocol.ExecutionControl):
+            response = self._application_response(
+                message.test_id,
+                protocol.ResponseScope.EXECUTION_CONTROL,
+                protocol.ResponseOutcome.REJECTED,
+                control_command=message.command,
+                reason=protocol.ResponseReason.OPERATION_NOT_ALLOWED,
+            )
+        elif isinstance(message, protocol.GlobalControl):
+            response = self._application_response(
+                None,
+                protocol.ResponseScope.GLOBAL_CONTROL,
+                protocol.ResponseOutcome.REJECTED,
+                global_control_command=message.command,
+                reason=protocol.ResponseReason.OPERATION_NOT_ALLOWED,
+            )
+        else:
+            return None
+        return self.codec.encode(response)
+
+    @staticmethod
+    def _operation_enabled(
+        configuration: protocol.TestConfiguration, operation: protocol.LogicalOperation
+    ) -> bool:
+        channel = operation.channel
+        if operation.peripheral_type is protocol.PeripheralType.DIGITAL_OUTPUT:
+            return (
+                channel < len(configuration.digital_out)
+                and configuration.digital_out[channel].enabled
+                and channel < len(configuration.digital_in)
+                and configuration.digital_in[channel].enabled
+            )
+        if operation.peripheral_type is protocol.PeripheralType.ANALOG_OUTPUT:
+            return (
+                channel < len(configuration.analog_out)
+                and configuration.analog_out[channel].enabled
+                and channel < len(configuration.analog_in)
+                and configuration.analog_in[channel].enabled
+            )
+        if operation.peripheral_type is protocol.PeripheralType.PWM_OUTPUT:
+            return (
+                channel < len(configuration.pwm_out)
+                and configuration.pwm_out[channel].enabled
+                and channel < len(configuration.pwm_in)
+                and configuration.pwm_in[channel].enabled
+            )
+        if operation.peripheral_type is protocol.PeripheralType.UART:
+            return channel < len(configuration.uart) and configuration.uart[channel].enabled
+        if operation.peripheral_type is protocol.PeripheralType.SPI:
+            return channel < len(configuration.spi) and configuration.spi[channel].enabled
+        if operation.peripheral_type is protocol.PeripheralType.CAN:
+            return channel < len(configuration.can) and configuration.can[channel].enabled
+        return False
 
     def status_payload(self) -> bytes:
         import struct
@@ -229,11 +389,24 @@ class ApplicationRigBehavior:
         values[29] = self.last_message_type
         values[30] = self.configuration_digest
         values[31] = self.last_instruction_digest
+        values[32] = self.selected_instruction_family
+        values[33] = self.selected_result_family
+        values[34] = self.completed_instruction_ticks
+        values[35] = self.current_chunk_count
+        values[36] = self.maximum_chunk_count
+        values[37] = self.finalization_requests
+        values[38] = self.accepted_finalizations
+        values[39] = self.variable_operations_accepted
+        values[40] = self.result_records_emitted
+        values[45] = self.selected_test_profile
+        values[46] = self.selected_fault_mode
         return struct.pack("<48I", *values)
 
     def poll_output(self) -> bytes | None:
         if self.v03_result_queue:
             return self.v03_result_queue.popleft()
+        if self.state is ApplicationHarnessState.EMITTING_RESULTS:
+            self.state = ApplicationHarnessState.COMPLETE
         return None
 
     def _queue_v03_results(self) -> None:
@@ -245,15 +418,62 @@ class ApplicationRigBehavior:
         )
         for tick in range(self.active_expected_tick_count):
             if variable:
-                result = variable_result_oracle(test_id, tick)
-                if tick not in self.v03_updates:
-                    result = replace(result, records=())
+                operations = self.v03_updates.get(tick, [])
+                records: list[protocol.CapturedRecord] = []
+                for operation in operations:
+                    result_type = {
+                        protocol.PeripheralType.DIGITAL_OUTPUT: (
+                            protocol.PeripheralType.DIGITAL_INPUT
+                        ),
+                        protocol.PeripheralType.ANALOG_OUTPUT: (
+                            protocol.PeripheralType.ANALOG_INPUT
+                        ),
+                        protocol.PeripheralType.PWM_OUTPUT: protocol.PeripheralType.PWM_INPUT,
+                    }.get(operation.peripheral_type, operation.peripheral_type)
+                    payload = operation.payload
+                    if operation.peripheral_type is protocol.PeripheralType.SPI:
+                        packet_count = payload[0]
+                        payload = payload[1 + packet_count :]
+                    records.append(protocol.CapturedRecord(result_type, operation.channel, payload))
+                result = protocol.VariableTestResult(
+                    test_id, tick, protocol.ResultCondition.OK, 0, 0, tuple(records)
+                )
+                chunks: list[bytes] = []
+                current: list[protocol.CapturedRecord] = []
+                for record in result.records:
+                    candidate = replace(result, records=tuple(current + [record]), flags=0)
+                    pair = (record.peripheral_type, record.channel)
+                    if any(
+                        (existing.peripheral_type, existing.channel) == pair for existing in current
+                    ):
+                        encoded = b""
+                    else:
+                        try:
+                            encoded = self.codec.encode(candidate)
+                        except protocol.ApplicationEncodeError:
+                            encoded = b""
+                    if current and not encoded:
+                        chunks.append(
+                            self.codec.encode(replace(result, records=tuple(current), flags=1))
+                        )
+                        current = []
+                    current.append(record)
+                if current:
+                    chunks.append(self.codec.encode(replace(result, records=tuple(current))))
+                if not chunks:
+                    chunks.append(self.codec.encode(result))
+                self.v03_result_queue.extend(chunks)
+                self.result_records_emitted += len(records)
             else:
                 result = firmware_result(
                     self.active_configuration,
-                    self.v03_instructions.get(tick, zero_instruction(test_id)),
+                    self.v03_instructions.get(
+                        tick,
+                        configured_initial_instruction(self.active_configuration, tick),
+                    ),
                 )
-            self.v03_result_queue.append(self.codec.encode(result))
+                self.v03_result_queue.append(self.codec.encode(result))
+            self.results_encoded += 1
 
     def _hrtp(self, data: bytes) -> bytes | None:
         try:
@@ -309,128 +529,254 @@ class ApplicationRigBehavior:
         if not self.protocol_version_confirmed:
             self.semantic_rejections += 1
             self.last_application_status = int(protocol.ApplicationStatus.VERSION_MISMATCH)
-            return None
-        if (
-            type(message) is protocol.TestConfiguration
-            and message.expected_tick_count == 3
-            and (message.extension_data == b"" or message.extension_data.startswith(b"HTV3"))
-        ):
-            self.v03_mode = True
-        if self.v03_mode and type(message) is protocol.TestConfiguration:
-            self.active_configuration = message
-            self.configurations_accepted += 1
-            self.configuration_digest = configuration_semantic_digest(message)
-            self.state = ApplicationHarnessState.ACCEPTING_INSTRUCTIONS
-            self.next_tick = 0
-            self.active_expected_tick_count = message.expected_tick_count
-            return self.codec.encode(
-                protocol.ApplicationResponse(
-                    message.test_id,
-                    protocol.ResponseScope.TEST_CONFIGURATION,
-                    protocol.ResponseOutcome.ACCEPTED,
-                    protocol.ResponseReason.NONE,
-                )
-            )
-        if self.v03_mode and type(message) is protocol.TestInstruction:
-            assert self.active_configuration is not None
-            self.v03_instructions[message.tick_number] = message
-            self.instructions_accepted += 1
-            self.last_instruction_digest = instruction_semantic_digest(message)
-            self.next_tick = message.tick_number + 1
-            return self.codec.encode(
-                protocol.ApplicationResponse(
-                    message.test_id,
-                    protocol.ResponseScope.TICK,
-                    protocol.ResponseOutcome.ACCEPTED,
-                    protocol.ResponseReason.NONE,
-                    tick_number=message.tick_number,
-                )
-            )
-        if self.v03_mode and type(message) is protocol.UpdateInstruction:
-            self.v03_updates.setdefault(message.tick_number, []).extend(message.operations)
-            if message.flags == 0:
-                return self.codec.encode(
-                    protocol.ApplicationResponse(
-                        message.test_id,
-                        protocol.ResponseScope.TICK,
-                        protocol.ResponseOutcome.ACCEPTED,
-                        protocol.ResponseReason.NONE,
-                        tick_number=message.tick_number,
-                    )
-                )
-            return None
-        if self.v03_mode and type(message) is protocol.FinalizeTestUpload:
-            assert self.active_configuration is not None
-            self.state = ApplicationHarnessState.READY_TO_START
-            return self.codec.encode(
-                protocol.ApplicationResponse(
-                    self.active_configuration.test_id,
-                    protocol.ResponseScope.COMPLETE_TEST,
-                    protocol.ResponseOutcome.ACCEPTED,
-                    protocol.ResponseReason.NONE,
-                )
-            )
-        if self.v03_mode and type(message) is protocol.ExecutionControl:
-            if message.command is protocol.ControlCommand.START:
-                self.state = ApplicationHarnessState.EMITTING_RESULTS
-                self._queue_v03_results()
-            return self.codec.encode(execution_control_response(message))
+            return self._unconfirmed_response(message)
         if type(message) is protocol.TestConfiguration:
             if self.state not in {
                 ApplicationHarnessState.WAITING_FOR_CONFIGURATION,
                 ApplicationHarnessState.COMPLETE,
+                ApplicationHarnessState.UPLOAD_INVALID,
             }:
-                self.semantic_rejections += 1
-                self.last_application_status = int(protocol.ApplicationStatus.VALIDATION_FAILED)
-                return None
+                return self._reject(
+                    message,
+                    protocol.ResponseScope.TEST_CONFIGURATION,
+                    protocol.ResponseReason.OPERATION_NOT_ALLOWED,
+                )
+            if message.extension_data.startswith(b"HTV3") and (
+                len(message.extension_data) < 8
+                or message.extension_data[4] > 1
+                or message.extension_data[5] > 2
+            ):
+                return self._reject(
+                    message,
+                    protocol.ResponseScope.TEST_CONFIGURATION,
+                    protocol.ResponseReason.VALIDATION_FAILED,
+                )
+            if message.expected_tick_count > 4:
+                return self._reject(
+                    message,
+                    protocol.ResponseScope.TEST_CONFIGURATION,
+                    protocol.ResponseReason.STORAGE_UNAVAILABLE,
+                )
+            self._reset_transaction()
+            self.v03_mode = True
             self.active_configuration = message
+            if message.extension_data.startswith(b"HTV3") and len(message.extension_data) >= 8:
+                self.selected_result_family = message.extension_data[4]
+                self.selected_fault_mode = message.extension_data[5]
+                self.selected_test_profile = self.selected_result_family + (
+                    self.selected_fault_mode << 8
+                )
             self.configurations_accepted += 1
             self.configuration_digest = configuration_semantic_digest(message)
             self.state = ApplicationHarnessState.ACCEPTING_INSTRUCTIONS
             self.next_tick = 0
             self.active_expected_tick_count = message.expected_tick_count
             self.last_application_status = int(protocol.ApplicationStatus.OK)
+            return self.codec.encode(
+                self._application_response(
+                    message.test_id,
+                    protocol.ResponseScope.TEST_CONFIGURATION,
+                    protocol.ResponseOutcome.ACCEPTED,
+                )
+            )
+        if type(message) is protocol.TestInstruction:
+            if self.state is not ApplicationHarnessState.ACCEPTING_INSTRUCTIONS:
+                return self._reject(
+                    message,
+                    protocol.ResponseScope.TICK,
+                    protocol.ResponseReason.OPERATION_NOT_ALLOWED,
+                    tick_number=message.tick_number,
+                )
+            assert self.active_configuration is not None
+            if message.test_id != self.active_configuration.test_id:
+                return self._reject(
+                    message,
+                    protocol.ResponseScope.TICK,
+                    protocol.ResponseReason.INCONSISTENT_TEST_ID,
+                    tick_number=message.tick_number,
+                )
+            if message.tick_number != self.next_tick:
+                return self._reject(
+                    message,
+                    protocol.ResponseScope.TICK,
+                    protocol.ResponseReason.INVALID_TICK,
+                    tick_number=message.tick_number,
+                )
+            self.v03_instructions[message.tick_number] = message
+            self.instructions_accepted += 1
+            self.selected_instruction_family = 1
+            self.completed_instruction_ticks += 1
+            self.last_instruction_digest = instruction_semantic_digest(message)
+            self.next_tick = message.tick_number + 1
+            self.last_application_status = int(protocol.ApplicationStatus.OK)
+            return self.codec.encode(
+                self._application_response(
+                    message.test_id,
+                    protocol.ResponseScope.TICK,
+                    protocol.ResponseOutcome.ACCEPTED,
+                    tick_number=message.tick_number,
+                )
+            )
+        if type(message) is protocol.UpdateInstruction:
+            if self.state is not ApplicationHarnessState.ACCEPTING_INSTRUCTIONS:
+                return self._reject(
+                    message,
+                    protocol.ResponseScope.TICK,
+                    protocol.ResponseReason.OPERATION_NOT_ALLOWED,
+                    tick_number=message.tick_number,
+                )
+            assert self.active_configuration is not None
+            if message.test_id != self.active_configuration.test_id:
+                return self._reject(
+                    message,
+                    protocol.ResponseScope.TICK,
+                    protocol.ResponseReason.INCONSISTENT_TEST_ID,
+                    tick_number=message.tick_number,
+                )
+            if message.tick_number >= self.active_expected_tick_count:
+                return self._reject(
+                    message,
+                    protocol.ResponseScope.TICK,
+                    protocol.ResponseReason.INVALID_TICK,
+                    tick_number=message.tick_number,
+                )
+            if self.selected_instruction_family == 1:
+                return self._reject(
+                    message,
+                    protocol.ResponseScope.TICK,
+                    protocol.ResponseReason.OPERATION_NOT_ALLOWED,
+                    tick_number=message.tick_number,
+                )
+            if self.current_update_tick is None:
+                if self.v03_updates and message.tick_number <= max(self.v03_updates):
+                    return self._reject(
+                        message,
+                        protocol.ResponseScope.TICK,
+                        protocol.ResponseReason.INVALID_TICK,
+                        tick_number=message.tick_number,
+                    )
+                self.current_update_tick = message.tick_number
+            elif message.tick_number != self.current_update_tick:
+                return self._reject(
+                    message,
+                    protocol.ResponseScope.TICK,
+                    protocol.ResponseReason.INVALID_TICK,
+                    tick_number=message.tick_number,
+                )
+            if self.current_chunk_count >= 8:
+                return self._reject(
+                    message,
+                    protocol.ResponseScope.TICK,
+                    protocol.ResponseReason.STORAGE_UNAVAILABLE,
+                    tick_number=message.tick_number,
+                )
+            existing = self.v03_updates.get(message.tick_number, [])
+            for operation in message.operations:
+                if not self._operation_enabled(self.active_configuration, operation):
+                    return self._reject(
+                        message,
+                        protocol.ResponseScope.TICK,
+                        protocol.ResponseReason.OPERATION_NOT_ALLOWED,
+                        tick_number=message.tick_number,
+                    )
+                if operation.peripheral_type not in {
+                    protocol.PeripheralType.UART,
+                    protocol.PeripheralType.SPI,
+                    protocol.PeripheralType.CAN,
+                } and any(
+                    prior.peripheral_type is operation.peripheral_type
+                    and prior.channel == operation.channel
+                    for prior in existing
+                ):
+                    return self._reject(
+                        message,
+                        protocol.ResponseScope.TICK,
+                        protocol.ResponseReason.VALIDATION_FAILED,
+                        tick_number=message.tick_number,
+                    )
+            self.v03_updates.setdefault(message.tick_number, []).extend(message.operations)
+            self.selected_instruction_family = 2
+            self.current_chunk_count += 1
+            self.maximum_chunk_count = max(self.maximum_chunk_count, self.current_chunk_count)
+            self.variable_operations_accepted += len(message.operations)
+            self.instructions_accepted += 1 if message.flags == 0 else 0
+            if message.flags == 0:
+                self.completed_instruction_ticks += 1
+                self.current_chunk_count = 0
+                self.current_update_tick = None
+                return self.codec.encode(
+                    self._application_response(
+                        message.test_id,
+                        protocol.ResponseScope.TICK,
+                        protocol.ResponseOutcome.ACCEPTED,
+                        tick_number=message.tick_number,
+                    )
+                )
             return None
+        if type(message) is protocol.FinalizeTestUpload:
+            self.finalization_requests += 1
+            if (
+                self.state is not ApplicationHarnessState.ACCEPTING_INSTRUCTIONS
+                or self.active_configuration is None
+                or message.test_id != self.active_configuration.test_id
+            ):
+                return self._reject(
+                    message,
+                    protocol.ResponseScope.COMPLETE_TEST,
+                    protocol.ResponseReason.INCONSISTENT_TEST_ID
+                    if self.active_configuration is not None
+                    and message.test_id != self.active_configuration.test_id
+                    else protocol.ResponseReason.OPERATION_NOT_ALLOWED,
+                )
+            self.state = ApplicationHarnessState.READY_TO_START
+            self.accepted_finalizations += 1
+            return self.codec.encode(
+                self._application_response(
+                    self.active_configuration.test_id,
+                    protocol.ResponseScope.COMPLETE_TEST,
+                    protocol.ResponseOutcome.ACCEPTED,
+                )
+            )
         if type(message) is protocol.ExecutionControl:
-            try:
+            if (
+                self.active_configuration is None
+                and message.command is not protocol.ControlCommand.ABORT
+            ):
+                return self._reject(
+                    message,
+                    protocol.ResponseScope.EXECUTION_CONTROL,
+                    protocol.ResponseReason.OPERATION_NOT_ALLOWED,
+                )
+            if (
+                self.active_configuration is not None
+                and message.test_id != self.active_configuration.test_id
+            ):
+                return self._reject(
+                    message,
+                    protocol.ResponseScope.EXECUTION_CONTROL,
+                    protocol.ResponseReason.INCONSISTENT_TEST_ID,
+                )
+            if message.command is protocol.ControlCommand.START:
+                if self.state is not ApplicationHarnessState.READY_TO_START:
+                    return self._reject(
+                        message,
+                        protocol.ResponseScope.EXECUTION_CONTROL,
+                        protocol.ResponseReason.OPERATION_NOT_ALLOWED,
+                    )
+                self.state = ApplicationHarnessState.EMITTING_RESULTS
+                self._queue_v03_results()
                 return self.codec.encode(execution_control_response(message))
-            except protocol.ApplicationEncodeError:
-                self.encode_failures += 1
-                return None
+            response = self.codec.encode(execution_control_response(message))
+            self._reset_transaction()
+            return response
         if type(message) is protocol.GlobalControl:
+            if message.command is protocol.GlobalControlCommand.RESET_APPLICATION:
+                self._reset_transaction()
             try:
                 return self.codec.encode(global_control_response(message))
             except protocol.ApplicationEncodeError:
                 self.encode_failures += 1
                 return None
-        if type(message) is protocol.TestInstruction:
-            if self.state is not ApplicationHarnessState.ACCEPTING_INSTRUCTIONS:
-                self.semantic_rejections += 1
-                self.last_application_status = int(protocol.ApplicationStatus.VALIDATION_FAILED)
-                return None
-            assert self.active_configuration is not None
-            if message.test_id != self.active_configuration.test_id:
-                self.semantic_rejections += 1
-                self.last_application_status = int(protocol.ApplicationStatus.INCONSISTENT_TEST_ID)
-                return None
-            if message.tick_number != self.next_tick:
-                self.semantic_rejections += 1
-                self.last_application_status = int(protocol.ApplicationStatus.INCONSISTENT_TICK)
-                return None
-            self.instructions_accepted += 1
-            self.last_instruction_digest = instruction_semantic_digest(message)
-            result = firmware_result(self.active_configuration, message)
-            try:
-                encoded = self.codec.encode(result)
-            except protocol.ApplicationEncodeError:
-                self.encode_failures += 1
-                return None
-            self.results_encoded += 1
-            self.next_tick += 1
-            if self.next_tick == self.active_expected_tick_count:
-                self.state = ApplicationHarnessState.COMPLETE
-            self.last_application_status = int(protocol.ApplicationStatus.OK)
-            return encoded
         if type(message) in {protocol.ApplicationResponse, protocol.ApplicationErrorMessage}:
             try:
                 return self.codec.encode(message)
@@ -567,7 +913,11 @@ def test_real_transport_fake_version_gate_and_message_type_diagnostics() -> None
     test_id = protocol.TestId(bytes(range(16)))
     configuration = representative_configuration(test_id)
 
-    assert behavior._application(behavior.codec.encode(configuration)) is None
+    pre_discovery_wire = behavior._application(behavior.codec.encode(configuration))
+    assert pre_discovery_wire is not None
+    pre_discovery_response = behavior.codec.decode(pre_discovery_wire)
+    assert type(pre_discovery_response) is protocol.ApplicationResponse
+    assert pre_discovery_response.outcome is protocol.ResponseOutcome.REJECTED
     assert behavior.protocol_version_confirmed is False
     assert behavior.last_message_type == 16
     assert behavior.last_application_status == int(protocol.ApplicationStatus.VERSION_MISMATCH)
@@ -580,13 +930,24 @@ def test_real_transport_fake_version_gate_and_message_type_diagnostics() -> None
     assert behavior.protocol_version_confirmed is True
     assert behavior.last_message_type == 1
 
-    assert behavior._application(behavior.codec.encode(configuration)) is None
+    configuration_response = behavior._application(behavior.codec.encode(configuration))
+    assert configuration_response is not None
+    assert (
+        behavior.codec.decode(configuration_response).outcome is protocol.ResponseOutcome.ACCEPTED
+    )
     assert behavior.last_message_type == 16
-    result_wire = behavior._application(
+    tick_wire = behavior._application(
         behavior.codec.encode(representative_instructions(test_id)[0])
     )
-    assert result_wire is not None
+    assert tick_wire is not None
+    assert behavior.codec.decode(tick_wire).outcome is protocol.ResponseOutcome.ACCEPTED
     assert behavior.last_message_type == 17
+
+    finalize_wire = behavior._application(
+        behavior.codec.encode(protocol.FinalizeTestUpload(test_id))
+    )
+    assert finalize_wire is not None
+    assert behavior.codec.decode(finalize_wire).outcome is protocol.ResponseOutcome.ACCEPTED
 
     for command in (protocol.ControlCommand.START, protocol.ControlCommand.ABORT):
         control_wire = behavior._application(
@@ -596,6 +957,8 @@ def test_real_transport_fake_version_gate_and_message_type_diagnostics() -> None
         control_response = behavior.codec.decode(control_wire)
         assert type(control_response) is protocol.ApplicationResponse
         assert control_response.outcome is protocol.ResponseOutcome.COMPLETED
+        if command is protocol.ControlCommand.START:
+            assert behavior.poll_output() is not None
         assert behavior.last_message_type == 19
 
     reset = protocol.GlobalControl(protocol.GlobalControlCommand.RESET_APPLICATION)
@@ -619,7 +982,9 @@ def test_real_transport_fake_version_gate_and_message_type_diagnostics() -> None
 
     behavior.reset_session()
     assert behavior.protocol_version_confirmed is False
-    assert behavior._application(behavior.codec.encode(configuration)) is None
+    pre_discovery_wire = behavior._application(behavior.codec.encode(configuration))
+    assert pre_discovery_wire is not None
+    assert behavior.codec.decode(pre_discovery_wire).outcome is protocol.ResponseOutcome.REJECTED
     assert behavior.last_application_status == int(protocol.ApplicationStatus.VERSION_MISMATCH)
 
     foreign_request = bytearray(behavior.codec.encode(protocol.SystemInfoRequest()))
@@ -631,7 +996,9 @@ def test_real_transport_fake_version_gate_and_message_type_diagnostics() -> None
     assert type(foreign_response) is protocol.SystemInfoResponse
     assert foreign_response.protocol_version == protocol.PROTOCOL_VERSION
     assert behavior.protocol_version_confirmed is False
-    assert behavior._application(behavior.codec.encode(reset)) is None
+    reset_wire = behavior._application(behavior.codec.encode(reset))
+    assert reset_wire is not None
+    assert behavior.codec.decode(reset_wire).outcome is protocol.ResponseOutcome.REJECTED
     assert behavior.last_message_type == 20
     assert behavior.last_application_status == int(protocol.ApplicationStatus.VERSION_MISMATCH)
 
@@ -685,7 +1052,13 @@ def test_real_protocol_application_runner_over_both_transport_endpoints(
         elif scenario == "application-v03":
             result = runner.run_application_v03()
             assert result["application_scenario"] == "application-v03"
-            assert [case["result_ticks"] for case in result["cases"]] == [[0, 1, 2], [0, 1, 2]]
+            assert [case["result_ticks"] for case in result["cases"]] == [
+                [0, 1, 2],
+                [0, 1, 2],
+                [0, 1, 2],
+                [0],
+                [0],
+            ]
         else:
             result = runner.run_application_repeat(3)
             assert result["completed"] == 3

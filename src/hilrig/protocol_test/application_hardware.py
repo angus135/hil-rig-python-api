@@ -195,6 +195,28 @@ def zero_instruction(test_id: bytes | protocol.TestId) -> protocol.TestInstructi
     return protocol.TestInstruction(test_id=_test_id(test_id), tick_number=0)
 
 
+def configured_initial_instruction(
+    configuration: protocol.TestConfiguration, tick: int = 0
+) -> protocol.TestInstruction:
+    """Build the fixed result input represented by configured initial output state."""
+    return protocol.TestInstruction(
+        test_id=configuration.test_id,
+        tick_number=tick,
+        digital_outputs=tuple(
+            protocol.DigitalOutputValue(channel.initial_high)
+            for channel in configuration.digital_out
+        ),
+        analog_outputs=(protocol.AnalogOutputValue(0),) * len(configuration.analog_out),
+        pwm_outputs=tuple(
+            protocol.PWMOutputValue(
+                channel.initial_period_nanoseconds,
+                channel.initial_duty_cycle_permyriad,
+            )
+            for channel in configuration.pwm_out
+        ),
+    )
+
+
 def test_profile(*, result_family: int = 0, fault_mode: int = 0, capacity: int = 0) -> bytes:
     """Build the documented test-only HTV3 extension marker.
 
@@ -245,6 +267,38 @@ def sparse_variable_upload(
     return variable_operations(test_id, 0) + variable_operations(test_id, 2)
 
 
+def multi_chunk_variable_upload(
+    test_id: bytes | protocol.TestId, tick: int = 0
+) -> tuple[protocol.UpdateInstruction, ...]:
+    """Build eight valid Type 21 chunks with repeated communication records."""
+    test_id = _test_id(test_id)
+    operations = (
+        protocol.LogicalOperation(protocol.PeripheralType.UART, 0, b"HT-UART"),
+        protocol.LogicalOperation(protocol.PeripheralType.UART, 1, b"HT-UART"),
+        protocol.LogicalOperation(protocol.PeripheralType.SPI, 0, b"\x01\x02HT"),
+        protocol.LogicalOperation(protocol.PeripheralType.SPI, 1, b"\x01\x02HT"),
+        protocol.LogicalOperation(
+            protocol.PeripheralType.CAN,
+            0,
+            struct.pack("<HB", 0x123, 3) + b"CAN" + bytes(5) + b"\x00",
+        ),
+        protocol.LogicalOperation(
+            protocol.PeripheralType.CAN,
+            1,
+            struct.pack("<HB", 0x123, 3) + b"CAN" + bytes(5) + b"\x00",
+        ),
+    )
+    return tuple(
+        protocol.UpdateInstruction(
+            test_id,
+            tick,
+            1 if chunk < 7 else 0,
+            operations,
+        )
+        for chunk in range(8)
+    )
+
+
 def finalize_upload(
     test_id: bytes | protocol.TestId, flags: int = 0
 ) -> protocol.FinalizeTestUpload:
@@ -275,7 +329,9 @@ def variable_result_oracle(
                 protocol.PeripheralType.PWM_INPUT, 0, struct.pack("<IH", 1_000_000, 2500)
             ),
             protocol.CapturedRecord(protocol.PeripheralType.UART, 0, b"HT-UART"),
-            protocol.CapturedRecord(protocol.PeripheralType.SPI, 0, b"\x01\x02HT"),
+            # SPI captures contain the concatenated packet data, not the count
+            # and per-packet length prefix used by the update payload.
+            protocol.CapturedRecord(protocol.PeripheralType.SPI, 0, b"HT"),
             protocol.CapturedRecord(
                 protocol.PeripheralType.CAN,
                 0,
@@ -284,6 +340,41 @@ def variable_result_oracle(
         )
     )
     return protocol.VariableTestResult(test_id, tick, condition, 0, problem_detail, records)
+
+
+def multi_chunk_variable_result_oracle(
+    test_id: bytes | protocol.TestId, tick: int = 0
+) -> protocol.VariableTestResult:
+    """Build the ordered Type 34 oracle for the eight-chunk communication fixture."""
+    test_id = _test_id(test_id)
+    records = tuple(
+        protocol.CapturedRecord(peripheral_type, channel, payload)
+        for _ in range(8)
+        for peripheral_type, channel, payload in (
+            (protocol.PeripheralType.UART, 0, b"HT-UART"),
+            (protocol.PeripheralType.UART, 1, b"HT-UART"),
+            (protocol.PeripheralType.SPI, 0, b"HT"),
+            (protocol.PeripheralType.SPI, 1, b"HT"),
+            (
+                protocol.PeripheralType.CAN,
+                0,
+                struct.pack("<HB", 0x123, 3) + b"CAN" + bytes(5) + b"\x00",
+            ),
+            (
+                protocol.PeripheralType.CAN,
+                1,
+                struct.pack("<HB", 0x123, 3) + b"CAN" + bytes(5) + b"\x00",
+            ),
+        )
+    )
+    return protocol.VariableTestResult(
+        test_id,
+        tick,
+        protocol.ResultCondition.OK,
+        0,
+        0,
+        records,
+    )
 
 
 def maximum_extension_configuration(

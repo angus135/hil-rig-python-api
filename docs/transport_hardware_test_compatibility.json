@@ -4,6 +4,10 @@
   "protocol_version": "0.3.0",
   "pinned_protocol_commit": "cc1e6f29c7deb39c0dffc7edd1f4defc10fc1674",
   "compatibility_profile_id": "0x41505032",
+  "firmware_repository": "angus135/hil-rig-mcu-firmware",
+  "firmware_branch": "test/DEV-138--protocol-test",
+  "firmware_implementation_commit": "27c8e50",
+  "firmware_branch_head": "TO BE RECORDED AFTER FIRMWARE EVIDENCE COMMIT",
   "observed_revision_evidence": "Trace source_evidence records Python/protocol Git commit and dirty state when Git metadata is available, otherwise records them as unavailable.",
   "python_versions": [
     "3.12",
@@ -46,11 +50,13 @@
     "coverage": [
       "System Information discovery with exact protocol-version validation",
       "fixed instruction upload with explicit finalization and deferred results",
-      "two-chunk variable upload covering digital, analog, PWM, UART, SPI, and CAN operations",
+      "representative variable upload covering digital, analog, PWM, UART, SPI, and CAN operations",
       "sparse variable tick upload with an empty result for an omitted tick",
+      "fixed-instruction/variable-result and variable-instruction/fixed-result transactions",
+      "eight valid Type 21 chunks followed by a genuine multi-chunk Type 34 stream with repeated UART, SPI, and CAN records",
       "bounded result polling with one pending output and no result acknowledgements"
     ],
-    "scope_limit": "The firmware harness is a deterministic synthetic loopback and does not drive physical peripherals; hardware commands are evidence-gathering only until a real board is connected."
+    "scope_limit": "The firmware harness is deterministic synthetic on-target protocol validation and does not drive physical peripherals; host software checks and hardware commands are evidence-gathering only until a real board is connected."
   },
   "test_envelope_version": 1,
   "status_schema_version": 3,
