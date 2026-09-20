@@ -6,8 +6,8 @@
   "compatibility_profile_id": "0x41505032",
   "firmware_repository": "angus135/hil-rig-mcu-firmware",
   "firmware_branch": "test/DEV-138--protocol-test",
-  "firmware_implementation_commit": "27c8e50",
-  "firmware_branch_head": "TO BE RECORDED AFTER FIRMWARE EVIDENCE COMMIT",
+  "firmware_implementation_commit": "27c8e50e9052ab54aadc34ccd81c4a4a19cc75b1",
+  "firmware_branch_head": "fe21df2e5ec7db5a837c878add9d0d8071fd2e0a",
   "observed_revision_evidence": "Trace source_evidence records Python/protocol Git commit and dirty state when Git metadata is available, otherwise records them as unavailable.",
   "python_versions": [
     "3.12",
