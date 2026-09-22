@@ -84,19 +84,25 @@ The terminal provides these commands:
 
 ```text
 help
+ports
 run <path>
 run --step <path>
 step
 continue
 status
 abort
+reset
 manual connect [COM=<n>] [--skip-system-info]
 manual send <message-file> [--transport-only]
-manual inbox
+manual reset
+manual inbox [clear]
 manual status
 manual disconnect
+clear / cls
 quit
 ```
+
+The terminal supports Tab autocompletion for commands, subcommands, and `.py`/`.json` file paths, command history navigation (Up/Down arrows and Ctrl+R), and shorthand aliases (`r` for `run`, `s` for `status`, `st` for `step`, `c` for `continue`, `p` for `ports`, `q` for `quit`).
 
 Paths containing spaces may be quoted. For example:
 

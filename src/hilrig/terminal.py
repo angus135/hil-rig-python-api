@@ -2,21 +2,163 @@
 
 from __future__ import annotations
 
-import cmd
+import os
 import shlex
 import sys
 import threading
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TextIO
 
-from hilrig.runner import ManualSessionSnapshot, ProtocolWorker, RunSnapshot
+from prompt_toolkit import HTML, PromptSession, print_formatted_text
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.completion import CompleteEvent, Completer, Completion, PathCompleter
+from prompt_toolkit.document import Document
+from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.history import FileHistory, History, InMemoryHistory
+from prompt_toolkit.patch_stdout import patch_stdout
+
+from hilrig.runner import (
+    ManualSessionSnapshot,
+    ManualSessionState,
+    ProtocolWorker,
+    RunSnapshot,
+    WorkerState,
+)
+
+_DEFAULT_HISTORY_FILE = Path.home() / ".hilrig_history"
+
+_ANSI_RESET = "\033[0m"
+_ANSI_BOLD = "\033[1m"
+_ANSI_GREEN = "\033[92m"
+_ANSI_RED = "\033[91m"
+_ANSI_YELLOW = "\033[93m"
+_ANSI_CYAN = "\033[96m"
+_ANSI_DIM = "\033[2m"
 
 
-class HilRigShell(cmd.Cmd):
-    """Minimal persistent terminal front end for the protocol worker."""
+class HilRigCompleter(Completer):
+    """Context-aware auto-completer for HIL-RIG commands, subcommands, and paths."""
+
+    def __init__(self) -> None:
+        self.py_path_completer = PathCompleter(
+            file_filter=lambda p: p.endswith(".py") or Path(p).is_dir(),
+            expanduser=True,
+        )
+        self.json_path_completer = PathCompleter(
+            file_filter=lambda p: p.endswith(".json") or Path(p).is_dir(),
+            expanduser=True,
+        )
+        self.commands = [
+            "run",
+            "step",
+            "continue",
+            "status",
+            "abort",
+            "manual",
+            "ports",
+            "reset",
+            "help",
+            "quit",
+            "clear",
+            "cls",
+        ]
+        self.manual_subcommands = [
+            "connect",
+            "send",
+            "inbox",
+            "reset",
+            "status",
+            "disconnect",
+        ]
+
+    def get_completions(
+        self, document: Document, complete_event: CompleteEvent
+    ) -> Iterable[Completion]:
+        text_before_cursor = document.text_before_cursor
+        words = text_before_cursor.lstrip().split()
+        is_trailing_space = text_before_cursor.endswith(" ")
+
+        # Complete top-level command
+        if not words or (len(words) == 1 and not is_trailing_space):
+            prefix = words[0] if words else ""
+            for cmd in self.commands:
+                if cmd.startswith(prefix.lower()):
+                    yield Completion(cmd, start_position=-len(prefix))
+            return
+
+        cmd = words[0].lower()
+        if cmd in {"r", "run"}:
+            current_token = document.get_word_before_cursor(WORD=True)
+            if (
+                not is_trailing_space
+                and "--step".startswith(current_token.lower())
+                and current_token.startswith("-")
+            ):
+                yield Completion("--step", start_position=-len(current_token))
+            yield from self.py_path_completer.get_completions(document, complete_event)
+            return
+
+        if cmd in {"m", "manual"}:
+            if len(words) == 1 and is_trailing_space:
+                for sub in self.manual_subcommands:
+                    yield Completion(sub, start_position=0)
+                return
+            if len(words) == 2 and not is_trailing_space:
+                sub_prefix = words[1].lower()
+                for sub in self.manual_subcommands:
+                    if sub.startswith(sub_prefix):
+                        yield Completion(sub, start_position=-len(sub_prefix))
+                return
+
+            subcmd = words[1].lower()
+            if subcmd == "connect":
+                current_token = document.get_word_before_cursor(WORD=True)
+                for opt in ["--skip-system-info", "COM="]:
+                    if opt.lower().startswith(current_token.lower()):
+                        yield Completion(opt, start_position=-len(current_token))
+            elif subcmd == "send":
+                current_token = document.get_word_before_cursor(WORD=True)
+                if (
+                    not is_trailing_space
+                    and "--transport-only".startswith(current_token.lower())
+                    and current_token.startswith("-")
+                ):
+                    yield Completion("--transport-only", start_position=-len(current_token))
+                yield from self.json_path_completer.get_completions(document, complete_event)
+            elif subcmd == "inbox":
+                current_token = document.get_word_before_cursor(WORD=True)
+                if "clear".startswith(current_token.lower()):
+                    yield Completion("clear", start_position=-len(current_token))
+            return
+
+        if cmd == "help":
+            if len(words) == 1 and is_trailing_space:
+                for c in self.commands:
+                    yield Completion(c, start_position=0)
+            elif len(words) == 2 and not is_trailing_space:
+                prefix = words[1].lower()
+                for c in self.commands:
+                    if c.startswith(prefix):
+                        yield Completion(c, start_position=-len(prefix))
+            return
+
+
+class HilRigShell:
+    """Persistent interactive terminal front end for the protocol worker."""
 
     intro = "HIL-RIG terminal. Enter 'help' for commands."
-    prompt = "HIL-RIG> "
+    prompt = HTML("<ansicyan><b>HIL-RIG&gt;</b></ansicyan> ")
+    aliases: dict[str, str] = {
+        "r": "run",
+        "s": "status",
+        "st": "step",
+        "c": "continue",
+        "p": "ports",
+        "q": "quit",
+        "exit": "quit",
+        "cls": "clear",
+    }
 
     def __init__(
         self,
@@ -24,11 +166,52 @@ class HilRigShell(cmd.Cmd):
         worker: ProtocolWorker | None = None,
         stdin: TextIO | None = None,
         stdout: TextIO | None = None,
+        history: History | None = None,
     ) -> None:
-        super().__init__(stdin=stdin, stdout=stdout)
+        self._custom_stdin = stdin
+        self._custom_stdout = stdout
         self._output_lock = threading.Lock()
+        self.completer = HilRigCompleter()
+        if history is not None:
+            self.history: History = history
+        elif stdin is None and stdout is None:
+            self.history = FileHistory(str(_DEFAULT_HISTORY_FILE))
+        else:
+            self.history = InMemoryHistory()
+
         self.worker = worker or ProtocolWorker(notification_callback=self._write_notification)
         self.worker.start()
+
+    @property
+    def stdin(self) -> TextIO:
+        return self._custom_stdin if self._custom_stdin is not None else sys.stdin
+
+    @property
+    def stdout(self) -> TextIO:
+        return self._custom_stdout if self._custom_stdout is not None else sys.stdout
+
+    @property
+    def is_interactive(self) -> bool:
+        return self._custom_stdout is None
+
+    def onecmd(self, line: str) -> bool:
+        """Execute one command line synchronously and return whether the shell should stop."""
+        trimmed = line.strip()
+        if not trimmed:
+            self.emptyline()
+            return False
+
+        command, _, argument = trimmed.partition(" ")
+        command_lower = command.lower()
+        resolved_cmd = self.aliases.get(command_lower, command_lower)
+
+        handler = getattr(self, f"do_{resolved_cmd}", None)
+        if callable(handler):
+            result = handler(argument.strip())
+            return bool(result)
+
+        self.default(trimmed)
+        return False
 
     def do_run(self, argument: str) -> None:
         """run [--step] <path> -- Execute a Python test definition."""
@@ -38,13 +221,51 @@ class HilRigShell(cmd.Cmd):
             return
         path, stepped = parsed
         if not self.worker.submit(path, stepped=stepped):
-            self._write_line("A test is already active. Use 'status' or 'abort'.")
+            if self.worker.manual_snapshot().active:
+                self._write_line(
+                    "A manual session is currently active. Use 'manual disconnect' before running a test."
+                )
+            else:
+                self._write_line("A test is already active. Use 'status' or 'abort'.")
             return
         mode = "Stepped run" if stepped else "Run"
         self._write_line(f"{mode} queued: {path}")
 
+    def do_ports(self, argument: str) -> None:
+        """ports -- List available serial COM ports and detect the HIL-RIG."""
+        if argument.strip():
+            self._write_line("Usage: ports")
+            return
+        try:
+            import serial.tools.list_ports
+
+            comports = list(serial.tools.list_ports.comports())
+        except Exception as error:
+            self._write_line(f"Could not list COM ports: {error}")
+            return
+
+        if not comports:
+            self._write_line("No COM ports detected.")
+            return
+
+        self._write_line("Available COM ports:")
+        for p in comports:
+            desc = p.description or "Unknown"
+            is_match = (
+                desc.startswith("USB Serial Device")
+                or (getattr(p, "vid", None) == 0x0483 and getattr(p, "pid", None) == 0x5740)
+            )
+            match_marker = f" {_ANSI_GREEN}[HIL-RIG match]{_ANSI_RESET}" if is_match else ""
+            hwid = f" ({p.hwid})" if p.hwid and p.hwid != "n/a" else ""
+            device_label = f"{_ANSI_BOLD}{p.device:<6}{_ANSI_RESET}"
+            self._write_line(f"  {device_label} - {desc}{match_marker}{hwid}")
+
+    def do_reset(self, argument: str) -> None:
+        """reset -- Send RESET_APPLICATION GlobalControl in active manual session."""
+        self.do_manual(f"reset {argument}".strip())
+
     def do_help(self, argument: str) -> None:
-        """help -- Show the commands available in this first terminal version."""
+        """help -- Show the commands available in the terminal."""
         if argument.strip():
             self._write_line("Usage: help")
             return
@@ -56,13 +277,18 @@ class HilRigShell(cmd.Cmd):
             "  continue           Release the gate and finish automatically.\n"
             "  status             Show the current or most recently completed run.\n"
             "  abort              Request cancellation of the active run.\n"
+            "  ports              List available serial COM ports and detect the HIL-RIG.\n"
+            "  reset              Send RESET_APPLICATION in the active manual session.\n"
             "  manual connect [COM=<n>] [--skip-system-info]\n"
             "                     Open a persistent manual protocol session.\n"
             "  manual send <message-file> [--transport-only]\n"
             "                     Send one standalone JSON Application message.\n"
-            "  manual inbox      Show received manual Application messages.\n"
+            "  manual reset      Send RESET_APPLICATION GlobalControl.\n"
+            "  manual inbox [clear]\n"
+            "                     Show or clear received manual Application messages.\n"
             "  manual status     Show manual-session status.\n"
             "  manual disconnect Close the manual protocol session.\n"
+            "  clear / cls        Clear the console screen.\n"
             "  help               Show this command list.\n"
             "  quit               Abort any active run and close the terminal."
         )
@@ -92,7 +318,7 @@ class HilRigShell(cmd.Cmd):
         if argument.strip():
             self._write_line("Usage: status")
             return
-        self._write_line(_format_status(self.worker.snapshot()))
+        self._write_line(_format_status(self.worker.snapshot(), color=self.is_interactive))
 
     def do_abort(self, argument: str) -> None:
         """abort -- Request cancellation of the active run."""
@@ -119,9 +345,19 @@ class HilRigShell(cmd.Cmd):
             self._manual_connect(tokens)
         elif command == "send":
             self._manual_send(tokens)
-        elif command == "inbox":
+        elif command == "reset":
             if tokens:
-                self._write_line("Usage: manual inbox")
+                self._write_line("Usage: manual reset")
+            elif self.worker.manual_reset():
+                self._write_line("Manual reset queued: GlobalControl RESET_APPLICATION.")
+            else:
+                self._write_line("The manual session is not ready for a reset.")
+        elif command == "inbox":
+            if tokens in (["clear"], ["--clear"]):
+                self.worker.manual_clear_inbox()
+                self._write_line("Manual inbox cleared.")
+            elif tokens:
+                self._write_line("Usage: manual inbox [clear]")
             else:
                 inbox = self.worker.manual_inbox()
                 self._write_line(
@@ -133,7 +369,9 @@ class HilRigShell(cmd.Cmd):
             if tokens:
                 self._write_line("Usage: manual status")
             else:
-                self._write_line(_format_manual_status(self.worker.manual_snapshot()))
+                self._write_line(
+                    _format_manual_status(self.worker.manual_snapshot(), color=self.is_interactive)
+                )
         elif command == "disconnect":
             if tokens:
                 self._write_line("Usage: manual disconnect")
@@ -169,7 +407,10 @@ class HilRigShell(cmd.Cmd):
             device=device,
             skip_system_info=skip_system_info,
         ):
-            self._write_line("A test run or manual session is already active.")
+            if self.worker.snapshot().busy:
+                self._write_line("A test run is currently active. Use 'status' or 'abort'.")
+            else:
+                self._write_line("A manual session is already active. Use 'manual disconnect'.")
             return
         selected = device or "automatic COM-port discovery"
         suffix = "; System Information disabled" if skip_system_info else ""
@@ -199,6 +440,18 @@ class HilRigShell(cmd.Cmd):
         mode = "transport only" if transport_only else "Application response required"
         self._write_line(f"Manual send queued: {path} ({mode}).")
 
+    def do_clear(self, argument: str) -> None:
+        """clear / cls -- Clear the terminal screen."""
+        if argument.strip():
+            self._write_line("Usage: clear")
+            return
+        with self._output_lock:
+            if sys.platform == "win32":
+                os.system("cls")
+            else:
+                self.stdout.write("\033[H\033[2J")
+                self.stdout.flush()
+
     def do_quit(self, argument: str) -> bool:
         """quit -- Abort any active run and close the HIL-RIG terminal."""
         if argument.strip():
@@ -220,34 +473,85 @@ class HilRigShell(cmd.Cmd):
         self._write_line(f"Unknown command: {line!r}. Enter 'help' for commands.")
 
     def _write_notification(self, message: str) -> None:
-        self._write_line(f"\n{message}")
+        self._write_line(message)
 
     def _write_line(self, message: str) -> None:
         with self._output_lock:
-            self.stdout.write(message + "\n")
-            self.stdout.flush()
+            if self._custom_stdout is not None:
+                self._custom_stdout.write(message + "\n")
+                self._custom_stdout.flush()
+            else:
+                try:
+                    print_formatted_text(ANSI(message), file=sys.stdout)
+                except Exception:
+                    sys.stdout.write(message + "\n")
+                    sys.stdout.flush()
+
+    def _bottom_toolbar(self) -> str:
+        snapshot = self.worker.snapshot()
+        if snapshot.busy:
+            step_str = " (Stepped)" if snapshot.stepped else ""
+            ticks_str = (
+                f" | Ticks: {snapshot.received_tick_count}/{snapshot.expected_tick_count}"
+                if snapshot.expected_tick_count
+                else ""
+            )
+            return f" [Run: {snapshot.state.value.upper()}{step_str}{ticks_str}] "
+        manual = self.worker.manual_snapshot()
+        if manual.active:
+            port = f" on {manual.device}" if manual.device else ""
+            return f" [Manual: {manual.state.value.upper()}{port} | Inbox: {manual.inbox_count}] "
+        return " [HIL-RIG: IDLE] "
+
+    def cmdloop(self, intro: str | None = None) -> None:
+        """Run the prompt_toolkit interactive shell loop."""
+        if intro is not None:
+            self._write_line(intro)
+        elif self.intro:
+            self._write_line(self.intro)
+
+        session: PromptSession[str] = PromptSession(
+            history=self.history,
+            completer=self.completer,
+            auto_suggest=AutoSuggestFromHistory(),
+        )
+
+        with patch_stdout():
+            while True:
+                try:
+                    line = session.prompt(
+                        self.prompt,
+                        bottom_toolbar=self._bottom_toolbar,
+                    )
+                except KeyboardInterrupt:
+                    self._write_line("Interrupt received.")
+                    if self.worker.abort():
+                        self._write_line("Abort requested; the terminal remains active.")
+                    else:
+                        self._write_line("There is no active run. Enter 'quit' to exit.")
+                    continue
+                except EOFError:
+                    self._write_line("")
+                    self.do_quit("")
+                    break
+
+                should_stop = self.onecmd(line)
+                if should_stop:
+                    break
 
 
 def main() -> int:
     """Run the installed ``hil-rig`` terminal entry point."""
     shell = HilRigShell()
-    while True:
+    try:
+        shell.cmdloop()
+        return 0
+    except BaseException as error:
         try:
-            shell.cmdloop()
-            return 0
-        except KeyboardInterrupt:
-            shell._write_line("\nInterrupt received.")
-            if shell.worker.abort():
-                shell._write_line("Abort requested; the terminal remains active.")
-            else:
-                shell._write_line("There is no active run. Enter 'quit' to exit.")
-            shell.intro = None
-        except BaseException as error:
-            try:
-                shell.worker.shutdown()
-            finally:
-                print(f"HIL-RIG terminal failed: {type(error).__name__}: {error}", file=sys.stderr)
-            return 1
+            shell.worker.shutdown()
+        finally:
+            print(f"HIL-RIG terminal failed: {type(error).__name__}: {error}", file=sys.stderr)
+        return 1
 
 
 def _path_argument(argument: str) -> Path | None:
@@ -275,8 +579,19 @@ def _run_argument(argument: str) -> tuple[Path, bool] | None:
     return None if path is None else (path, stepped)
 
 
-def _format_status(snapshot: RunSnapshot) -> str:
-    lines = [f"State: {snapshot.state.value}", f"Detail: {snapshot.detail}"]
+def _format_status(snapshot: RunSnapshot, *, color: bool = False) -> str:
+    state_styled = snapshot.state.value
+    if color:
+        if snapshot.state in {WorkerState.COMPLETED}:
+            state_styled = f"{_ANSI_GREEN}{state_styled}{_ANSI_RESET}"
+        elif snapshot.state in {WorkerState.FAILED, WorkerState.ABORTED}:
+            state_styled = f"{_ANSI_RED}{state_styled}{_ANSI_RESET}"
+        elif snapshot.state in {WorkerState.RUNNING, WorkerState.CONNECTING, WorkerState.UPLOADING}:
+            state_styled = f"{_ANSI_CYAN}{state_styled}{_ANSI_RESET}"
+        elif snapshot.state in {WorkerState.WAITING_FOR_OPERATOR}:
+            state_styled = f"{_ANSI_YELLOW}{state_styled}{_ANSI_RESET}"
+
+    lines = [f"State: {state_styled}", f"Detail: {snapshot.detail}"]
     if snapshot.test_name is not None:
         lines.append(f"Test: {snapshot.test_name}")
     if snapshot.test_path is not None:
@@ -284,29 +599,51 @@ def _format_status(snapshot: RunSnapshot) -> str:
     if snapshot.protocol_state is not None:
         lines.append(f"Protocol: {snapshot.protocol_state}")
     if snapshot.stepped:
-        lines.append("Mode: stepped")
+        mode_styled = f"{_ANSI_YELLOW}stepped{_ANSI_RESET}" if color else "stepped"
+        lines.append(f"Mode: {mode_styled}")
     if snapshot.next_operation is not None:
-        lines.append(f"Next operation: {snapshot.next_operation}")
+        op_styled = (
+            f"{_ANSI_YELLOW}{snapshot.next_operation}{_ANSI_RESET}"
+            if color
+            else snapshot.next_operation
+        )
+        lines.append(f"Next operation: {op_styled}")
     if snapshot.expected_tick_count:
         lines.append(
             f"Results: {snapshot.received_tick_count}/{snapshot.expected_tick_count} ticks"
         )
     if snapshot.verdict is not None:
-        lines.append(f"Verdict: {snapshot.verdict.upper()}")
+        v_upper = snapshot.verdict.upper()
+        if color:
+            v_color = _ANSI_GREEN if v_upper == "PASS" else _ANSI_RED
+            lines.append(f"Verdict: {v_color}{v_upper}{_ANSI_RESET}")
+        else:
+            lines.append(f"Verdict: {v_upper}")
     if snapshot.output_directory is not None:
         lines.append(f"Output: {snapshot.output_directory}")
     if snapshot.error is not None:
-        lines.append(f"Error: {snapshot.error}")
+        err_styled = f"{_ANSI_RED}{snapshot.error}{_ANSI_RESET}" if color else snapshot.error
+        lines.append(f"Error: {err_styled}")
     return "\n".join(lines)
 
 
-def _format_manual_status(snapshot: ManualSessionSnapshot) -> str:
+def _format_manual_status(snapshot: ManualSessionSnapshot, *, color: bool = False) -> str:
+    state_styled = snapshot.state.value
+    if color:
+        if snapshot.state in {ManualSessionState.READY}:
+            state_styled = f"{_ANSI_GREEN}{state_styled}{_ANSI_RESET}"
+        elif snapshot.state in {ManualSessionState.FAILED}:
+            state_styled = f"{_ANSI_RED}{state_styled}{_ANSI_RESET}"
+        elif snapshot.state in {ManualSessionState.CONNECTING, ManualSessionState.SENDING}:
+            state_styled = f"{_ANSI_CYAN}{state_styled}{_ANSI_RESET}"
+
     lines = [
-        f"Manual state: {snapshot.state.value}",
+        f"Manual state: {state_styled}",
         f"Detail: {snapshot.detail}",
     ]
     if snapshot.device is not None:
-        lines.append(f"Port: {snapshot.device}")
+        port_styled = f"{_ANSI_CYAN}{snapshot.device}{_ANSI_RESET}" if color else snapshot.device
+        lines.append(f"Port: {port_styled}")
     lines.append(
         "System Information: skipped"
         if snapshot.skip_system_info
@@ -319,13 +656,21 @@ def _format_manual_status(snapshot: ManualSessionSnapshot) -> str:
     if snapshot.pending_message is not None:
         lines.append(f"Pending message: {snapshot.pending_message}")
     if snapshot.last_result is not None:
+        if color:
+            success_label = (
+                f"{_ANSI_GREEN}successful{_ANSI_RESET}"
+                if snapshot.last_result.success
+                else f"{_ANSI_RED}unsuccessful{_ANSI_RESET}"
+            )
+        else:
+            success_label = "successful" if snapshot.last_result.success else "unsuccessful"
         lines.append(
-            f"Last send: {'successful' if snapshot.last_result.success else 'unsuccessful'} "
-            f"({snapshot.last_result.label})"
+            f"Last send: {success_label} ({snapshot.last_result.label})"
         )
     lines.append(f"Inbox messages: {snapshot.inbox_count}")
     if snapshot.error is not None:
-        lines.append(f"Error: {snapshot.error}")
+        err_styled = f"{_ANSI_RED}{snapshot.error}{_ANSI_RESET}" if color else snapshot.error
+        lines.append(f"Error: {err_styled}")
     return "\n".join(lines)
 
 
@@ -334,7 +679,8 @@ def _manual_usage() -> str:
         "Manual commands:\n"
         "  manual connect [COM=<n>] [--skip-system-info]\n"
         "  manual send <message-file> [--transport-only]\n"
-        "  manual inbox\n"
+        "  manual reset\n"
+        "  manual inbox [clear]\n"
         "  manual status\n"
         "  manual disconnect"
     )
@@ -352,4 +698,4 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["HilRigShell", "main"]
+__all__ = ["HilRigCompleter", "HilRigShell", "main"]

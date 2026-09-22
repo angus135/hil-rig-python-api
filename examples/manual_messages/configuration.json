@@ -1,8 +1,8 @@
 {
   "type": "test_configuration",
   "test_id": "00112233445566778899aabbccddeeff",
-  "tick_duration_us": 1000,
-  "expected_tick_count": 101,
+  "tick_duration_us": 10000,
+  "expected_tick_count": 1001,
   "digital_inputs": [
     {
       "channel": 0,

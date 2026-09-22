@@ -21,8 +21,10 @@ from hilrig.evaluation import evaluate_assertions
 from hilrig.models.execution import CompiledTestIR
 from hilrig.protocol import (
     FixedIOProtocolConnection,
+    ManualApplicationMessage,
     ManualSendResult,
     ProtocolWorkflowState,
+    ResponseCorrelation,
     SerialConnectionSettings,
     UploadAdvanceMode,
     load_manual_message,
@@ -149,6 +151,10 @@ class _ManualDisconnectCommand:
     pass
 
 
+class _ManualResetCommand:
+    pass
+
+
 class _AdvanceCommand(str, Enum):
     STEP = "step"
     CONTINUE = "continue"
@@ -163,7 +169,7 @@ class _RunAborted(Exception):
 
 
 _Command = _RunCommand | _ManualConnectCommand | _StopWorker
-_ManualCommand = _ManualSendCommand | _ManualDisconnectCommand
+_ManualCommand = _ManualSendCommand | _ManualDisconnectCommand | _ManualResetCommand
 _ConnectionFactory = Callable[[], Any]
 _ManualConnectionFactory = Callable[..., Any]
 _NotificationCallback = Callable[[str], None]
@@ -317,6 +323,32 @@ class ProtocolWorker:
         with self._snapshot_lock:
             return self._manual_snapshot
 
+    def manual_reset(self) -> bool:
+        """Queue a RESET_APPLICATION GlobalControl message in the manual session."""
+        with self._snapshot_lock:
+            if self._manual_snapshot.state is not ManualSessionState.READY:
+                return False
+            self._manual_snapshot = _updated_manual_snapshot(
+                self._manual_snapshot,
+                state=ManualSessionState.SENDING,
+                detail="Sending GlobalControl RESET_APPLICATION.",
+                pending_message="GlobalControl RESET_APPLICATION",
+                last_result=None,
+                error=None,
+            )
+            self._manual_commands.put(_ManualResetCommand())
+        return True
+
+    def manual_clear_inbox(self) -> bool:
+        """Clear all retained inbound Application-message summaries."""
+        with self._snapshot_lock:
+            self._manual_inbox.clear()
+            self._manual_snapshot = _updated_manual_snapshot(
+                self._manual_snapshot,
+                inbox_count=0,
+            )
+        return True
+
     def manual_inbox(self) -> tuple[str, ...]:
         """Return the retained inbound Application-message summaries."""
         with self._snapshot_lock:
@@ -450,6 +482,8 @@ class ProtocolWorker:
                     break
                 if isinstance(request, _ManualSendCommand):
                     self._begin_manual_send(connection, request)
+                elif isinstance(request, _ManualResetCommand):
+                    self._begin_manual_reset(connection)
 
                 report = connection.service()
                 self._record_manual_messages(report.application_messages)
@@ -514,6 +548,39 @@ class ProtocolWorker:
             error=None,
         )
         self._notify(f"Sending {message.label} ({mode}).")
+
+    def _begin_manual_reset(self, connection: Any) -> None:
+        try:
+            msg = connection.application.build_reset_application()
+            encoded = connection.application.encode(msg)
+            manual_message = ManualApplicationMessage(
+                label="GlobalControl RESET_APPLICATION",
+                message=msg,
+                encoded_message=encoded,
+                response=ResponseCorrelation(
+                    scope=connection.protocol.ResponseScope.GLOBAL_CONTROL,
+                    successful_outcome=connection.protocol.ResponseOutcome.COMPLETED,
+                    application_test_id=None,
+                    global_control_command=connection.protocol.GlobalControlCommand.RESET_APPLICATION,
+                ),
+            )
+            connection.queue_manual_message(manual_message, transport_only=False)
+        except BaseException as error:
+            self._set_manual_snapshot(
+                state=ManualSessionState.READY,
+                detail="Manual reset was not sent.",
+                pending_message=None,
+                error=f"{type(error).__name__}: {error}",
+            )
+            self._notify(f"Manual reset was not sent: {type(error).__name__}: {error}")
+            return
+        self._set_manual_snapshot(
+            state=ManualSessionState.SENDING,
+            detail="Sending GlobalControl RESET_APPLICATION; waiting for completion.",
+            pending_message="GlobalControl RESET_APPLICATION",
+            error=None,
+        )
+        self._notify("Sending GlobalControl RESET_APPLICATION (Application response required).")
 
     def _record_manual_messages(self, messages: tuple[object, ...]) -> None:
         if not messages:

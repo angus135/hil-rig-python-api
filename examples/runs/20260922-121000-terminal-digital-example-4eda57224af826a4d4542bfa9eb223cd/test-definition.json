@@ -1,0 +1,50 @@
+{
+  "ir_version": "1.1",
+  "test": {
+    "test_id": "a2eda8df2bb9a416958f10ddcad81d2a",
+    "name": "Terminal digital example",
+    "frequency_mode": "HZ_1K",
+    "frequency_hz": 1000,
+    "expected_tick_count": 1201,
+    "start_mode": "IMMEDIATE"
+  },
+  "configurations": [
+    {
+      "peripheral": "digital_input",
+      "channel": 0,
+      "parameters": {
+        "voltage": "V3_3"
+      }
+    },
+    {
+      "peripheral": "digital_output",
+      "channel": 0,
+      "parameters": {
+        "voltage": "V3_3",
+        "initial_state": "LOW"
+      }
+    }
+  ],
+  "instructions": [
+    {
+      "instruction_id": 0,
+      "tick": 100,
+      "peripheral": "digital_output",
+      "channel": 0,
+      "operation": "set_state",
+      "arguments": {
+        "action": "HIGH"
+      }
+    },
+    {
+      "instruction_id": 1,
+      "tick": 200,
+      "peripheral": "digital_output",
+      "channel": 0,
+      "operation": "set_state",
+      "arguments": {
+        "action": "LOW"
+      }
+    }
+  ]
+}
