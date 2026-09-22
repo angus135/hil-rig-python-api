@@ -10,6 +10,7 @@ from protocol_fakes import (
     FakeProtocol,
     FakeSerial,
     FakeTransport,
+    FinalizeTestUpload,
     GlobalControlCommand,
     ProtocolVersion,
     ResponseOutcome,
@@ -69,9 +70,9 @@ def _drive_fake_rig_to_state(
     target: ProtocolWorkflowState = ProtocolWorkflowState.RUNNING,
     *,
     responded: int = 0,
+    finalize_outcome: ResponseOutcome = ResponseOutcome.ACCEPTED,
+    finalize_reason: ResponseReason = ResponseReason.NONE,
 ) -> int:
-    instructions = connection.active_upload.instructions
-    last_sparse_tick = instructions[-1].tick_number if instructions else None
     for _ in range(500):
         connection.service()
         while responded < transport.committed:
@@ -94,14 +95,6 @@ def _drive_fake_rig_to_state(
                         ResponseOutcome.ACCEPTED,
                     )
                 ]
-                if last_sparse_tick is None:
-                    responses.append(
-                        ApplicationResponse(
-                            request.test_id,
-                            ResponseScope.COMPLETE_TEST,
-                            ResponseOutcome.ACCEPTED,
-                        )
-                    )
             elif type(request) is ProtocolTestInstruction:
                 responses = [
                     ApplicationResponse(
@@ -111,14 +104,15 @@ def _drive_fake_rig_to_state(
                         tick_number=request.tick_number,
                     )
                 ]
-                if request.tick_number == last_sparse_tick:
-                    responses.append(
-                        ApplicationResponse(
-                            request.test_id,
-                            ResponseScope.COMPLETE_TEST,
-                            ResponseOutcome.ACCEPTED,
-                        )
+            elif type(request) is FinalizeTestUpload:
+                responses = [
+                    ApplicationResponse(
+                        request.test_id,
+                        ResponseScope.COMPLETE_TEST,
+                        finalize_outcome,
+                        reason=finalize_reason,
                     )
+                ]
             else:
                 responses = [
                     ApplicationResponse(
@@ -181,6 +175,12 @@ def test_operator_gate_steps_configuration_tick_and_start_as_semantic_operations
     assert connection.upload_accepted
     assert connection.next_upload_operation.kind is UploadOperationKind.START
     assert not connection.execution_started
+    assert [type(application.codec.decode(item)).__name__ for item in transport.submitted] == [
+        "SystemInfoRequest",
+        "TestConfiguration",
+        "TestInstruction",
+        "FinalizeTestUpload",
+    ]
 
     connection.release_next_operation()
     _drive_fake_rig_to_state(
@@ -251,8 +251,8 @@ def test_connection_preserves_partial_writes_and_sends_one_message_at_a_time() -
     assert connection.execution_started
     assert connection.workflow_state is ProtocolWorkflowState.RUNNING
     assert connection.session_info.firmware_version == "1.2.3"
-    assert len(transport.submitted) == 4
-    assert transport.committed == 4
+    assert len(transport.submitted) == 5
+    assert transport.committed == 5
     assert bytes(serial_port.written) == b"".join(
         b"frame:" + submitted for submitted in transport.submitted
     )
@@ -276,8 +276,34 @@ def test_observation_only_upload_waits_for_complete_test_after_configuration() -
     assert [type(application.codec.decode(item)).__name__ for item in transport.submitted] == [
         "SystemInfoRequest",
         "TestConfiguration",
+        "FinalizeTestUpload",
         "ExecutionControl",
     ]
+
+
+def test_rejected_upload_finalization_invalidates_the_upload() -> None:
+    application = FixedIOProtocolAdapter(protocol_module=FakeProtocol)
+    transport = FakeTransport()
+    connection = FixedIOProtocolConnection(
+        serial_port=FakeSerial(),
+        application=application,
+        transport=transport,
+    )
+    connection.queue_upload(_compiled_digital_test())
+
+    with pytest.raises(ProtocolSessionError, match="VALIDATION_FAILED"):
+        _drive_fake_rig_to_state(
+            connection,
+            application,
+            transport,
+            finalize_outcome=ResponseOutcome.REJECTED,
+            finalize_reason=ResponseReason.VALIDATION_FAILED,
+        )
+
+    assert connection.workflow_state is ProtocolWorkflowState.FAILED
+    assert connection.active_upload is None
+    assert not connection.upload_accepted
+    assert type(application.codec.decode(transport.submitted[-1])) is FinalizeTestUpload
 
 
 def test_connection_decodes_and_stores_received_fixed_results(tmp_path: Path) -> None:

@@ -26,6 +26,7 @@ _CONTROL_FLOW_API = (
     "SystemInfoResponse",
     "ApplicationResponse",
     "ApplicationErrorMessage",
+    "FinalizeTestUpload",
     "ExecutionControl",
     "GlobalControl",
     "ControlCommand",
@@ -66,6 +67,7 @@ class UploadOperationKind(str, Enum):
 
     CONFIGURATION = "configuration"
     TICK = "tick"
+    FINALIZE = "finalize"
     START = "start"
 
 
@@ -101,6 +103,8 @@ class UploadOperation:
             return f"tick {self.tick}"
         if self.kind is UploadOperationKind.START:
             return "START"
+        if self.kind is UploadOperationKind.FINALIZE:
+            return "upload finalization"
         return "configuration"
 
 
@@ -113,7 +117,7 @@ class UploadPlan:
 
     @property
     def transfer_operations(self) -> tuple[UploadOperation, ...]:
-        """Return configuration and tick operations, excluding START."""
+        """Return configuration, tick, and finalization operations, excluding START."""
         return tuple(
             operation
             for operation in self.operations
@@ -158,7 +162,7 @@ class FixedIOProtocolAdapter:
         missing = tuple(name for name in _CONTROL_FLOW_API if not hasattr(self.protocol, name))
         if missing:
             raise ProtocolDependencyError(
-                "Fixed-I/O protocol control flow requires hil-rig-protocol 0.2.0 or newer; "
+                "Fixed-I/O protocol control flow requires hil-rig-protocol 0.3.0 or newer; "
                 f"missing public API: {', '.join(missing)}"
             )
         if application_config is None:
@@ -244,6 +248,18 @@ class FixedIOProtocolAdapter:
             )
             for message, wire in zip(upload.instructions, encoded[1:], strict=True)
         )
+        finalize = self.build_finalize_test_upload(application_test_id)
+        operations.append(
+            UploadOperation(
+                kind=UploadOperationKind.FINALIZE,
+                encoded_messages=(self.encode(finalize),),
+                response=ResponseCorrelation(
+                    scope=p.ResponseScope.COMPLETE_TEST,
+                    successful_outcome=p.ResponseOutcome.ACCEPTED,
+                    application_test_id=application_test_id,
+                ),
+            )
+        )
         if upload.start_mode != "EXTERNAL_TRIGGER":
             start = self.build_start(upload.upload_attempt)
             operations.append(
@@ -277,6 +293,13 @@ class FixedIOProtocolAdapter:
     def build_start(self, upload_attempt: UploadAttempt) -> object:
         """Build a START request for an accepted upload attempt."""
         return self._build_execution_control(upload_attempt, self.protocol.ControlCommand.START)
+
+    def build_finalize_test_upload(self, application_test_id: int) -> object:
+        """Build the request declaring that no further upload instructions follow."""
+        return self.protocol.FinalizeTestUpload(
+            test_id=self.protocol.TestId(application_test_id_to_bytes(application_test_id)),
+            flags=0,
+        )
 
     def build_abort(self, upload_attempt: UploadAttempt) -> object:
         """Build an ABORT request for an active upload attempt."""

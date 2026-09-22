@@ -344,7 +344,7 @@ class FixedIOProtocolConnection:
 
     @property
     def upload_delivery_complete(self) -> bool:
-        """Whether every sparse upload message was confirmed by peer Transport."""
+        """Whether every upload message, including finalization, was Transport-confirmed."""
         return (
             self._active_upload is not None
             and self._upload_message_count > 0
@@ -372,12 +372,12 @@ class FixedIOProtocolConnection:
                 self._pending_operation.next_message_index
             )
         gated = (
-            len(self._gated_operation.encoded_messages)
-            if self._gated_operation is not None
-            else 0
+            len(self._gated_operation.encoded_messages) if self._gated_operation is not None else 0
         )
-        return pending + gated + sum(
-            len(operation.encoded_messages) for operation in self._upload_operations
+        return (
+            pending
+            + gated
+            + sum(len(operation.encoded_messages) for operation in self._upload_operations)
         )
 
     def bind_result_builder(
@@ -416,7 +416,7 @@ class FixedIOProtocolConnection:
         upload_attempt: UploadAttempt | None = None,
         advance_mode: UploadAdvanceMode = UploadAdvanceMode.AUTOMATIC,
     ) -> UploadAttempt:
-        """Queue configuration plus sparse fixed-I/O states for response-gated upload."""
+        """Queue configuration, sparse fixed-I/O states, and upload finalization."""
         self._require_open()
         if self._manual_mode:
             raise ProtocolSessionError("Test uploads are unavailable in a manual session")
@@ -580,9 +580,7 @@ class FixedIOProtocolConnection:
                 response=ResponseCorrelation(
                     scope=self.protocol.ResponseScope.EXECUTION_CONTROL,
                     successful_outcome=self.protocol.ResponseOutcome.COMPLETED,
-                    application_test_id=(
-                        self._active_upload.upload_attempt.application_test_id
-                    ),
+                    application_test_id=(self._active_upload.upload_attempt.application_test_id),
                     control_command=self.protocol.ControlCommand.ABORT,
                 ),
                 previous_workflow_state=self._workflow_state,
@@ -604,9 +602,7 @@ class FixedIOProtocolConnection:
                     scope=self.protocol.ResponseScope.GLOBAL_CONTROL,
                     successful_outcome=self.protocol.ResponseOutcome.COMPLETED,
                     application_test_id=None,
-                    global_control_command=(
-                        self.protocol.GlobalControlCommand.RESET_APPLICATION
-                    ),
+                    global_control_command=(self.protocol.GlobalControlCommand.RESET_APPLICATION),
                 ),
                 previous_workflow_state=self._workflow_state,
             )
@@ -627,12 +623,16 @@ class FixedIOProtocolConnection:
                 or (
                     self._gated_operation is not None
                     and self._gated_operation.kind
-                    in {UploadOperationKind.CONFIGURATION, UploadOperationKind.TICK}
+                    in {
+                        UploadOperationKind.CONFIGURATION,
+                        UploadOperationKind.TICK,
+                        UploadOperationKind.FINALIZE,
+                    }
                 )
                 or self._transport_delivery_pending
                 or (
                     self._pending_operation is not None
-                    and self._pending_operation.kind in {"configuration", "tick"}
+                    and self._pending_operation.kind in {"configuration", "tick", "finalize"}
                 )
                 else p.OperatingMode.NORMAL
             )
@@ -775,9 +775,7 @@ class FixedIOProtocolConnection:
                 if (
                     not self._manual_mode
                     and self.result_adapter is not None
-                    and self._error_belongs_to_active_upload(
-                        message
-                    )
+                    and self._error_belongs_to_active_upload(message)
                 ):
                     stored_errors.append(self.result_adapter.ingest_application_error(message))
             elif type(message) is p.TestResult:
@@ -809,15 +807,13 @@ class FixedIOProtocolConnection:
                 "Transport confirmed delivery without a pending Application message"
             )
         self._transport_delivery_pending = False
-        if operation.kind in {"configuration", "tick"}:
+        if operation.kind in {"configuration", "tick", "finalize"}:
             self._upload_messages_delivered += 1
         if operation.every_message_submitted:
             if operation.kind == "manual" and not operation.application_response_required:
                 operation.response_received = True
             else:
-                operation.response_deadline = (
-                    time.monotonic() + self.application_response_timeout_s
-                )
+                operation.response_deadline = time.monotonic() + self.application_response_timeout_s
         self._finish_pending_operation_if_ready()
 
     def _handle_system_info_response(self, message: object) -> None:
@@ -918,9 +914,7 @@ class FixedIOProtocolConnection:
                     else operation.response_error or "Application response failed."
                 )
             else:
-                detail = (
-                    "Transport delivery confirmed; Application response was not required."
-                )
+                detail = "Transport delivery confirmed; Application response was not required."
             self._last_manual_send_result = ManualSendResult(
                 sequence=operation.manual_sequence or 0,
                 label=operation.manual_label or "Application message",
@@ -949,24 +943,7 @@ class FixedIOProtocolConnection:
         elif operation.kind in {"configuration", "tick"}:
             if self._upload_operations:
                 self._advance_or_gate(self._upload_operations.popleft())
-            else:
-                self._activate_operation(
-                    _ApplicationOperation(
-                        kind="complete_test",
-                        encoded_messages=(),
-                        response=ResponseCorrelation(
-                            scope=self.protocol.ResponseScope.COMPLETE_TEST,
-                            successful_outcome=self.protocol.ResponseOutcome.ACCEPTED,
-                            application_test_id=(
-                                operation.response.application_test_id
-                                if operation.response is not None
-                                else None
-                            ),
-                        ),
-                        response_deadline=time.monotonic() + self.application_response_timeout_s,
-                    )
-                )
-        elif operation.kind == "complete_test":
+        elif operation.kind == "finalize":
             self._upload_accepted = True
             self._workflow_state = ProtocolWorkflowState.READY_TO_START
             if self._advance_mode is UploadAdvanceMode.OPERATOR_GATED:
@@ -986,7 +963,7 @@ class FixedIOProtocolConnection:
     def _handle_negative_response(self, operation: _ApplicationOperation) -> None:
         """Apply the protocol's scope-specific recovery semantics."""
         p = self.protocol
-        if operation.kind in {"configuration", "tick", "complete_test"}:
+        if operation.kind in {"configuration", "tick", "finalize"}:
             self._retire_active_upload()
             self._workflow_state = ProtocolWorkflowState.FAILED
             return
@@ -1034,7 +1011,7 @@ class FixedIOProtocolConnection:
             "discovery": ProtocolWorkflowState.DISCOVERING,
             "configuration": ProtocolWorkflowState.CONFIGURING,
             "tick": ProtocolWorkflowState.UPLOADING,
-            "complete_test": ProtocolWorkflowState.VALIDATING,
+            "finalize": ProtocolWorkflowState.VALIDATING,
             "start": ProtocolWorkflowState.STARTING,
             "abort": ProtocolWorkflowState.ABORTING,
             "reset": ProtocolWorkflowState.RESETTING,
@@ -1052,6 +1029,9 @@ class FixedIOProtocolConnection:
         )
 
     def _advance_or_gate(self, operation: UploadOperation) -> None:
+        if operation.kind is UploadOperationKind.FINALIZE:
+            self._activate_upload_operation(operation)
+            return
         if self._advance_mode is UploadAdvanceMode.OPERATOR_GATED:
             if self._gated_operation is not None:
                 raise ProtocolSessionError("Cannot gate two upload operations at once")

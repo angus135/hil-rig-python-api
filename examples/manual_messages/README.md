@@ -14,7 +14,8 @@ Typical debugging sequence:
 ```text
 HIL-RIG> manual connect COM=2 --skip-system-info
 HIL-RIG> manual send "examples\manual_messages\configuration.json"
-HIL-RIG> manual send "examples\manual_messages\instruction.json" --transport-only
+HIL-RIG> manual send "examples\manual_messages\instruction.json"
+HIL-RIG> manual finalize 00112233445566778899aabbccddeeff
 HIL-RIG> manual send "examples\manual_messages\start.json"
 HIL-RIG> manual inbox
 HIL-RIG> manual disconnect

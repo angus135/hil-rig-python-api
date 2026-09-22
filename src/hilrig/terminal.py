@@ -66,6 +66,7 @@ class HilRigCompleter(Completer):
         self.manual_subcommands = [
             "connect",
             "send",
+            "finalize",
             "inbox",
             "reset",
             "status",
@@ -223,7 +224,8 @@ class HilRigShell:
         if not self.worker.submit(path, stepped=stepped):
             if self.worker.manual_snapshot().active:
                 self._write_line(
-                    "A manual session is currently active. Use 'manual disconnect' before running a test."
+                    "A manual session is currently active. Use 'manual disconnect' before "
+                    "running a test."
                 )
             else:
                 self._write_line("A test is already active. Use 'status' or 'abort'.")
@@ -251,9 +253,8 @@ class HilRigShell:
         self._write_line("Available COM ports:")
         for p in comports:
             desc = p.description or "Unknown"
-            is_match = (
-                desc.startswith("USB Serial Device")
-                or (getattr(p, "vid", None) == 0x0483 and getattr(p, "pid", None) == 0x5740)
+            is_match = desc.startswith("USB Serial Device") or (
+                getattr(p, "vid", None) == 0x0483 and getattr(p, "pid", None) == 0x5740
             )
             match_marker = f" {_ANSI_GREEN}[HIL-RIG match]{_ANSI_RESET}" if is_match else ""
             hwid = f" ({p.hwid})" if p.hwid and p.hwid != "n/a" else ""
@@ -283,6 +284,8 @@ class HilRigShell:
             "                     Open a persistent manual protocol session.\n"
             "  manual send <message-file> [--transport-only]\n"
             "                     Send one standalone JSON Application message.\n"
+            "  manual finalize <test-id>\n"
+            "                     Send FINALIZE_TEST_UPLOAD and await Complete Test acceptance.\n"
             "  manual reset      Send RESET_APPLICATION GlobalControl.\n"
             "  manual inbox [clear]\n"
             "                     Show or clear received manual Application messages.\n"
@@ -345,6 +348,8 @@ class HilRigShell:
             self._manual_connect(tokens)
         elif command == "send":
             self._manual_send(tokens)
+        elif command == "finalize":
+            self._manual_finalize(tokens)
         elif command == "reset":
             if tokens:
                 self._write_line("Usage: manual reset")
@@ -439,6 +444,24 @@ class HilRigShell:
             return
         mode = "transport only" if transport_only else "Application response required"
         self._write_line(f"Manual send queued: {path} ({mode}).")
+
+    def _manual_finalize(self, tokens: list[str]) -> None:
+        if len(tokens) != 1:
+            self._write_line(_manual_finalize_usage())
+            return
+        raw_test_id = tokens[0].replace("-", "")
+        if len(raw_test_id) != 32:
+            self._write_line("Test ID must contain exactly 32 hexadecimal digits.")
+            return
+        try:
+            application_test_id = int(raw_test_id, 16)
+        except ValueError:
+            self._write_line("Test ID must contain only hexadecimal digits.")
+            return
+        if not self.worker.manual_finalize(application_test_id):
+            self._write_line("The manual session is not ready for upload finalization.")
+            return
+        self._write_line(f"Manual finalize queued for Test ID {application_test_id:032x}.")
 
     def do_clear(self, argument: str) -> None:
         """clear / cls -- Clear the terminal screen."""
@@ -664,9 +687,7 @@ def _format_manual_status(snapshot: ManualSessionSnapshot, *, color: bool = Fals
             )
         else:
             success_label = "successful" if snapshot.last_result.success else "unsuccessful"
-        lines.append(
-            f"Last send: {success_label} ({snapshot.last_result.label})"
-        )
+        lines.append(f"Last send: {success_label} ({snapshot.last_result.label})")
     lines.append(f"Inbox messages: {snapshot.inbox_count}")
     if snapshot.error is not None:
         err_styled = f"{_ANSI_RED}{snapshot.error}{_ANSI_RESET}" if color else snapshot.error
@@ -679,6 +700,7 @@ def _manual_usage() -> str:
         "Manual commands:\n"
         "  manual connect [COM=<n>] [--skip-system-info]\n"
         "  manual send <message-file> [--transport-only]\n"
+        "  manual finalize <test-id>\n"
         "  manual reset\n"
         "  manual inbox [clear]\n"
         "  manual status\n"
@@ -692,6 +714,10 @@ def _manual_connect_usage() -> str:
 
 def _manual_send_usage() -> str:
     return 'Usage: manual send "path to message.json" [--transport-only]'
+
+
+def _manual_finalize_usage() -> str:
+    return "Usage: manual finalize <32-hex-test-id>"
 
 
 if __name__ == "__main__":

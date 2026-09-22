@@ -10,16 +10,16 @@ persistent captured-run storage, and host-side assertion evaluation with JSON an
 Markdown reports. The optional protocol integration lowers fixed Digital, Analogue,
 and PWM configuration/stimulus state through `hil-rig-protocol`, services its Transport
 over a USB CDC COM port, and stores decoded fixed Test Results in the captured-run
-database. Protocol v0.2.0 discovery, semantic Responses, Application Errors, START,
-ABORT, and RESET_APPLICATION are integrated. Variable communication messages remain
-deferred.
+database. Protocol v0.3.0 discovery, semantic Responses, upload finalization, Application
+Errors, START, ABORT, and RESET_APPLICATION are integrated. Variable communication
+messages remain deferred.
 
 ## Requirements
 
 - Python 3.12 or newer
 - Git
 
-Fixed-I/O hardware communication additionally requires `hil-rig-protocol` 0.2.0 or newer
+Fixed-I/O hardware communication additionally requires `hil-rig-protocol` 0.3.0 or newer
 and `pyserial`. Until dependency packaging is finalized, install them into the active
 environment from the adjacent protocol checkout:
 
@@ -94,6 +94,7 @@ abort
 reset
 manual connect [COM=<n>] [--skip-system-info]
 manual send <message-file> [--transport-only]
+manual finalize <test-id>
 manual reset
 manual inbox [clear]
 manual status
@@ -116,7 +117,7 @@ Detail: Receiving test results (412 received).
 Results: 412/1751 ticks
 ```
 
-`run` uses the strict protocol-v0.2 workflow: System Information discovery, exact
+`run` uses the strict protocol-v0.3 workflow: System Information discovery, exact
 version confirmation, correlated Application Responses for configuration and sparse
 ticks, Complete Test acceptance, START completion, and the complete ordered result
 set. `HOST_COMMAND` tests are started automatically by this automatic runner after
@@ -133,8 +134,9 @@ configuration -> tick <n> -> tick <n> -> ... -> START
 At a pause, `step` releases exactly that one operation. An operation may contain more
 than one wire message in future protocol versions; it remains one terminal step. After
 release, the worker waits for Transport delivery and the operation's correlated
-Application Response before offering the next step. Firmware Complete Test validation
-is passive and automatic, so there is no separate step for it. START is always a manual
+Application Response before offering the next step. After the final tick is accepted,
+the host sends `FINALIZE_TEST_UPLOAD` and waits for Complete Test acceptance
+automatically, so there is no separate operator step for it. START is always a manual
 step in stepped mode, including for tests configured with `StartMode.IMMEDIATE`.
 
 `continue` releases the currently paused operation and disables stepping for the rest
@@ -193,6 +195,13 @@ Response, add `--transport-only`:
 
 ```text
 HIL-RIG> manual send "examples\manual_messages\instruction.json" --transport-only
+```
+
+Send upload finalization for an accepted instruction sequence and wait for its Complete
+Test Response:
+
+```text
+HIL-RIG> manual finalize 00112233445566778899aabbccddeeff
 ```
 
 Inbound messages—including responses received after a Transport-only send—are retained
@@ -612,8 +621,8 @@ commits a Transport output only after pySerial accepts every byte. Each new Tran
 session first exchanges System Information and requires an exact protocol-version
 match. Configuration and sparse tick operations then wait for both Transport delivery
 and their correlated Application Response before the next operation is submitted.
-After the final sparse tick is accepted, the connection waits for the firmware's
-Complete Test Response.
+After the final sparse tick is accepted, the connection sends `FINALIZE_TEST_UPLOAD`
+with the same Application Test ID and waits for the firmware's Complete Test Response.
 
 By default, `IMMEDIATE` automatically queues `START`; `HOST_COMMAND` exposes
 `connection.start()`. Passing `advance_mode=UploadAdvanceMode.OPERATOR_GATED` to

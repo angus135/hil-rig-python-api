@@ -240,10 +240,10 @@ Every established Transport session begins with BASIC System Information discove
 an exact major/minor/patch compatibility check. `UploadPlan` then supplies ordered,
 immutable operations containing their wire-message group and response-correlation
 metadata. The response-gated sequence is Test Configuration, each non-consecutive sparse
-tick, passive Complete Test validation, and optional START. Automatic mode preserves the
+tick, `FINALIZE_TEST_UPLOAD`, and optional START. Automatic mode preserves the
 start-mode behavior: IMMEDIATE queues START automatically and HOST_COMMAND waits for an
 explicit `start()` call. Operator-gated mode pauses configuration, every tick, and START;
-Complete Test remains automatic. `continue_upload()` switches the remaining plan back to
+upload finalization and Complete Test acceptance remain automatic. `continue_upload()` switches the remaining plan back to
 automatic advancement without bypassing acknowledgements. EXTERNAL_TRIGGER remains in
 the protocol-neutral IR but has no protocol behavior. ABORT and RESET_APPLICATION use the same single-outstanding-operation
 mechanism. Session reset, delivery failure, response timeout, negative response, or

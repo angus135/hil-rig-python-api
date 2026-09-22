@@ -28,7 +28,7 @@ class ProtocolVersion:
     patch: int
 
 
-PROTOCOL_VERSION = ProtocolVersion(0, 2, 0)
+PROTOCOL_VERSION = ProtocolVersion(0, 3, 0)
 
 
 class ControlCommand(IntEnum):
@@ -152,6 +152,12 @@ class SystemInfoResponse:
 class ExecutionControl:
     test_id: TestId
     command: ControlCommand
+    flags: int = 0
+
+
+@dataclass(frozen=True)
+class FinalizeTestUpload:
+    test_id: TestId
     flags: int = 0
 
 
@@ -331,6 +337,7 @@ class FakeProtocol:
     SystemInfoRequest = SystemInfoRequest
     SystemInfoResponse = SystemInfoResponse
     ExecutionControl = ExecutionControl
+    FinalizeTestUpload = FinalizeTestUpload
     GlobalControl = GlobalControl
     ApplicationResponse = ApplicationResponse
     ApplicationErrorMessage = ApplicationErrorMessage

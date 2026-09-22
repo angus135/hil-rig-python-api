@@ -19,6 +19,7 @@ from typing import Any
 from hilrig.api import Test
 from hilrig.evaluation import evaluate_assertions
 from hilrig.models.execution import CompiledTestIR
+from hilrig.models.identifiers import validate_uint128
 from hilrig.protocol import (
     FixedIOProtocolConnection,
     ManualApplicationMessage,
@@ -155,6 +156,11 @@ class _ManualResetCommand:
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class _ManualFinalizeCommand:
+    application_test_id: int
+
+
 class _AdvanceCommand(str, Enum):
     STEP = "step"
     CONTINUE = "continue"
@@ -169,7 +175,9 @@ class _RunAborted(Exception):
 
 
 _Command = _RunCommand | _ManualConnectCommand | _StopWorker
-_ManualCommand = _ManualSendCommand | _ManualDisconnectCommand | _ManualResetCommand
+_ManualCommand = (
+    _ManualSendCommand | _ManualDisconnectCommand | _ManualResetCommand | _ManualFinalizeCommand
+)
 _ConnectionFactory = Callable[[], Any]
 _ManualConnectionFactory = Callable[..., Any]
 _NotificationCallback = Callable[[str], None]
@@ -339,6 +347,24 @@ class ProtocolWorker:
             self._manual_commands.put(_ManualResetCommand())
         return True
 
+    def manual_finalize(self, application_test_id: int) -> bool:
+        """Queue FINALIZE_TEST_UPLOAD for one Application Test ID."""
+        validated = validate_uint128(application_test_id, name="application_test_id")
+        label = f"FinalizeTestUpload {validated:032x}"
+        with self._snapshot_lock:
+            if self._manual_snapshot.state is not ManualSessionState.READY:
+                return False
+            self._manual_snapshot = _updated_manual_snapshot(
+                self._manual_snapshot,
+                state=ManualSessionState.SENDING,
+                detail="Sending FINALIZE_TEST_UPLOAD.",
+                pending_message=label,
+                last_result=None,
+                error=None,
+            )
+            self._manual_commands.put(_ManualFinalizeCommand(validated))
+        return True
+
     def manual_clear_inbox(self) -> bool:
         """Clear all retained inbound Application-message summaries."""
         with self._snapshot_lock:
@@ -484,6 +510,8 @@ class ProtocolWorker:
                     self._begin_manual_send(connection, request)
                 elif isinstance(request, _ManualResetCommand):
                     self._begin_manual_reset(connection)
+                elif isinstance(request, _ManualFinalizeCommand):
+                    self._begin_manual_finalize(connection, request)
 
                 report = connection.service()
                 self._record_manual_messages(report.application_messages)
@@ -498,9 +526,7 @@ class ProtocolWorker:
                         error=None if result.success else result.detail,
                     )
                     outcome = "successful" if result.success else "unsuccessful"
-                    self._notify(
-                        f"Manual send {outcome}: {result.label}. {result.detail}"
-                    )
+                    self._notify(f"Manual send {outcome}: {result.label}. {result.detail}")
                 self._manual_pause()
         except BaseException as error:
             self._set_manual_snapshot(
@@ -581,6 +607,45 @@ class ProtocolWorker:
             error=None,
         )
         self._notify("Sending GlobalControl RESET_APPLICATION (Application response required).")
+
+    def _begin_manual_finalize(
+        self,
+        connection: Any,
+        command: _ManualFinalizeCommand,
+    ) -> None:
+        label = f"FinalizeTestUpload {command.application_test_id:032x}"
+        try:
+            msg = connection.application.build_finalize_test_upload(command.application_test_id)
+            encoded = connection.application.encode(msg)
+            manual_message = ManualApplicationMessage(
+                label=label,
+                message=msg,
+                encoded_message=encoded,
+                response=ResponseCorrelation(
+                    scope=connection.protocol.ResponseScope.COMPLETE_TEST,
+                    successful_outcome=connection.protocol.ResponseOutcome.ACCEPTED,
+                    application_test_id=command.application_test_id,
+                ),
+            )
+            connection.queue_manual_message(manual_message, transport_only=False)
+        except BaseException as error:
+            self._set_manual_snapshot(
+                state=ManualSessionState.READY,
+                detail="Manual upload finalization was not sent.",
+                pending_message=None,
+                error=f"{type(error).__name__}: {error}",
+            )
+            self._notify(
+                f"Manual upload finalization was not sent: {type(error).__name__}: {error}"
+            )
+            return
+        self._set_manual_snapshot(
+            state=ManualSessionState.SENDING,
+            detail="Sending FINALIZE_TEST_UPLOAD; waiting for Complete Test acceptance.",
+            pending_message=label,
+            error=None,
+        )
+        self._notify(f"Sending {label} (Complete Test Application response required).")
 
     def _record_manual_messages(self, messages: tuple[object, ...]) -> None:
         if not messages:
@@ -669,9 +734,7 @@ class ProtocolWorker:
                 compiled,
                 upload_attempt=attempt,
                 advance_mode=(
-                    UploadAdvanceMode.OPERATOR_GATED
-                    if stepped
-                    else UploadAdvanceMode.AUTOMATIC
+                    UploadAdvanceMode.OPERATOR_GATED if stepped else UploadAdvanceMode.AUTOMATIC
                 ),
             )
             self._notify(f"Connected to firmware {info.firmware_version}; uploading the test...")
@@ -802,9 +865,7 @@ class ProtocolWorker:
             self._notify(f"Released {operation.label}.")
         else:
             operation = connection.continue_upload()
-            self._notify(
-                f"Released {operation.label}; the remainder of the run is automatic."
-            )
+            self._notify(f"Released {operation.label}; the remainder of the run is automatic.")
         return True
 
     def _discard_advance_commands(self) -> None:

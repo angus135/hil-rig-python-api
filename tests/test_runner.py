@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from protocol_fakes import FakeProtocol
+from protocol_fakes import FakeProtocol, FinalizeTestUpload
 
 from hilrig import FixedIOProtocolAdapter, ManualSendResult, PWMMeasurement, TickResult
 from hilrig.protocol import ProtocolWorkflowState, UploadAdvanceMode, UploadOperationKind
@@ -64,7 +64,7 @@ class _AutomaticConnection:
         if not self.session_confirmed:
             self.session_confirmed = True
             self.session_info = SimpleNamespace(
-                protocol_version="0.2.0",
+                protocol_version="0.3.0",
                 firmware_version="1.2.3",
             )
             self.workflow_state = ProtocolWorkflowState.READY
@@ -149,11 +149,13 @@ class _ManualConnection:
         self.skip_system_info = skip_system_info
         self.serial_port = SimpleNamespace(port=device or "COM7")
         self.application = FixedIOProtocolAdapter(protocol_module=FakeProtocol)
+        self.protocol = FakeProtocol
         self.session_confirmed = False
         self.session_info = None
         self.last_manual_send_result = None
         self.pending = None
         self.sequence = 0
+        self.queued_messages = []
         self.closed = False
 
     def service(self):
@@ -161,7 +163,7 @@ class _ManualConnection:
             self.session_confirmed = True
             if not self.skip_system_info:
                 self.session_info = SimpleNamespace(
-                    protocol_version="0.2.0",
+                    protocol_version="0.3.0",
                     firmware_version="1.2.3",
                 )
         elif self.pending is not None:
@@ -185,6 +187,7 @@ class _ManualConnection:
     def queue_manual_message(self, message, *, transport_only: bool = False) -> int:
         self.sequence += 1
         self.last_manual_send_result = None
+        self.queued_messages.append(message)
         self.pending = (message, transport_only)
         return self.sequence
 
@@ -349,10 +352,7 @@ def test_worker_owns_persistent_manual_session_and_sends_message() -> None:
         poll_interval_s=0.001,
     )
     example = (
-        Path(__file__).resolve().parents[1]
-        / "examples"
-        / "manual_messages"
-        / "instruction.json"
+        Path(__file__).resolve().parents[1] / "examples" / "manual_messages" / "instruction.json"
     )
     try:
         assert worker.manual_connect(device="COM2", skip_system_info=True)
@@ -367,6 +367,18 @@ def test_worker_owns_persistent_manual_session_and_sends_message() -> None:
         assert snapshot.last_result is not None
         assert snapshot.last_result.success
         assert not snapshot.last_result.application_response_required
+
+        application_test_id = 0x00112233445566778899AABBCCDDEEFF
+        assert worker.manual_finalize(application_test_id)
+        _wait_for_manual_result(worker)
+        snapshot = worker.manual_snapshot()
+        assert snapshot.last_result is not None
+        assert snapshot.last_result.success
+        assert snapshot.last_result.application_response_required
+        finalize = created[0][1].queued_messages[-1]
+        assert type(finalize.message) is FinalizeTestUpload
+        assert finalize.message.test_id.bytes == application_test_id.to_bytes(16, "big")
+        assert finalize.response.scope is FakeProtocol.ResponseScope.COMPLETE_TEST
 
         assert worker.manual_disconnect()
         assert worker.wait_until_idle(5)
@@ -389,10 +401,7 @@ def _wait_for_next_operation(worker: ProtocolWorker, label: str) -> None:
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         snapshot = worker.snapshot()
-        if (
-            snapshot.state is WorkerState.WAITING_FOR_OPERATOR
-            and snapshot.next_operation == label
-        ):
+        if snapshot.state is WorkerState.WAITING_FOR_OPERATOR and snapshot.next_operation == label:
             return
         time.sleep(0.001)
     raise AssertionError(f"worker did not pause before {label}: {worker.snapshot()}")

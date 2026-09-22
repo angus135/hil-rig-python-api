@@ -20,6 +20,7 @@ class _StubWorker:
         self.shutdown_called = False
         self.manual_connects: list[tuple[str | None, bool]] = []
         self.manual_sends: list[tuple[Path, bool]] = []
+        self.manual_finalizes: list[int] = []
         self.manual_resets = 0
         self.manual_inbox_clears = 0
         self.manual_disconnect_result = True
@@ -67,6 +68,10 @@ class _StubWorker:
 
     def manual_reset(self) -> bool:
         self.manual_resets += 1
+        return True
+
+    def manual_finalize(self, application_test_id: int) -> bool:
+        self.manual_finalizes.append(application_test_id)
         return True
 
     def manual_clear_inbox(self) -> bool:
@@ -139,15 +144,18 @@ def test_terminal_manual_commands_parse_port_flags_and_quoted_message_path() -> 
 
     shell.onecmd("manual connect COM=2 --skip-system-info")
     shell.onecmd('manual send "C:\\Message Files\\instruction.json" --transport-only')
+    shell.onecmd("manual finalize 00112233-4455-6677-8899-aabbccddeeff")
     shell.onecmd("manual inbox")
     shell.onecmd("manual status")
     shell.onecmd("manual disconnect")
 
     assert worker.manual_connects == [("COM2", True)]
     assert worker.manual_sends == [(Path("C:\\Message Files\\instruction.json"), True)]
+    assert worker.manual_finalizes == [0x00112233445566778899AABBCCDDEEFF]
     rendered = output.getvalue()
     assert "Manual connection queued: COM2; System Information disabled." in rendered
     assert "Manual send queued:" in rendered
+    assert "Manual finalize queued" in rendered
     assert "ApplicationResponse(scope=TICK" in rendered
     assert "Manual state: ready" in rendered
     assert "Manual disconnect requested." in rendered
@@ -182,6 +190,7 @@ def test_terminal_completer() -> None:
     manual_subs = [c.text for c in completer.get_completions(Document("manual "), None)]
     assert "connect" in manual_subs
     assert "send" in manual_subs
+    assert "finalize" in manual_subs
     assert "inbox" in manual_subs
     assert "reset" in manual_subs
 
@@ -245,5 +254,3 @@ def test_terminal_ports_detection(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "COM10" in rendered
     assert "[HIL-RIG match]" in rendered
     assert "COM7" in rendered
-
-
