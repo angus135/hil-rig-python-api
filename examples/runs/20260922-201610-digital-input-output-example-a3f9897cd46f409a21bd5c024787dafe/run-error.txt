@@ -1,0 +1,1 @@
+SerialDiscoveryError: No serial device named exactly 'USB Serial Device' was found

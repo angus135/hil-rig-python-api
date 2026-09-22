@@ -1,0 +1,54 @@
+{
+  "evaluation_report_version": "1.1",
+  "test": {
+    "test_id": "af871f314255561efc325fd8429cc358",
+    "name": "Digital input/output example"
+  },
+  "run": {
+    "application_test_id": "5c67be1818258c0c65ad377835455229",
+    "run_id": "e10cbde34ca4f2e37fbcaceae1582495",
+    "capture_database": "captured-run.sqlite3",
+    "capture_status": "protocol_error",
+    "expected_tick_count": 701,
+    "received_tick_count": 0
+  },
+  "assertion_set": {
+    "assertion_set_id": "original",
+    "compiled_ir_version": "1.1"
+  },
+  "evaluation": {
+    "evaluated_at": "2026-09-22T10:56:26.688667+00:00",
+    "verdict": "inconclusive",
+    "passed_count": 0,
+    "failed_count": 0,
+    "inconclusive_count": 1,
+    "warnings": [
+      "Capture status is protocol_error; received 0 of 701 expected fixed-tick results."
+    ]
+  },
+  "assertions": [
+    {
+      "assertion_id": 0,
+      "verdict": "inconclusive",
+      "peripheral": "digital_input",
+      "channel": 0,
+      "assertion": "remain_high",
+      "evaluated_from_tick": 310,
+      "evaluated_until_tick": 600,
+      "expected": {
+        "from_tick": 310,
+        "until_tick": 600
+      },
+      "observed": {
+        "high_sample_count": 0,
+        "low_sample_count": 0
+      },
+      "valid_sample_count": 0,
+      "missing_sample_count": 291,
+      "invalid_sample_count": 0,
+      "violation_count": 0,
+      "first_failure_tick": null,
+      "message": "No violation was observed, but the result is inconclusive because 291 expected samples were missing and 0 samples were invalid."
+    }
+  ]
+}

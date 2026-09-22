@@ -30,7 +30,7 @@ from hilrig.results.models import ApplicationErrorRecord, TickResult
 _UINT32_MASK = (1 << 32) - 1
 _DEFAULT_RETRANSMIT_TIMEOUT_MS = 250
 _DEFAULT_MAX_RETRIES = 3
-_DEFAULT_APPLICATION_RESPONSE_TIMEOUT_S = 10.0
+_DEFAULT_APPLICATION_RESPONSE_TIMEOUT_S = 30.0
 
 
 def monotonic_now_ms() -> int:

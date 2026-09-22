@@ -7,36 +7,18 @@ def build_test() -> Test:
     """Return a fresh digital input/output test for one terminal run."""
     test = Test(name="Digital input/output example")
     test.configure(
-        frequency_mode=FrequencyMode.HZ_1K,
+        frequency_mode=FrequencyMode.HZ_100,
         start_mode=StartMode.IMMEDIATE,
     )
 
-    button = test.digital_input(channel=0)
-    button.configure(voltage=LogicVoltage.V3_3)
+    digital_input_ch1 = test.digital_input(channel=0)
+    digital_input_ch1.configure(voltage=LogicVoltage.V3_3)
 
-    led = test.digital_output(channel=0)
-    led.configure(voltage=LogicVoltage.V3_3, initial_state=DigitalState.LOW)
-    led.high(at_ms=100)
-    led.low(at_s=0.2)
+    ditigal_output_ch10 = test.digital_output(channel=9)
+    ditigal_output_ch10.configure(voltage=LogicVoltage.V3_3, initial_state=DigitalState.LOW)
+    
+    ditigal_output_ch10.high(at_s=3)
+    ditigal_output_ch10.low(at_s=6)
 
-    test.expect(button).high(at_tick=100)
-    test.expect(button).remain_high(from_ms=100, until_ms=150)
+    test.expect(digital_input_ch1).remain_high( from_s=3.1, until_s=6)
     return test
-
-
-def main() -> None:
-    """Retain the original standalone compile-and-export demonstration."""
-    test = build_test()
-    print(f"test ID: {test.test_id:032x}")
-    for instruction in test.instructions:
-        print(instruction)
-    for assertion in test.assertions:
-        print(assertion)
-
-    compiled = test.compile()
-    compiled.write_json("build/my-test.json")
-    compiled.write_excel("build/my-test.xlsx")
-
-
-if __name__ == "__main__":
-    main()
