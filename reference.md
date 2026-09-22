@@ -126,7 +126,7 @@ evaluator work. Protocol modules import them lazily and raise a clear
 | `src/hilrig/exporters/excel.py` | Four-sheet human review workbook. | Changing the review view. |
 | `src/hilrig/protocol/application.py` | Converts compiled fixed I/O into public protocol values and upload operations. | Mapping model data onto the Application protocol. |
 | `src/hilrig/protocol/connection.py` | Services Transport and enforces the response-gated upload/run state machine. | Changing live USB workflow, correlation, retries, or control commands. |
-| `src/hilrig/protocol/serial.py` | Exact COM discovery and pySerial setup. | Changing USB CDC discovery or serial settings. |
+| `src/hilrig/protocol/serial.py` | Base-description COM discovery and pySerial setup. | Changing USB CDC discovery or serial settings. |
 | `src/hilrig/protocol/manual.py` | Validates standalone JSON and creates one protocol message. | Extending terminal manual-message support. |
 | `src/hilrig/results/models.py` | Typed, protocol-neutral incoming records and capture metadata. | Adding data received from a run. |
 | `src/hilrig/results/adapter.py` | Maps decoded protocol results and errors into result records. | Supporting a new incoming Application message. |

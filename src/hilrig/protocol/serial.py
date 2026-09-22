@@ -50,7 +50,12 @@ def discover_serial_port(
     description: str = "USB Serial Device",
     comports: Callable[[], Iterable[object]] | None = None,
 ) -> str:
-    """Return the first port whose reported description is an exact match."""
+    """Return the first port whose base description matches exactly.
+
+    Windows commonly appends the port name to a pySerial description, for
+    example ``USB Serial Device (COM11)``. The suffix is accepted only when
+    it matches the port's reported ``device`` value.
+    """
     if not isinstance(description, str) or not description:
         raise ValueError("description must be a non-empty string")
     if comports is None:
@@ -63,14 +68,20 @@ def discover_serial_port(
         comports = list_ports.comports
 
     for port in comports():
-        if getattr(port, "description", None) == description:
-            device = getattr(port, "device", None)
+        reported_description = getattr(port, "description", None)
+        device = getattr(port, "device", None)
+        description_matches = reported_description == description or (
+            isinstance(reported_description, str)
+            and isinstance(device, str)
+            and reported_description == f"{description} ({device})"
+        )
+        if description_matches:
             if not isinstance(device, str) or not device:
                 raise SerialDiscoveryError(
                     f"Serial device {description!r} did not report a usable COM port"
                 )
             return device
-    raise SerialDiscoveryError(f"No serial device named exactly {description!r} was found")
+    raise SerialDiscoveryError(f"No serial device matching {description!r} was found")
 
 
 def open_serial_port(

@@ -12,13 +12,22 @@ class _PortInfo:
     description: str
 
 
-def test_discovery_requires_an_exact_description_match() -> None:
+def test_discovery_matches_windows_com_suffix() -> None:
     ports = [
         _PortInfo("COM4", "USB Serial Device (COM4)"),
-        _PortInfo("COM5", "usb serial device"),
+        _PortInfo("COM5", "USB Serial Device (COM5)"),
     ]
 
-    with pytest.raises(SerialDiscoveryError, match="named exactly"):
+    assert discover_serial_port(comports=lambda: ports) == "COM4"
+
+
+def test_discovery_requires_an_exact_base_description_match() -> None:
+    ports = [
+        _PortInfo("COM4", "USB Serial Device Pro (COM4)"),
+        _PortInfo("COM5", "usb serial device (COM5)"),
+    ]
+
+    with pytest.raises(SerialDiscoveryError, match="matching"):
         discover_serial_port(comports=lambda: ports)
 
 
@@ -52,7 +61,7 @@ def test_open_declares_requested_line_settings_and_disables_dtr_rts() -> None:
     serial_port = open_serial_port(
         SerialConnectionSettings(),
         serial_factory=SerialPort,
-        comports=lambda: [_PortInfo("COM12", "USB Serial Device")],
+        comports=lambda: [_PortInfo("COM12", "USB Serial Device (COM12)")],
     )
 
     assert serial_port.arguments == {

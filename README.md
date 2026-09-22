@@ -180,7 +180,7 @@ HIL-RIG> manual connect COM=2 --skip-system-info
 ```
 
 `COM=2` opens `COM2` directly. When it is omitted, the host retains its normal behavior
-of selecting the first port whose description is exactly `USB Serial Device`.
+of selecting the first port whose base description is exactly `USB Serial Device`.
 `--skip-system-info` does not skip COM discovery or Transport session establishment.
 
 Send one message and require both Transport delivery and its correlated Application
@@ -610,7 +610,9 @@ with FixedIOProtocolConnection.connect() as connection:
 ```
 
 The connection scans `serial.tools.list_ports.comports()` and uses the first port whose
-description is exactly `USB Serial Device`. No match is an error. It opens that port as
+base description is exactly `USB Serial Device`. On Windows, pySerial may append the
+port name, such as `(COM11)`, to that description; this suffix is accepted when it
+matches the port's reported device. No match is an error. It opens that port as
 115200 baud, 8 data bits, no parity, one stop bit, no flow control, non-blocking reads,
 and with DTR/RTS disabled. The baud/line coding is explicit even if the direct USB CDC
 firmware ignores it.

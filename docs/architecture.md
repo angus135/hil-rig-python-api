@@ -225,7 +225,7 @@ correlated Application Response. A Transport-only send completes on delivery
 confirmation and treats any later Application message as inbox data. Manual sessions
 can bypass System Information/version discovery, but never bypass Transport session
 establishment or reliable-delivery handling. Normal runs continue using automatic
-exact-description COM discovery; manual sessions may explicitly select a COM device.
+base-description COM discovery; manual sessions may explicitly select a COM device.
 
 The caller repeatedly invokes non-blocking `service()`. The connection retains partial
 Transport input and serial output, advances Transport with monotonic wrapped
