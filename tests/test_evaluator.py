@@ -200,7 +200,7 @@ def test_range_without_violations_is_inconclusive_when_evidence_has_gaps(
         minimum_v=4.9,
         maximum_v=5.1,
         from_tick=0,
-        until_tick=2,
+        until_tick=3,
     )
     compiled = test.compile()
     builder = CapturedRunBuilder(
@@ -246,6 +246,31 @@ def test_known_range_violation_fails_even_when_other_ticks_are_missing(tmp_path:
     assert result.violation_count == 1
     assert result.missing_sample_count == 1
     assert result.first_failure_tick == 0
+
+
+def test_adjacent_digital_ranges_are_half_open(tmp_path: Path) -> None:
+    test = HilRigTest(name="Adjacent interval states")
+    digital_input = test.digital_input(channel=0).configure(voltage=LogicVoltage.V3_3)
+    test.expect(digital_input).remain_low(from_tick=0, until_tick=1)
+    test.expect(digital_input).remain_high(from_tick=1, until_tick=2)
+    test.expect(digital_input).remain_low(from_tick=2, until_tick=3)
+    compiled = test.compile()
+    run = _capture(
+        tmp_path / "adjacent-ranges.sqlite3",
+        compiled,
+        [
+            _tick(0, digital_0=False),
+            _tick(1, digital_0=True),
+            _tick(2, digital_0=False),
+        ],
+        expected_tick_count=3,
+    )
+
+    report = evaluate_assertions(run)
+
+    assert report.verdict is EvaluationVerdict.PASS
+    assert [result.valid_sample_count for result in report.assertion_results] == [1, 1, 1]
+    assert [result.violation_count for result in report.assertion_results] == [0, 0, 0]
 
 
 def test_transition_requires_adjacent_valid_ticks(tmp_path: Path) -> None:
@@ -403,14 +428,18 @@ def test_evaluation_report_exports_json_and_markdown(tmp_path: Path) -> None:
     document = json.loads(json_path.read_text(encoding="utf-8"))
     markdown = markdown_path.read_text(encoding="utf-8")
 
-    assert document["evaluation_report_version"] == "1.1"
+    assert document["evaluation_report_version"] == "1.2"
     assert document["run"]["application_test_id"] == ("0000000000000000000000000000d00d")
     assert document["evaluation"]["verdict"] == "pass"
     assert document["assertions"][0]["expected"]["target_uv"] == 5_000_000
     assert "# HIL-RIG Test Report: Report export" in markdown
     assert "**Overall verdict:** `PASS`" in markdown
     assert "**Application Test ID:** `0000000000000000000000000000d00d`" in markdown
-    assert "5 V (5000000 µV)" in markdown
+    assert "5 V (5000000 uV)" in markdown
+    assert "\N{EN DASH}" not in markdown
+    assert "\N{EM DASH}" not in markdown
+    assert "\N{MICRO SIGN}" not in markdown
+    assert b"\r\n" not in markdown_path.read_bytes()
     assert report.to_dict() == document
     assert report.to_json().endswith("\n")
 

@@ -54,6 +54,7 @@ class HilRigCompleter(Completer):
             "step",
             "continue",
             "status",
+            "inbox",
             "abort",
             "manual",
             "ports",
@@ -131,6 +132,12 @@ class HilRigCompleter(Completer):
                 current_token = document.get_word_before_cursor(WORD=True)
                 if "clear".startswith(current_token.lower()):
                     yield Completion("clear", start_position=-len(current_token))
+            return
+
+        if cmd == "inbox":
+            current_token = document.get_word_before_cursor(WORD=True)
+            if "clear".startswith(current_token.lower()):
+                yield Completion("clear", start_position=-len(current_token))
             return
 
         if cmd == "help":
@@ -277,6 +284,7 @@ class HilRigShell:
             "  step               Release exactly one paused operation.\n"
             "  continue           Release the gate and finish automatically.\n"
             "  status             Show the current or most recently completed run.\n"
+            "  inbox [clear]      Show or clear Application Errors from the current/latest run.\n"
             "  abort              Request cancellation of the active run.\n"
             "  ports              List available serial COM ports and detect the HIL-RIG.\n"
             "  reset              Send RESET_APPLICATION in the active manual session.\n"
@@ -322,6 +330,22 @@ class HilRigShell:
             self._write_line("Usage: status")
             return
         self._write_line(_format_status(self.worker.snapshot(), color=self.is_interactive))
+
+    def do_inbox(self, argument: str) -> None:
+        """inbox [clear] -- Show or clear Application Errors for the current/latest run."""
+        option = argument.strip().lower()
+        if option in {"clear", "--clear"}:
+            self.worker.clear_run_inbox()
+            self._write_line("Run inbox cleared.")
+        elif option:
+            self._write_line("Usage: inbox [clear]")
+        else:
+            inbox = self.worker.run_inbox()
+            self._write_line(
+                "Run inbox is empty."
+                if not inbox
+                else "Run inbox:\n" + "\n".join(f"  {item}" for item in inbox)
+            )
 
     def do_abort(self, argument: str) -> None:
         """abort -- Request cancellation of the active run."""
@@ -635,6 +659,7 @@ def _format_status(snapshot: RunSnapshot, *, color: bool = False) -> str:
         lines.append(
             f"Results: {snapshot.received_tick_count}/{snapshot.expected_tick_count} ticks"
         )
+    lines.append(f"Inbox messages: {snapshot.inbox_count}")
     if snapshot.verdict is not None:
         v_upper = snapshot.verdict.upper()
         if color:

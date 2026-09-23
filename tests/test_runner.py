@@ -7,7 +7,13 @@ from types import SimpleNamespace
 import pytest
 from protocol_fakes import FakeProtocol, FinalizeTestUpload
 
-from hilrig import FixedIOProtocolAdapter, ManualSendResult, PWMMeasurement, TickResult
+from hilrig import (
+    ApplicationErrorRecord,
+    FixedIOProtocolAdapter,
+    ManualSendResult,
+    PWMMeasurement,
+    TickResult,
+)
 from hilrig.protocol import ProtocolWorkflowState, UploadAdvanceMode, UploadOperationKind
 from hilrig.runner import (
     DefinitionFileError,
@@ -40,8 +46,14 @@ def _write_test_file(path: Path, *, start_mode: str = "HOST_COMMAND") -> Path:
 
 
 class _AutomaticConnection:
-    def __init__(self, *, block_results: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        block_results: bool = False,
+        application_errors: tuple[ApplicationErrorRecord, ...] = (),
+    ) -> None:
         self.block_results = block_results
+        self.application_errors = application_errors
         self.session_confirmed = False
         self.session_info = None
         self.workflow_state = ProtocolWorkflowState.CONNECTING
@@ -61,6 +73,7 @@ class _AutomaticConnection:
 
     def service(self):
         stored = ()
+        errors = ()
         if not self.session_confirmed:
             self.session_confirmed = True
             self.session_info = SimpleNamespace(
@@ -80,6 +93,8 @@ class _AutomaticConnection:
         elif self.workflow_state is ProtocolWorkflowState.STARTING:
             self.workflow_state = ProtocolWorkflowState.RUNNING
         elif self.workflow_state is ProtocolWorkflowState.RUNNING and not self.block_results:
+            errors = self.application_errors
+            self.application_errors = ()
             stored = tuple(_tick_result(tick) for tick in range(self.compiled.expected_tick_count))
             for result in stored:
                 self.builder.add_tick_result(result)
@@ -87,7 +102,10 @@ class _AutomaticConnection:
             self.results_complete = True
         elif self.workflow_state is ProtocolWorkflowState.ABORTING:
             self.workflow_state = ProtocolWorkflowState.ABORTED
-        return SimpleNamespace(stored_tick_results=stored)
+        return SimpleNamespace(
+            stored_tick_results=stored,
+            stored_application_errors=errors,
+        )
 
     def bind_result_builder(self, builder) -> None:
         self.builder = builder
@@ -251,7 +269,7 @@ def test_worker_runs_test_writes_artifacts_and_accepts_another_run(tmp_path: Pat
         first = worker.snapshot()
 
         assert first.state is WorkerState.COMPLETED
-        assert first.received_tick_count == first.expected_tick_count == 101
+        assert first.received_tick_count == first.expected_tick_count == 100
         assert first.verdict == "inconclusive"
         assert first.output_directory is not None
         assert connections[0].start_called
@@ -332,6 +350,43 @@ def test_worker_continue_makes_remainder_automatic(tmp_path: Path) -> None:
 
         assert worker.snapshot().state is WorkerState.COMPLETED
         assert connection.start_called
+    finally:
+        worker.shutdown()
+
+
+def test_worker_announces_and_retains_run_application_errors(tmp_path: Path) -> None:
+    definition = _write_test_file(tmp_path / "application-error.py")
+    error = ApplicationErrorRecord(
+        category="execution",
+        detail="27",
+        recoverable=True,
+        tick=3,
+        diagnostic_data=b"timing slip",
+    )
+    connection = _AutomaticConnection(application_errors=(error,))
+    notifications: list[str] = []
+    worker = ProtocolWorker(
+        connection_factory=lambda: connection,
+        notification_callback=notifications.append,
+        poll_interval_s=0.001,
+    )
+    try:
+        assert worker.submit(definition, stepped=True)
+        _wait_for_next_operation(worker, "configuration")
+        assert worker.continue_run()
+        assert worker.wait_until_idle(5)
+
+        inbox = worker.run_inbox()
+        assert worker.snapshot().inbox_count == 1
+        assert "category=execution" in inbox[0]
+        assert "recoverable=true" in inbox[0]
+        assert "tick=3" in inbox[0]
+        assert "timing slip" in inbox[0]
+        assert any(message.startswith("RIG Application Error:") for message in notifications)
+
+        assert worker.clear_run_inbox()
+        assert worker.run_inbox() == ()
+        assert worker.snapshot().inbox_count == 0
     finally:
         worker.shutdown()
 

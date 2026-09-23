@@ -30,7 +30,7 @@ from hilrig.protocol import (
     UploadAdvanceMode,
     load_manual_message,
 )
-from hilrig.results import CapturedRunBuilder, CapturedRunIR, CaptureStatus
+from hilrig.results import ApplicationErrorRecord, CapturedRunBuilder, CapturedRunIR, CaptureStatus
 
 
 class DefinitionFileError(ValueError):
@@ -95,6 +95,7 @@ class RunSnapshot:
     protocol_state: str | None = None
     received_tick_count: int = 0
     expected_tick_count: int = 0
+    inbox_count: int = 0
     verdict: str | None = None
     error: str | None = None
     stepped: bool = False
@@ -219,6 +220,7 @@ class ProtocolWorker:
         self._snapshot_lock = threading.Lock()
         self._snapshot = RunSnapshot()
         self._manual_snapshot = ManualSessionSnapshot()
+        self._run_inbox: deque[str] = deque(maxlen=100)
         self._manual_inbox: deque[str] = deque(maxlen=100)
         self._abort_requested = threading.Event()
         self._idle = threading.Event()
@@ -254,6 +256,7 @@ class ProtocolWorker:
             self._abort_requested.clear()
             self._discard_advance_commands()
             self._advance_request_pending = False
+            self._run_inbox.clear()
             self._idle.clear()
             self._snapshot = RunSnapshot(
                 state=WorkerState.QUEUED,
@@ -374,6 +377,18 @@ class ProtocolWorker:
                 inbox_count=0,
             )
         return True
+
+    def clear_run_inbox(self) -> bool:
+        """Clear retained Application-error summaries for the current or latest run."""
+        with self._snapshot_lock:
+            self._run_inbox.clear()
+            self._snapshot = _updated_snapshot(self._snapshot, inbox_count=0)
+        return True
+
+    def run_inbox(self) -> tuple[str, ...]:
+        """Return retained Application-error summaries for the current or latest run."""
+        with self._snapshot_lock:
+            return tuple(self._run_inbox)
 
     def manual_inbox(self) -> tuple[str, ...]:
         """Return the retained inbound Application-message summaries."""
@@ -745,6 +760,7 @@ class ProtocolWorker:
                 advance_applied = self._apply_operator_command(connection)
                 service_report = connection.service()
                 received_tick_count += len(service_report.stored_tick_results)
+                self._record_run_errors(service_report.stored_application_errors)
                 if (
                     connection.workflow_state is ProtocolWorkflowState.READY_TO_START
                     and compiled.start_mode == "HOST_COMMAND"
@@ -821,6 +837,17 @@ class ProtocolWorker:
             with self._snapshot_lock:
                 self._advance_request_pending = False
             self._discard_advance_commands()
+
+    def _record_run_errors(self, errors: tuple[ApplicationErrorRecord, ...]) -> None:
+        for error in errors:
+            rendered = _format_application_error(error)
+            with self._snapshot_lock:
+                self._run_inbox.append(rendered)
+                self._snapshot = _updated_snapshot(
+                    self._snapshot,
+                    inbox_count=len(self._run_inbox),
+                )
+            self._notify(f"RIG Application Error: {rendered}")
 
     def _record_protocol_progress(
         self,
@@ -1011,6 +1038,7 @@ def _updated_snapshot(snapshot: RunSnapshot, **changes: object) -> RunSnapshot:
         "protocol_state": snapshot.protocol_state,
         "received_tick_count": snapshot.received_tick_count,
         "expected_tick_count": snapshot.expected_tick_count,
+        "inbox_count": snapshot.inbox_count,
         "verdict": snapshot.verdict,
         "error": snapshot.error,
         "stepped": snapshot.stepped,
@@ -1072,6 +1100,19 @@ def _format_application_message(message: object) -> str:
     if firmware_version is not None:
         fields.append(f"firmware={_version_value(firmware_version)}")
     return f"{name}({', '.join(fields)})" if fields else name
+
+
+def _format_application_error(error: ApplicationErrorRecord) -> str:
+    fields = [
+        f"category={error.category}",
+        f"recoverable={str(error.recoverable).lower()}",
+    ]
+    if error.tick is not None:
+        fields.append(f"tick={error.tick}")
+    fields.append(f"detail={error.detail}")
+    if error.diagnostic_data:
+        fields.append(f"diagnostic_data={error.diagnostic_data!r}")
+    return f"ApplicationError({', '.join(fields)})"
 
 
 def _version_value(version: object) -> str:

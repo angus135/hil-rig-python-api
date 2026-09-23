@@ -128,7 +128,7 @@ def evaluate_transition(
         verdict = EvaluationVerdict.FAIL
         message = (
             f"No adjacent {_state_name(from_state)} to {_state_name(to_state)} transition "
-            f"was observed from tick {from_tick} through {until_tick}."
+            f"was observed in tick range [{from_tick}, {until_tick})."
         )
 
     return make_result(
@@ -192,7 +192,8 @@ def _evaluate_remain_state(
     message = range_message(
         verdict=verdict,
         success=(
-            f"Digital input remained {expected_name} from tick {from_tick} through {until_tick}."
+            f"Digital input remained {expected_name} in tick range "
+            f"[{from_tick}, {until_tick})."
         ),
         failure=(
             f"Digital input did not remain {expected_name}; observed {violation_count} "

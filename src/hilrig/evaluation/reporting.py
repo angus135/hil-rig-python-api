@@ -115,7 +115,7 @@ def render_evaluation_report_markdown(report: EvaluationReport) -> str:
             for result in report.assertion_results
         )
     else:
-        lines.append("| — | INCONCLUSIVE | No assertions | — | — | Nothing to evaluate. |")
+        lines.append("| - | INCONCLUSIVE | No assertions | - | - | Nothing to evaluate. |")
 
     for result in report.assertion_results:
         lines.extend(
@@ -133,7 +133,7 @@ def render_evaluation_report_markdown(report: EvaluationReport) -> str:
                 f"- Invalid samples: {result.invalid_sample_count}",
                 f"- Violations: {result.violation_count}",
                 f"- First failure tick: "
-                f"{'—' if result.first_failure_tick is None else result.first_failure_tick}",
+                f"{'-' if result.first_failure_tick is None else result.first_failure_tick}",
                 "",
                 result.message,
             ]
@@ -153,12 +153,16 @@ def write_evaluation_report_markdown(
 ) -> Path:
     """Write a Markdown evaluation report and return its absolute path."""
     output = _output_path(path, suffix=".md")
-    output.write_text(render_evaluation_report_markdown(report), encoding="utf-8")
+    output.write_text(
+        render_evaluation_report_markdown(report),
+        encoding="utf-8",
+        newline="\n",
+    )
     return output
 
 
 def _tick_window(from_tick: int, until_tick: int) -> str:
-    return str(from_tick) if from_tick == until_tick else f"{from_tick}–{until_tick}"
+    return str(from_tick) if from_tick == until_tick else f"[{from_tick}, {until_tick})"
 
 
 def _cell(value: str) -> str:
@@ -167,13 +171,13 @@ def _cell(value: str) -> str:
 
 def _format_fields(values: Mapping[str, EvaluationScalar]) -> str:
     if not values:
-        return "—"
+        return "-"
     return "; ".join(f"`{name}={_format_value(name, value)}`" for name, value in values.items())
 
 
 def _format_value(name: str, value: EvaluationScalar) -> str:
     if isinstance(value, int) and not isinstance(value, bool) and name.endswith("_uv"):
-        return f"{value / 1_000_000:g} V ({value} µV)"
+        return f"{value / 1_000_000:g} V ({value} uV)"
     if (
         isinstance(value, (int, float))
         and not isinstance(value, bool)

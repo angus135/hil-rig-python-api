@@ -698,7 +698,7 @@ class DigitalInputExpectation:
         from_s: TimeValue | None = None,
         until_s: TimeValue | None = None,
     ) -> DigitalInputExpectation:
-        """Expect the input to stay high throughout one inclusive time range."""
+        """Expect the input to stay high throughout one half-open time range."""
         start, end = self._test._time_range(
             ticks=_optional_pair(from_tick, until_tick, names="from_tick and until_tick"),
             milliseconds=_optional_pair(from_ms, until_ms, names="from_ms and until_ms"),
@@ -724,7 +724,7 @@ class DigitalInputExpectation:
         from_s: TimeValue | None = None,
         until_s: TimeValue | None = None,
     ) -> DigitalInputExpectation:
-        """Expect the input to stay low throughout one inclusive time range."""
+        """Expect the input to stay low throughout one half-open time range."""
         start, end = self._test._time_range(
             ticks=_optional_pair(from_tick, until_tick, names="from_tick and until_tick"),
             milliseconds=_optional_pair(from_ms, until_ms, names="from_ms and until_ms"),
@@ -749,7 +749,7 @@ class DigitalInputExpectation:
         between_ms: TimeRange | None = None,
         between_s: TimeRange | None = None,
     ) -> DigitalInputExpectation:
-        """Expect a state transition within one inclusive time range."""
+        """Expect a state transition within one half-open time range."""
         if not isinstance(from_state, bool) or not isinstance(to_state, bool):
             raise TypeError("from_state and to_state must be bool values")
         if from_state is to_state:
@@ -915,7 +915,7 @@ class PwmInputExpectation:
         from_s: TimeValue | None = None,
         until_s: TimeValue | None = None,
     ) -> PwmInputExpectation:
-        """Expect frequency to remain within an inclusive band."""
+        """Expect frequency to remain within a band over a half-open time range."""
         minimum = _non_negative_number(minimum_hz, name="minimum_hz")
         maximum = _non_negative_number(maximum_hz, name="maximum_hz")
         _ordered_bounds(minimum, maximum, names="minimum_hz and maximum_hz")
@@ -951,7 +951,7 @@ class PwmInputExpectation:
         from_s: TimeValue | None = None,
         until_s: TimeValue | None = None,
     ) -> PwmInputExpectation:
-        """Expect duty cycle to remain within an inclusive band."""
+        """Expect duty cycle to remain within a band over a half-open time range."""
         minimum = _duty_cycle(minimum_duty_cycle, name="minimum_duty_cycle")
         maximum = _duty_cycle(maximum_duty_cycle, name="maximum_duty_cycle")
         _ordered_bounds(
@@ -1062,7 +1062,7 @@ class AnalogueInputExpectation:
         from_s: TimeValue | None = None,
         until_s: TimeValue | None = None,
     ) -> AnalogueInputExpectation:
-        """Expect a voltage to remain within an inclusive band."""
+        """Expect a voltage to remain within a band over a half-open time range."""
         minimum_uv, maximum_uv = _voltage_bounds(minimum_v, maximum_v)
         start, end = self._range(
             from_tick=from_tick,

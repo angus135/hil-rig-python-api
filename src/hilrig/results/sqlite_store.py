@@ -487,11 +487,11 @@ def iter_ticks(
     from_tick: int,
     until_tick: int | None,
 ) -> Iterator[CapturedTickResult]:
-    """Stream fixed tick rows in chronological order over an inclusive range."""
+    """Stream fixed tick rows in chronological order over a half-open range."""
     query = "SELECT * FROM tick_results WHERE tick >= ?"
     parameters: list[object] = [from_tick]
     if until_tick is not None:
-        query += " AND tick <= ?"
+        query += " AND tick < ?"
         parameters.append(until_tick)
     query += " ORDER BY tick"
     with closing(_read_connection(path)) as connection:
@@ -513,7 +513,7 @@ def iter_communications(
     clauses = ["tick >= ?"]
     parameters: list[object] = [from_tick]
     if until_tick is not None:
-        clauses.append("tick <= ?")
+        clauses.append("tick < ?")
         parameters.append(until_tick)
     if peripheral is not None:
         clauses.append("peripheral = ?")

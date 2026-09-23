@@ -224,7 +224,7 @@ later. The final `+1` includes tick zero. Assertions therefore affect run length
 though they are not sent to the RIG. A count of 1,001 describes ticks `0..1000`.
 Compilation rejects counts of 1,000,000 or more for protocol compatibility.
 
-The current compiled IR schema version is 1.1. The source of truth is
+The current compiled IR schema version is 1.2. The source of truth is
 `models/execution.py`.
 
 ### Definition outputs
@@ -462,7 +462,7 @@ Keep parsing and display in `terminal.py`. Put long-running work and state chang
 | Test file | Main coverage |
 | --- | --- |
 | `test_api.py` | Handles, configuration, validation, and public naming |
-| `test_timing.py` | Exact timestamps and inclusive ranges |
+| `test_timing.py` | Exact timestamps and half-open ranges |
 | `test_instructions.py`, `test_spi_uart.py` | Stimulus records and role/frame rules |
 | `test_assertions.py`, `test_extended_assertions.py` | Assertion builders and values |
 | `test_compiler.py`, `test_ir_export.py` | Freezing, compiled IR, run length, JSON, Excel |

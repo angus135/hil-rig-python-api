@@ -37,5 +37,8 @@ def test_non_aligned_time_is_rejected_instead_of_rounded() -> None:
 def test_time_range_is_converted_and_order_checked() -> None:
     assert resolve_time_range(FrequencyMode.HZ_1K, milliseconds=(10, 20)) == (10, 20)
 
-    with pytest.raises(TimingError, match="must not be after"):
+    with pytest.raises(TimingError, match="must be before"):
         resolve_time_range(FrequencyMode.HZ_1K, ticks=(20, 10))
+
+    with pytest.raises(TimingError, match="must be before"):
+        resolve_time_range(FrequencyMode.HZ_1K, ticks=(20, 20))

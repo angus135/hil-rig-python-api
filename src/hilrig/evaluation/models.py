@@ -10,7 +10,7 @@ from typing import TypeAlias
 
 from hilrig.results.models import CaptureStatus
 
-EVALUATION_REPORT_SCHEMA_VERSION = "1.1"
+EVALUATION_REPORT_SCHEMA_VERSION = "1.2"
 EvaluationScalar: TypeAlias = str | int | float | bool | None
 
 

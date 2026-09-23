@@ -97,7 +97,7 @@ class CapturedRunIR:
         from_tick: int = 0,
         until_tick: int | None = None,
     ) -> Iterator[CapturedTickResult]:
-        """Stream fixed results over an inclusive chronological range."""
+        """Stream fixed results over a half-open chronological range."""
         _validate_range(from_tick, until_tick)
         return iter_ticks(
             self._database_path,

@@ -148,21 +148,21 @@ def _expected_tick_count(
     assertions: AssertionList,
     frequency_hz: int,
 ) -> int:
-    """Return ticks 0 through the last event plus one second, inclusively."""
-    latest_relevant_tick = max(
-        (instruction.timestamp for instruction in instructions),
+    """Return the half-open result count through the last event plus one second."""
+    latest_relevant_end = max(
+        (instruction.timestamp + 1 for instruction in instructions),
         default=0,
     )
     for assertion in assertions:
-        latest_relevant_tick = max(latest_relevant_tick, _assertion_end_tick(assertion))
+        latest_relevant_end = max(latest_relevant_end, _assertion_end_tick(assertion))
 
     settling_ticks = frequency_hz * _POST_TEST_SETTLING_SECONDS
-    return latest_relevant_tick + settling_ticks + 1
+    return latest_relevant_end + settling_ticks
 
 
 def _assertion_end_tick(assertion: Assertion) -> int:
     if isinstance(assertion, PointAssertion):
-        return assertion.timestamp
+        return assertion.timestamp + 1
     if isinstance(assertion, RangeAssertion):
         return assertion.until_tick
     raise ValidationError(f"Unsupported assertion type: {type(assertion).__name__}")
@@ -287,8 +287,8 @@ def _validate_assertions(
         elif isinstance(assertion, RangeAssertion):
             _validate_tick(assertion.from_tick, label="Assertion start tick")
             _validate_tick(assertion.until_tick, label="Assertion end tick")
-            if assertion.from_tick > assertion.until_tick:
-                raise TimingError("Assertion start tick must not be after its end tick")
+            if assertion.from_tick >= assertion.until_tick:
+                raise TimingError("Assertion start tick must be before its end tick")
         else:
             raise ValidationError(f"Unsupported assertion type: {type(assertion).__name__}")
 

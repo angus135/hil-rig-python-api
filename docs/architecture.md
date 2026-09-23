@@ -121,7 +121,7 @@ also provides stable sorting and grouping helpers.
 
 Assertions remain separate from stimulus instructions and are intended to be evaluated
 on the host against returned time-series data. Reusable `PointAssertion` and
-`RangeAssertion` bases hold the converted point tick or inclusive tick bounds. Concrete
+`RangeAssertion` bases hold the converted point tick or half-open tick bounds. Concrete
 definitions currently cover digital states and transitions, PWM period/frequency/duty
 measurements, and analogue voltage targets, bands, and thresholds. Evaluator handlers are
 registered by the compiled `(peripheral, assertion)` operation pair, so adding a new
@@ -151,19 +151,25 @@ peripheral configurations, and chronological stimulus instructions. It omits ass
 because those are host-side operations and must not be sent to the RIG. Bytes are hex,
 test IDs are fixed-width hex, and enums are stored by symbolic member name.
 
-Compilation also derives an inclusive expected result count:
+Compilation also derives a half-open expected result count:
 
 ```text
-latest_relevant_tick = max(latest stimulus, latest assertion end, 0)
-expected_tick_count = latest_relevant_tick + frequency_hz + 1
+latest_relevant_end = max(
+    latest stimulus tick + 1,
+    latest point assertion tick + 1,
+    latest range assertion until_tick,
+    0,
+)
+expected_tick_count = latest_relevant_end + frequency_hz
 ```
 
-`frequency_hz` supplies exactly one second of settling ticks. The final `+1` represents
-tick zero: a count of 1,001 describes ticks `0..1000`, not `0..1001`. Point assertions
-use their timestamp; range assertions use `until_tick`. Assertions remain absent from
+`frequency_hz` supplies exactly one second of settling intervals. A count of 1,000
+describes ticks `0..999`. Point assertions require the interval containing their
+timestamp; range assertions already carry an exclusive `until_tick`. Assertions remain absent from
 the machine instruction list, but their latest required tick can extend this transmitted
 duration so the RIG captures enough evidence for host evaluation. The additive field
-changes the outgoing IR schema version from 1.0 to 1.1.
+originally changed the outgoing IR schema version from 1.0 to 1.1; adopting half-open
+range semantics changes it to 1.2.
 
 The human-readable `.xlsx` view contains `Test Summary`, `Configurations`,
 `Instructions`, and `Assertions` sheets. It is generated from the same compiled
@@ -351,7 +357,7 @@ The IR derives optional review artifacts while keeping bulk values out of JSON:
 `AssertionEvaluator` accepts a finalized `CapturedRunIR` and selects a stored assertion
 set (the immutable `original` set by default). It steps through the definitions in
 assertion-ID order. A registry maps each `(peripheral, assertion)` pair to a small handler
-for that operation. Shared query helpers provide point evidence or stream inclusive tick
+for that operation. Shared query helpers provide point evidence or stream half-open tick
 ranges while making missing ticks explicit.
 
 Each handler returns an immutable `AssertionResult` containing the verdict, expected

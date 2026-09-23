@@ -24,7 +24,7 @@ class PointAssertion(Assertion):
 
 @dataclass(frozen=True, slots=True)
 class RangeAssertion(Assertion):
-    """Information shared by assertions evaluated over an inclusive tick range."""
+    """Information shared by assertions evaluated over a half-open tick range."""
 
     from_tick: int
     until_tick: int
@@ -39,17 +39,17 @@ class DigitalInputPointAssertion(PointAssertion):
 
 @dataclass(frozen=True, slots=True)
 class DigitalInputRemainHighAssertion(RangeAssertion):
-    """Expect a digital input to remain high over an inclusive tick range."""
+    """Expect a digital input to remain high over a half-open tick range."""
 
 
 @dataclass(frozen=True, slots=True)
 class DigitalInputRemainLowAssertion(RangeAssertion):
-    """Expect a digital input to remain low over an inclusive tick range."""
+    """Expect a digital input to remain low over a half-open tick range."""
 
 
 @dataclass(frozen=True, slots=True)
 class DigitalInputTransitionAssertion(RangeAssertion):
-    """Expect a digital input transition within an inclusive tick range."""
+    """Expect a digital input transition within a half-open tick range."""
 
     from_state: DigitalState
     to_state: DigitalState
@@ -91,7 +91,7 @@ class PwmInputWaveformNearAssertion(PointAssertion):
 
 @dataclass(frozen=True, slots=True)
 class PwmInputFrequencyRemainWithinAssertion(RangeAssertion):
-    """Expect PWM frequency to remain within an inclusive band."""
+    """Expect PWM frequency to remain within a band over a half-open tick range."""
 
     minimum_hz: float
     maximum_hz: float
@@ -99,7 +99,7 @@ class PwmInputFrequencyRemainWithinAssertion(RangeAssertion):
 
 @dataclass(frozen=True, slots=True)
 class PwmInputDutyCycleRemainWithinAssertion(RangeAssertion):
-    """Expect PWM duty cycle to remain within an inclusive band."""
+    """Expect PWM duty cycle to remain within a band over a half-open tick range."""
 
     minimum_duty_cycle: float
     maximum_duty_cycle: float
@@ -123,7 +123,7 @@ class AnalogueInputWithinAssertion(PointAssertion):
 
 @dataclass(frozen=True, slots=True)
 class AnalogueInputRemainWithinAssertion(RangeAssertion):
-    """Expect an analogue voltage to remain within an inclusive band."""
+    """Expect an analogue voltage to remain within a band over a half-open tick range."""
 
     minimum_uv: int
     maximum_uv: int

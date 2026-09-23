@@ -160,6 +160,18 @@ Continue requested; the remainder will run automatically.
 
 `EXTERNAL_TRIGGER` is not supported by the terminal runner.
 
+Application Error messages received during a normal or stepped run are printed as they
+arrive and retained in a bounded, run-scoped inbox. The inbox is reset when a new run is
+queued and can be inspected or cleared without interrupting the run:
+
+```text
+HIL-RIG> inbox
+HIL-RIG> inbox clear
+```
+
+`status` includes the number of retained run-inbox messages. This is separate from
+`manual inbox`, which only contains messages received by a persistent manual session.
+
 ### Manual Application-message mode
 
 Manual mode is independent of test definitions, upload plans, captured-run databases,
@@ -348,6 +360,10 @@ expectation.to_transition(
     between_s=(0.1, 0.5),
 )
 ```
+
+Ranges are half-open: `from` is included and `until` is excluded. At 100 Hz,
+`from_s=3, until_s=6` evaluates result ticks `300..599`. Adjacent ranges can therefore
+share an endpoint without evaluating the same result twice.
 
 `from_state` is used because `from` is a reserved Python keyword.
 
@@ -719,15 +735,19 @@ than sent to the RIG. The JSON test summary does include `expected_tick_count`, 
 calculated as:
 
 ```text
-max(latest stimulus tick, latest assertion tick/range end, 0)
-    + one second of ticks
-    + 1 for inclusive tick zero
+latest_relevant_end = max(
+    latest stimulus tick + 1,
+    latest point assertion tick + 1,
+    latest range assertion until_tick,
+    0,
+)
+expected_tick_count = latest_relevant_end + one second of ticks
 ```
 
-For example, a final event at tick 750 in 1 kHz mode produces 1,751 expected application
-results, covering ticks `0..1750`. An observation-only test in that mode produces 1,001
-results covering ticks `0..1000`. This keeps the RIG capturing long enough for host-side
-assertions even though their definitions are not transmitted. Compilation rejects an
+For example, a range ending at tick 750 in 1 kHz mode produces 1,750 expected
+application results, covering ticks `0..1749`. An observation-only test in that mode
+produces 1,000 results covering ticks `0..999`. This keeps the RIG capturing long enough
+for host-side assertions even though their definitions are not transmitted. Compilation rejects an
 expected tick count of 1,000,000 or greater so the complete test remains within the
 protocol-compatible limit.
 

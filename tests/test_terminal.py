@@ -23,6 +23,7 @@ class _StubWorker:
         self.manual_finalizes: list[int] = []
         self.manual_resets = 0
         self.manual_inbox_clears = 0
+        self.run_inbox_clears = 0
         self.manual_disconnect_result = True
         self.manual_current = ManualSessionSnapshot(
             state=ManualSessionState.READY,
@@ -81,6 +82,13 @@ class _StubWorker:
     def manual_inbox(self) -> tuple[str, ...]:
         return ("ApplicationResponse(scope=TICK, outcome=ACCEPTED, tick=10)",)
 
+    def clear_run_inbox(self) -> bool:
+        self.run_inbox_clears += 1
+        return True
+
+    def run_inbox(self) -> tuple[str, ...]:
+        return ("ApplicationError(category=execution, recoverable=true, detail=27)",)
+
     def manual_snapshot(self) -> ManualSessionSnapshot:
         return self.manual_current
 
@@ -99,6 +107,7 @@ def test_terminal_minimum_commands() -> None:
     shell.onecmd('run "C:\\Test Files\\motor.py"')
     shell.onecmd('run --step "C:\\Test Files\\manual.py"')
     shell.onecmd("status")
+    shell.onecmd("inbox")
     shell.onecmd("help")
     shell.onecmd("step")
     shell.onecmd("continue")
@@ -116,6 +125,7 @@ def test_terminal_minimum_commands() -> None:
     assert "Run queued:" in rendered
     assert "State: running" in rendered
     assert "Results: 25/100 ticks" in rendered
+    assert "ApplicationError(category=execution" in rendered
     assert "run --step <path>" in rendered
     assert "Step requested." in rendered
     assert "Continue requested" in rendered
@@ -202,6 +212,9 @@ def test_terminal_completer() -> None:
     inbox_opts = [c.text for c in completer.get_completions(Document("manual inbox cl"), None)]
     assert "clear" in inbox_opts
 
+    run_inbox_opts = [c.text for c in completer.get_completions(Document("inbox cl"), None)]
+    assert "clear" in run_inbox_opts
+
 
 def test_terminal_ports_and_reset_commands() -> None:
     output = StringIO()
@@ -212,12 +225,15 @@ def test_terminal_ports_and_reset_commands() -> None:
     shell.onecmd("manual reset")
     shell.onecmd("reset")
     shell.onecmd("manual inbox clear")
+    shell.onecmd("inbox clear")
 
     assert worker.manual_resets == 2
     assert worker.manual_inbox_clears == 1
+    assert worker.run_inbox_clears == 1
     rendered = output.getvalue()
     assert "Manual reset queued" in rendered
     assert "Manual inbox cleared." in rendered
+    assert "Run inbox cleared." in rendered
 
 
 def test_terminal_ports_detection(monkeypatch: pytest.MonkeyPatch) -> None:

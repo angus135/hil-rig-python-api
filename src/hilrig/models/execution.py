@@ -10,7 +10,7 @@ from typing import TypeAlias
 from hilrig.models.identifiers import UploadAttempt
 from hilrig.models.instructions import Instruction
 
-IR_SCHEMA_VERSION = "1.1"
+IR_SCHEMA_VERSION = "1.2"
 IRScalar: TypeAlias = str | int | float | bool | None
 
 
