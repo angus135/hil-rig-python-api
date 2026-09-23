@@ -89,12 +89,8 @@ class UploadOperation:
 
     kind: UploadOperationKind
     encoded_messages: tuple[bytes, ...]
-    response: ResponseCorrelation
-
-    @property
-    def tick(self) -> int | None:
-        """Return the correlated tick for a tick operation, otherwise ``None``."""
-        return self.response.tick
+    response: ResponseCorrelation | None = None
+    tick: int | None = None
 
     @property
     def label(self) -> str:
@@ -239,12 +235,8 @@ class FixedIOProtocolAdapter:
             UploadOperation(
                 kind=UploadOperationKind.TICK,
                 encoded_messages=(wire,),
-                response=ResponseCorrelation(
-                    scope=p.ResponseScope.TICK,
-                    successful_outcome=p.ResponseOutcome.ACCEPTED,
-                    application_test_id=application_test_id,
-                    tick=message.tick_number,
-                ),
+                response=None,
+                tick=message.tick_number,
             )
             for message, wire in zip(upload.instructions, encoded[1:], strict=True)
         )

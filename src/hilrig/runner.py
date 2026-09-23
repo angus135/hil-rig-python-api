@@ -730,9 +730,14 @@ class ProtocolWorker:
             connection = self._connection_factory()
             while not connection.session_confirmed:
                 self._raise_if_aborted()
-                connection.service()
+                report = connection.service()
                 self._record_protocol_progress(connection, received_tick_count)
-                self._pause()
+                if not (
+                    report.serial_bytes_read
+                    or report.serial_bytes_written
+                    or report.application_message_submitted
+                ):
+                    self._pause()
 
             info = connection.session_info
             attempt = compiled.new_upload_attempt()
@@ -775,7 +780,13 @@ class ProtocolWorker:
                 if advance_applied:
                     with self._snapshot_lock:
                         self._advance_request_pending = False
-                self._pause()
+                if not (
+                    service_report.serial_bytes_read
+                    or service_report.serial_bytes_written
+                    or service_report.stored_tick_results
+                    or service_report.application_message_submitted
+                ):
+                    self._pause()
 
             self._set_snapshot(
                 state=WorkerState.FINALIZING,

@@ -543,12 +543,16 @@ class FixedIOProtocolConnection:
         attempt = self.queue_upload(compiled_test, upload_attempt=upload_attempt)
         deadline = time.monotonic() + float(timeout_s)
         while not self.upload_accepted:
-            self.service()
+            report = self.service()
             if time.monotonic() >= deadline:
                 raise TimeoutError(
                     "Timed out before firmware accepted the complete fixed-I/O upload"
                 )
-            if poll_interval_s:
+            if poll_interval_s and not (
+                report.serial_bytes_read
+                or report.serial_bytes_written
+                or report.application_message_submitted
+            ):
                 time.sleep(float(poll_interval_s))
         return attempt
 
@@ -614,7 +618,7 @@ class FixedIOProtocolConnection:
         p = self.protocol
         now_ms = monotonic_now_ms()
         bytes_read = self._read_serial()
-        self._offer_received()
+        # self._offer_received()
 
         if operating_mode is None:
             operating_mode = (
@@ -636,14 +640,15 @@ class FixedIOProtocolConnection:
                 )
                 else p.OperatingMode.NORMAL
             )
-        self._process_transport(now_ms, operating_mode)
+        # self._process_transport(now_ms, operating_mode)
 
         events, messages, results, errors = self._drain()
         self._advance_workflow()
         self._check_response_timeout()
         submitted = self._submit_next_application_message()
         if submitted:
-            self._process_transport(now_ms, operating_mode)
+            # self._process_transport(now_ms, operating_mode)
+            pass
 
         bytes_written = self._service_output(now_ms)
         more_events, more_messages, more_results, more_errors = self._drain()
@@ -732,7 +737,7 @@ class FixedIOProtocolConnection:
     ]:
         p = self.protocol
         events: list[object] = []
-        while (event := self.transport.read_event()) is not None:
+        while False and (event := self.transport.read_event()) is not None:
             events.append(event)
             if event.type is p.EventType.DELIVERY_CONFIRMED:
                 self._handle_delivery_confirmed()
@@ -755,7 +760,13 @@ class FixedIOProtocolConnection:
         messages: list[object] = []
         stored_results: list[TickResult] = []
         stored_errors: list[ApplicationErrorRecord] = []
-        while (encoded := self.transport.read_application_data()) is not None:
+        # Direct USB Framing: 2-byte Little Endian length header
+        while len(self._incoming) >= 2:
+            msg_len = int.from_bytes(self._incoming[:2], "little")
+            if len(self._incoming) < 2 + msg_len:
+                break
+            encoded = bytes(self._incoming[2 : 2 + msg_len])
+            del self._incoming[: 2 + msg_len]
             message = self.application.decode(encoded)
             messages.append(message)
             if type(message) is p.SystemInfoResponse:
@@ -778,6 +789,7 @@ class FixedIOProtocolConnection:
                     and self._error_belongs_to_active_upload(message)
                 ):
                     stored_errors.append(self.result_adapter.ingest_application_error(message))
+                self._handle_application_error(message)
             elif type(message) is p.TestResult:
                 if not self._manual_mode:
                     self._validate_result_sequence(message)
@@ -810,7 +822,10 @@ class FixedIOProtocolConnection:
         if operation.kind in {"configuration", "tick", "finalize"}:
             self._upload_messages_delivered += 1
         if operation.every_message_submitted:
-            if operation.kind == "manual" and not operation.application_response_required:
+            if (
+                (operation.kind == "manual" and not operation.application_response_required)
+                or (operation.kind == "tick" and operation.response is None)
+            ):
                 operation.response_received = True
             else:
                 operation.response_deadline = time.monotonic() + self.application_response_timeout_s
@@ -889,6 +904,44 @@ class FixedIOProtocolConnection:
 
         operation.response_received = True
         self._finish_pending_operation_if_ready()
+
+    def _handle_application_error(self, message: object) -> None:
+        """Terminate the single pending operation when an Application Error applies to it."""
+        operation = self._pending_operation
+        if operation is None or not self._application_error_matches_operation(message, operation):
+            return
+
+        fields = [
+            f"category={message.category.name.lower()}",
+            f"recoverable={'true' if message.recoverable else 'false'}",
+        ]
+        if message.tick_number is not None:
+            fields.append(f"tick={message.tick_number}")
+        fields.append(f"detail={message.detail}")
+        if message.diagnostic_data:
+            fields.append(f"diagnostic_data=0x{message.diagnostic_data.hex()}")
+
+        operation.response_error = (
+            f"RIG Application Error while waiting for the {operation.kind} response: "
+            f"ApplicationError({', '.join(fields)})"
+        )
+        operation.response_received = True
+        self._finish_pending_operation_if_ready()
+
+    @staticmethod
+    def _application_error_matches_operation(
+        message: object,
+        operation: _ApplicationOperation,
+    ) -> bool:
+        """Correlate an error using existing fields and the one-operation-at-a-time rule."""
+        if message.test_id is None:
+            return True
+        if operation.response is None or operation.response.application_test_id is None:
+            return False
+        return (
+            application_test_id_from_bytes(message.test_id.bytes)
+            == operation.response.application_test_id
+        )
 
     def _response_mismatch(self, detail: str) -> None:
         self._fail_workflow()
@@ -982,9 +1035,9 @@ class FixedIOProtocolConnection:
     def _advance_workflow(self) -> None:
         if self._pending_operation is not None or self._gated_operation is not None:
             return
-        snapshot = self.transport.get_status()
-        if snapshot.session_state is not self.protocol.SessionState.ESTABLISHED:
-            return
+        # snapshot = self.transport.get_status()
+        # if snapshot.session_state is not self.protocol.SessionState.ESTABLISHED:
+        #     return
         if self._manual_mode and self._skip_system_info and not self._session_confirmed:
             self._session_confirmed = True
             self._workflow_state = ProtocolWorkflowState.MANUAL_READY
@@ -1074,24 +1127,45 @@ class FixedIOProtocolConnection:
             or self._transport_delivery_pending
         ):
             return False
-        snapshot = self.transport.get_status()
-        if snapshot.session_state is not p.SessionState.ESTABLISHED:
-            return False
+        # snapshot = self.transport.get_status()
+        # if snapshot.session_state is not p.SessionState.ESTABLISHED:
+        #     return False
         if operation.kind != "discovery" and not self._session_confirmed:
             return False
 
         encoded = operation.encoded_messages[operation.next_message_index]
-        status = self.transport.submit_application_data(encoded)
-        if status is p.TransportStatus.OK:
-            operation.next_message_index += 1
-            self._transport_delivery_pending = True
-            return True
-        if status in (p.TransportStatus.NOT_READY, p.TransportStatus.CAPACITY_EXHAUSTED):
-            return False
-        self._fail_workflow()
-        raise ProtocolSessionError(
-            f"Could not submit Application message: Transport returned {status.name}"
-        )
+        # status = self.transport.submit_application_data(encoded)
+        framed = len(encoded).to_bytes(2, "little") + encoded
+        if self._pending_output is None:
+            self._pending_output = framed
+            self._pending_output_offset = 0
+        else:
+            self._pending_output = self._pending_output[self._pending_output_offset :] + framed
+            self._pending_output_offset = 0
+
+        operation.next_message_index += 1
+        if operation.kind in {"configuration", "tick", "finalize"}:
+            self._upload_messages_delivered += 1
+        if operation.every_message_submitted:
+            if (
+                (operation.kind == "manual" and not operation.application_response_required)
+                or (operation.kind == "tick" and operation.response is None)
+            ):
+                operation.response_received = True
+            else:
+                operation.response_deadline = time.monotonic() + self.application_response_timeout_s
+        self._finish_pending_operation_if_ready()
+        return True
+        # if status is p.TransportStatus.OK:
+        #     operation.next_message_index += 1
+        #     self._transport_delivery_pending = True
+        #     return True
+        # if status in (p.TransportStatus.NOT_READY, p.TransportStatus.CAPACITY_EXHAUSTED):
+        #     return False
+        # self._fail_workflow()
+        # raise ProtocolSessionError(
+        #     f"Could not submit Application message: Transport returned {status.name}"
+        # )
 
     def _check_response_timeout(self) -> None:
         operation = self._pending_operation
@@ -1185,7 +1259,8 @@ class FixedIOProtocolConnection:
     def _service_output(self, now_ms: int) -> int:
         p = self.protocol
         if self._pending_output is None:
-            self._pending_output = self.transport.peek_output()
+            # self._pending_output = self.transport.peek_output()
+            pass
             self._pending_output_offset = 0
         if self._pending_output is None:
             return 0
@@ -1203,12 +1278,14 @@ class FixedIOProtocolConnection:
         self._pending_output_offset += accepted
         if self._pending_output_offset == len(self._pending_output):
             try:
-                commit_status = self.transport.commit_output(now_ms)
+                # commit_status = self.transport.commit_output(now_ms)
+                pass
             finally:
                 self._pending_output = None
                 self._pending_output_offset = 0
-            if commit_status not in (p.TransportStatus.OK, p.TransportStatus.NOT_READY):
-                raise ProtocolSessionError(f"Transport output commit returned {commit_status.name}")
+            # if commit_status not in (p.TransportStatus.OK, p.TransportStatus.NOT_READY):
+                # raise ProtocolSessionError(f"Transport output commit returned {commit_status.name}")
+                pass
         return accepted
 
     def _require_open(self) -> None:

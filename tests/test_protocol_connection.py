@@ -96,14 +96,14 @@ def _drive_fake_rig_to_state(
                     )
                 ]
             elif type(request) is ProtocolTestInstruction:
-                responses = [
-                    ApplicationResponse(
-                        request.test_id,
-                        ResponseScope.TICK,
-                        ResponseOutcome.ACCEPTED,
-                        tick_number=request.tick_number,
-                    )
-                ]
+                responses = []
+
+
+
+
+
+
+
             elif type(request) is FinalizeTestUpload:
                 responses = [
                     ApplicationResponse(
@@ -375,6 +375,77 @@ def test_application_error_is_mapped_into_capture_storage(tmp_path: Path) -> Non
     assert report.stored_application_errors[0].detail == "27"
     assert stored[0].category == "execution"
     assert stored[0].diagnostic_data == b"timing slip"
+    assert connection.workflow_state is ProtocolWorkflowState.RUNNING
+
+
+def test_application_error_terminates_pending_configuration_immediately(tmp_path: Path) -> None:
+    compiled = _compiled_digital_test()
+    attempt = compiled.new_upload_attempt()
+    builder = CapturedRunBuilder.from_compiled_test(
+        tmp_path / "run.sqlite3",
+        compiled,
+        upload_attempt=attempt,
+    )
+    application = FixedIOProtocolAdapter(protocol_module=FakeProtocol)
+    transport = FakeTransport()
+    connection = FixedIOProtocolConnection(
+        serial_port=FakeSerial(),
+        application=application,
+        transport=transport,
+        result_adapter=IncomingResultAdapter(builder, protocol_module=FakeProtocol),
+    )
+    connection.queue_upload(compiled, upload_attempt=attempt)
+
+    responded = 0
+    configuration: ProtocolTestConfiguration | None = None
+    for _ in range(20):
+        connection.service()
+        while responded < transport.committed:
+            request = application.codec.decode(transport.submitted[responded])
+            responded += 1
+            if type(request) is SystemInfoRequest:
+                transport.application_data.append(
+                    application.codec.encode(
+                        SystemInfoResponse(
+                            protocol_version=FakeProtocol.PROTOCOL_VERSION,
+                            firmware_version=ProtocolVersion(1, 2, 3),
+                        )
+                    )
+                )
+            elif type(request) is ProtocolTestConfiguration:
+                configuration = request
+        if (
+            configuration is not None
+            and connection.workflow_state is ProtocolWorkflowState.CONFIGURING
+        ):
+            break
+
+    assert configuration is not None
+    error = ApplicationErrorMessage(
+        test_id=None,
+        category=ErrorCategory.INTERNAL,
+        recoverable=True,
+        detail=0,
+    )
+    transport.application_data.append(application.codec.encode(error))
+
+    with pytest.raises(
+        ProtocolSessionError,
+        match=(
+            r"RIG Application Error while waiting for the configuration response: "
+            r"ApplicationError\(category=internal, recoverable=true, detail=0\)"
+        ),
+    ):
+        connection.service()
+
+    run = builder.abort()
+    stored = tuple(run.iter_application_errors())
+    assert connection.workflow_state is ProtocolWorkflowState.FAILED
+    assert connection.active_upload is None
+    assert len(stored) == 1
+    assert stored[0].category == "internal"
+    assert stored[0].recoverable
+    assert stored[0].detail == "0"
 
 
 def test_rejected_tick_stops_sparse_upload_and_surfaces_reason() -> None:

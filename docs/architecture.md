@@ -245,8 +245,8 @@ without changing the stop-and-wait state machine.
 Every established Transport session begins with BASIC System Information discovery and
 an exact major/minor/patch compatibility check. `UploadPlan` then supplies ordered,
 immutable operations containing their wire-message group and response-correlation
-metadata. The response-gated sequence is Test Configuration, each non-consecutive sparse
-tick, `FINALIZE_TEST_UPLOAD`, and optional START. Automatic mode preserves the
+metadata. The control-gated sequence is Test Configuration, pipelined non-consecutive sparse
+ticks (streamed without per-tick Application Response overhead), `FINALIZE_TEST_UPLOAD`, and optional START. Automatic mode preserves the
 start-mode behavior: IMMEDIATE queues START automatically and HOST_COMMAND waits for an
 explicit `start()` call. Operator-gated mode pauses configuration, every tick, and START;
 upload finalization and Complete Test acceptance remain automatic. `continue_upload()` switches the remaining plan back to
