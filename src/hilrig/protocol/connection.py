@@ -16,6 +16,9 @@ from hilrig.models.identifiers import UploadAttempt, application_test_id_from_by
 from hilrig.protocol.application import (
     FixedIOProtocolAdapter,
     FixedIOUploadMessages,
+    ProtocolFamily,
+    VariableIOProtocolAdapter,
+    VariableIOUploadMessages,
     ResponseCorrelation,
     UploadOperation,
     UploadOperationKind,
@@ -139,9 +142,10 @@ class FixedIOProtocolConnection:
         self,
         *,
         serial_port: Any,
-        application: FixedIOProtocolAdapter,
+        application: FixedIOProtocolAdapter | VariableIOProtocolAdapter,
         transport: Any,
         result_adapter: IncomingResultAdapter | None = None,
+        protocol_family: ProtocolFamily | str = ProtocolFamily.VARIABLE,
         application_response_timeout_s: float = _DEFAULT_APPLICATION_RESPONSE_TIMEOUT_S,
         manual_mode: bool = False,
         skip_system_info: bool = False,
@@ -153,10 +157,19 @@ class FixedIOProtocolConnection:
         ):
             raise ValueError("application_response_timeout_s must be a positive number")
 
+        if isinstance(protocol_family, str):
+            try:
+                protocol_family = ProtocolFamily(protocol_family.lower())
+            except ValueError:
+                raise ValueError(f"Unknown protocol family: {protocol_family!r}")
+        elif not isinstance(protocol_family, ProtocolFamily):
+            raise TypeError("protocol_family must be a ProtocolFamily or str")
+
         self.serial_port = serial_port
         self.application = application
         self.transport = transport
         self.result_adapter = result_adapter
+        self.protocol_family = protocol_family
         self.protocol = application.protocol
         self.application_response_timeout_s = float(application_response_timeout_s)
         if not isinstance(manual_mode, bool):
@@ -175,7 +188,7 @@ class FixedIOProtocolConnection:
         self._pending_operation: _ApplicationOperation | None = None
         self._gated_operation: UploadOperation | None = None
         self._transport_delivery_pending = False
-        self._active_upload: FixedIOUploadMessages | None = None
+        self._active_upload: FixedIOUploadMessages | VariableIOUploadMessages | None = None
         self._active_upload_plan: UploadPlan | None = None
         self._advance_mode = UploadAdvanceMode.AUTOMATIC
         self._upload_message_count = 0
@@ -199,6 +212,7 @@ class FixedIOProtocolConnection:
         serial_settings: SerialConnectionSettings | None = None,
         transport_config: object | None = None,
         application_config: object | None = None,
+        protocol_family: ProtocolFamily | str = ProtocolFamily.VARIABLE,
         result_builder: CapturedRunBuilder | None = None,
         application_response_timeout_s: float = _DEFAULT_APPLICATION_RESPONSE_TIMEOUT_S,
         protocol_module: ModuleType | Any | None = None,
@@ -206,10 +220,24 @@ class FixedIOProtocolConnection:
         comports: Any | None = None,
     ) -> FixedIOProtocolConnection:
         """Discover the exact device name, open it, and begin a host session."""
-        application = FixedIOProtocolAdapter(
-            protocol_module=protocol_module,
-            application_config=application_config,
-        )
+        if isinstance(protocol_family, str):
+            try:
+                protocol_family = ProtocolFamily(protocol_family.lower())
+            except ValueError:
+                raise ValueError(f"Unknown protocol family: {protocol_family!r}")
+        elif not isinstance(protocol_family, ProtocolFamily):
+            raise TypeError("protocol_family must be a ProtocolFamily or str")
+
+        if protocol_family is ProtocolFamily.VARIABLE:
+            application = VariableIOProtocolAdapter(
+                protocol_module=protocol_module,
+                application_config=application_config,
+            )
+        else:
+            application = FixedIOProtocolAdapter(
+                protocol_module=protocol_module,
+                application_config=application_config,
+            )
         p = application.protocol
         if transport_config is None:
             transport_config = p.TransportConfig(
@@ -224,7 +252,11 @@ class FixedIOProtocolConnection:
         try:
             transport = p.Transport(p.Role.HOST, transport_config)
             result_adapter = (
-                IncomingResultAdapter(result_builder, protocol_module=p)
+                IncomingResultAdapter(
+                    result_builder,
+                    protocol_module=p,
+                    expected_family=protocol_family,
+                )
                 if result_builder is not None
                 else None
             )
@@ -233,6 +265,7 @@ class FixedIOProtocolConnection:
                 application=application,
                 transport=transport,
                 result_adapter=result_adapter,
+                protocol_family=protocol_family,
                 application_response_timeout_s=application_response_timeout_s,
             )
             connection.transport.notify_link_state(p.LinkState.CONNECTED, monotonic_now_ms())
@@ -256,7 +289,7 @@ class FixedIOProtocolConnection:
         comports: Any | None = None,
     ) -> FixedIOProtocolConnection:
         """Open a persistent standalone Application-message debugging session."""
-        application = FixedIOProtocolAdapter(
+        application = VariableIOProtocolAdapter(
             protocol_module=protocol_module,
             application_config=application_config,
         )
@@ -306,7 +339,7 @@ class FixedIOProtocolConnection:
         return self._session_info
 
     @property
-    def active_upload(self) -> FixedIOUploadMessages | None:
+    def active_upload(self) -> FixedIOUploadMessages | VariableIOUploadMessages | None:
         return self._active_upload
 
     @property
@@ -407,7 +440,11 @@ class FixedIOProtocolConnection:
             != self._active_upload.upload_attempt.application_test_id
         ):
             raise ValueError("builder Application Test ID does not match the active upload")
-        self.result_adapter = IncomingResultAdapter(builder, protocol_module=self.protocol)
+        self.result_adapter = IncomingResultAdapter(
+            builder,
+            protocol_module=self.protocol,
+            expected_family=self.protocol_family,
+        )
 
     def queue_upload(
         self,
@@ -790,8 +827,23 @@ class FixedIOProtocolConnection:
                 ):
                     stored_errors.append(self.result_adapter.ingest_application_error(message))
                 self._handle_application_error(message)
-            elif type(message) is p.TestResult:
+            elif type(message) in (p.TestResult, getattr(p, "VariableTestResult", None)):
                 if not self._manual_mode:
+                    if (
+                        self.protocol_family is ProtocolFamily.VARIABLE
+                        and type(message) is p.TestResult
+                    ):
+                        self._fail_workflow()
+                        raise ProtocolSessionError(
+                            "Received legacy TestResult (Type 33) when variable message family was expected"
+                        )
+                    if self.protocol_family is ProtocolFamily.LEGACY and type(message) is getattr(
+                        p, "VariableTestResult", None
+                    ):
+                        self._fail_workflow()
+                        raise ProtocolSessionError(
+                            "Received VariableTestResult (Type 34) when legacy message family was expected"
+                        )
                     self._validate_result_sequence(message)
                     if self.result_adapter is not None:
                         stored_results.append(
@@ -822,9 +874,8 @@ class FixedIOProtocolConnection:
         if operation.kind in {"configuration", "tick", "finalize"}:
             self._upload_messages_delivered += 1
         if operation.every_message_submitted:
-            if (
-                (operation.kind == "manual" and not operation.application_response_required)
-                or (operation.kind == "tick" and operation.response is None)
+            if (operation.kind == "manual" and not operation.application_response_required) or (
+                operation.kind == "tick" and operation.response is None
             ):
                 operation.response_received = True
             else:
@@ -856,7 +907,18 @@ class FixedIOProtocolConnection:
         operation = self._pending_operation
         if operation is None or operation.response is None:
             self._fail_workflow()
-            raise ProtocolSessionError("Received an Application Response with no matching request")
+            fields = [
+                f"scope={message.scope.name}",
+                f"outcome={message.outcome.name}",
+                f"reason={message.reason.name}",
+            ]
+            if message.tick_number is not None:
+                fields.append(f"tick={message.tick_number}")
+            fields.append(f"detail={message.detail}")
+            raise ProtocolSessionError(
+                "Received an Application Response with no matching response-bearing request: "
+                f"ApplicationResponse({', '.join(fields)})"
+            )
 
         correlation = operation.response
         if message.scope is not correlation.scope:
@@ -1147,9 +1209,8 @@ class FixedIOProtocolConnection:
         if operation.kind in {"configuration", "tick", "finalize"}:
             self._upload_messages_delivered += 1
         if operation.every_message_submitted:
-            if (
-                (operation.kind == "manual" and not operation.application_response_required)
-                or (operation.kind == "tick" and operation.response is None)
+            if (operation.kind == "manual" and not operation.application_response_required) or (
+                operation.kind == "tick" and operation.response is None
             ):
                 operation.response_received = True
             else:
@@ -1201,6 +1262,14 @@ class FixedIOProtocolConnection:
         if received_test_id != self._active_upload.upload_attempt.application_test_id:
             self._fail_workflow()
             raise ProtocolSessionError("Received TestResult for a different Application Test ID")
+        expected_tick_count = self._active_upload.configuration.expected_tick_count
+        if message.tick_number >= expected_tick_count:
+            self._fail_workflow()
+            raise ProtocolSessionError(
+                "RIG emitted TestResult tick "
+                f"{message.tick_number} outside the configured range "
+                f"0..{expected_tick_count - 1} ({expected_tick_count} ticks)"
+            )
         if message.tick_number != self._next_result_tick:
             self._fail_workflow()
             raise ProtocolSessionError(
@@ -1283,7 +1352,7 @@ class FixedIOProtocolConnection:
             finally:
                 self._pending_output = None
                 self._pending_output_offset = 0
-            # if commit_status not in (p.TransportStatus.OK, p.TransportStatus.NOT_READY):
+                # if commit_status not in (p.TransportStatus.OK, p.TransportStatus.NOT_READY):
                 # raise ProtocolSessionError(f"Transport output commit returned {commit_status.name}")
                 pass
         return accepted

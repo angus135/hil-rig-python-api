@@ -143,6 +143,29 @@ class AnalogueInputRemainBelowAssertion(RangeAssertion):
     threshold_uv: int
 
 
+
+@dataclass(frozen=True, slots=True)
+class CommunicationReceiveAssertion(RangeAssertion):
+    """Expect specific payload bytes received on a communication peripheral within a tick range."""
+
+    expected_payload: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class UARTReceiveAssertion(CommunicationReceiveAssertion):
+    """Expect specific UART payload bytes received within a tick range."""
+
+
+@dataclass(frozen=True, slots=True)
+class SPIReceiveAssertion(CommunicationReceiveAssertion):
+    """Expect specific SPI payload bytes received within a tick range."""
+
+
+@dataclass(frozen=True, slots=True)
+class I2CReceiveAssertion(CommunicationReceiveAssertion):
+    """Expect specific I2C payload bytes received within a tick range."""
+
+
 class AssertionList:
     """Insertion-ordered collection of host-side assertions."""
 

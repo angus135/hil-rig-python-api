@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from prompt_toolkit.document import Document
 
+from hilrig.protocol import ProtocolFamily
 from hilrig.runner import ManualSessionSnapshot, ManualSessionState, RunSnapshot, WorkerState
 from hilrig.terminal import HilRigCompleter, HilRigShell
 
@@ -43,8 +44,14 @@ class _StubWorker:
     def start(self) -> None:
         self.started = True
 
-    def submit(self, path: Path, *, stepped: bool = False) -> bool:
-        self.submitted.append((path, stepped))
+    def submit(
+        self,
+        path: Path,
+        *,
+        stepped: bool = False,
+        protocol_family: ProtocolFamily = ProtocolFamily.VARIABLE,
+    ) -> bool:
+        self.submitted.append((path, stepped, protocol_family))
         return True
 
     def step(self) -> bool:
@@ -116,13 +123,13 @@ def test_terminal_minimum_commands() -> None:
 
     assert worker.started
     assert worker.submitted == [
-        (Path("C:\\Test Files\\motor.py"), False),
-        (Path("C:\\Test Files\\manual.py"), True),
+        (Path("C:\\Test Files\\motor.py"), False, ProtocolFamily.VARIABLE),
+        (Path("C:\\Test Files\\manual.py"), True, ProtocolFamily.VARIABLE),
     ]
     assert worker.shutdown_called
     assert should_quit
     rendered = output.getvalue()
-    assert "Run queued:" in rendered
+    assert "Run (variable message family) queued:" in rendered
     assert "State: running" in rendered
     assert "Results: 25/100 ticks" in rendered
     assert "ApplicationError(category=execution" in rendered
@@ -142,7 +149,7 @@ def test_terminal_rejects_missing_arguments_and_unknown_commands() -> None:
     shell.onecmd("unknown")
 
     rendered = output.getvalue()
-    assert 'Usage: run [--step] "path to test.py"' in rendered
+    assert 'Usage: run [--step] [--legacy | --family variable|legacy] "path to test.py"' in rendered
     assert "Usage: status" in rendered
     assert "Unknown command" in rendered
 
@@ -182,7 +189,7 @@ def test_terminal_aliases_and_toolbar() -> None:
     shell.onecmd("c")
     should_quit = shell.onecmd("q")
 
-    assert worker.submitted[-1] == (Path("C:\\Test Files\\motor.py"), False)
+    assert worker.submitted[-1] == (Path("C:\\Test Files\\motor.py"), False, ProtocolFamily.VARIABLE)
     assert should_quit
     toolbar_text = shell._bottom_toolbar()
     assert "RUNNING" in toolbar_text
@@ -270,3 +277,22 @@ def test_terminal_ports_detection(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "COM10" in rendered
     assert "[HIL-RIG match]" in rendered
     assert "COM7" in rendered
+
+
+def test_terminal_run_supports_legacy_and_family_flags() -> None:
+    output = StringIO()
+    worker = _StubWorker()
+    shell = HilRigShell(worker=worker, stdout=output)
+
+    shell.onecmd('run --legacy "C:\\Test Files\\legacy_test.py"')
+    shell.onecmd('run --family legacy "C:\\Test Files\\family_legacy.py"')
+    shell.onecmd('run --family variable --step "C:\\Test Files\\family_var.py"')
+
+    assert worker.submitted == [
+        (Path("C:\\Test Files\\legacy_test.py"), False, ProtocolFamily.LEGACY),
+        (Path("C:\\Test Files\\family_legacy.py"), False, ProtocolFamily.LEGACY),
+        (Path("C:\\Test Files\\family_var.py"), True, ProtocolFamily.VARIABLE),
+    ]
+    rendered = output.getvalue()
+    assert "Run (legacy message family) queued:" in rendered
+    assert "Stepped run (variable message family) queued:" in rendered

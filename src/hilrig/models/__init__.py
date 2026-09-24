@@ -59,6 +59,7 @@ from hilrig.models.execution import (
     TimeSlot,
 )
 from hilrig.models.identifiers import UploadAttempt
+from hilrig.models.protocol import ProtocolFamily
 from hilrig.models.instructions import (
     AnalogueOutputInstruction,
     DigitalOutputAction,
@@ -116,6 +117,7 @@ __all__ = [
     "LogicVoltage",
     "Pullup",
     "PointAssertion",
+    "ProtocolFamily",
     "PwmInputDutyCycleNearAssertion",
     "PwmInputDutyCycleRemainWithinAssertion",
     "PwmInputFrequencyNearAssertion",

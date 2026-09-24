@@ -18,6 +18,7 @@ from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import FileHistory, History, InMemoryHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 
+from hilrig.protocol import ProtocolFamily
 from hilrig.runner import (
     ManualSessionSnapshot,
     ManualSessionState,
@@ -92,12 +93,14 @@ class HilRigCompleter(Completer):
         cmd = words[0].lower()
         if cmd in {"r", "run"}:
             current_token = document.get_word_before_cursor(WORD=True)
-            if (
-                not is_trailing_space
-                and "--step".startswith(current_token.lower())
-                and current_token.startswith("-")
-            ):
-                yield Completion("--step", start_position=-len(current_token))
+            if not is_trailing_space and current_token.startswith("-"):
+                for opt in ["--step", "--legacy", "--family"]:
+                    if opt.startswith(current_token.lower()):
+                        yield Completion(opt, start_position=-len(current_token))
+            elif not is_trailing_space and words[-1].lower() in {"--family", "-f"}:
+                for fam in ["variable", "legacy"]:
+                    if fam.startswith(current_token.lower()):
+                        yield Completion(fam, start_position=-len(current_token))
             yield from self.py_path_completer.get_completions(document, complete_event)
             return
 
@@ -222,13 +225,13 @@ class HilRigShell:
         return False
 
     def do_run(self, argument: str) -> None:
-        """run [--step] <path> -- Execute a Python test definition."""
+        """run [--step] [--legacy | --family variable|legacy] <path> -- Execute a Python test definition."""
         parsed = _run_argument(argument)
         if parsed is None:
-            self._write_line('Usage: run [--step] "path to test.py"')
+            self._write_line('Usage: run [--step] [--legacy | --family variable|legacy] "path to test.py"')
             return
-        path, stepped = parsed
-        if not self.worker.submit(path, stepped=stepped):
+        path, stepped, family = parsed
+        if not self.worker.submit(path, stepped=stepped, protocol_family=family):
             if self.worker.manual_snapshot().active:
                 self._write_line(
                     "A manual session is currently active. Use 'manual disconnect' before "
@@ -238,7 +241,8 @@ class HilRigShell:
                 self._write_line("A test is already active. Use 'status' or 'abort'.")
             return
         mode = "Stepped run" if stepped else "Run"
-        self._write_line(f"{mode} queued: {path}")
+        family_label = f" ({family.value} message family)"
+        self._write_line(f"{mode}{family_label} queued: {path}")
 
     def do_ports(self, argument: str) -> None:
         """ports -- List available serial COM ports and detect the HIL-RIG."""
@@ -279,7 +283,9 @@ class HilRigShell:
             return
         self._write_line(
             "Commands:\n"
-            "  run <path>         Load and automatically execute a test-definition file.\n"
+            "  run [--step] [--legacy] <path>\n"
+            "                     Load and automatically execute a test-definition file.\n"
+            "                     (--legacy uses fixed TestInstruction/TestResult, default is variable)\n"
             "  run --step <path>  Pause before configuration, each tick, and START.\n"
             "  step               Release exactly one paused operation.\n"
             "  continue           Release the gate and finish automatically.\n"
@@ -612,18 +618,60 @@ def _path_argument(argument: str) -> Path | None:
     return Path(value)
 
 
-def _run_argument(argument: str) -> tuple[Path, bool] | None:
-    value = argument.strip()
-    stepped = False
-    if value == "--step":
+def _run_argument(argument: str) -> tuple[Path, bool, ProtocolFamily] | None:
+    try:
+        tokens = shlex.split(argument, posix=False)
+    except ValueError:
         return None
-    if value.startswith("--step") and len(value) > len("--step"):
-        separator = value[len("--step")]
-        if separator.isspace():
+    if not tokens:
+        return None
+
+    stepped = False
+    family = ProtocolFamily.VARIABLE
+    path_str: str | None = None
+
+    idx = 0
+    while idx < len(tokens):
+        token = tokens[idx]
+        token_lower = token.lower()
+        if token_lower in {"--step", "-s"}:
             stepped = True
-            value = value[len("--step") :].strip()
-    path = _path_argument(value)
-    return None if path is None else (path, stepped)
+            idx += 1
+        elif token_lower in {"--legacy", "-l"}:
+            family = ProtocolFamily.LEGACY
+            idx += 1
+        elif token_lower in {"--family", "-f", "--protocol-family"}:
+            if idx + 1 >= len(tokens):
+                return None
+            val = tokens[idx + 1].lower()
+            if val not in {"variable", "legacy"}:
+                return None
+            family = ProtocolFamily(val)
+            idx += 2
+        elif token_lower.startswith("--family="):
+            val = token.partition("=")[2].lower()
+            if val not in {"variable", "legacy"}:
+                return None
+            family = ProtocolFamily(val)
+            idx += 1
+        elif token_lower.startswith("--protocol-family="):
+            val = token.partition("=")[2].lower()
+            if val not in {"variable", "legacy"}:
+                return None
+            family = ProtocolFamily(val)
+            idx += 1
+        elif token.startswith("-"):
+            return None
+        else:
+            if path_str is not None:
+                return None
+            path_str = token
+            idx += 1
+
+    if path_str is None:
+        return None
+    path = _path_argument(path_str)
+    return None if path is None else (path, stepped, family)
 
 
 def _format_status(snapshot: RunSnapshot, *, color: bool = False) -> str:
@@ -645,6 +693,8 @@ def _format_status(snapshot: RunSnapshot, *, color: bool = False) -> str:
         lines.append(f"Definition: {snapshot.test_path}")
     if snapshot.protocol_state is not None:
         lines.append(f"Protocol: {snapshot.protocol_state}")
+    if snapshot.protocol_family is not None:
+        lines.append(f"Family: {snapshot.protocol_family}")
     if snapshot.stepped:
         mode_styled = f"{_ANSI_YELLOW}stepped{_ANSI_RESET}" if color else "stepped"
         lines.append(f"Mode: {mode_styled}")

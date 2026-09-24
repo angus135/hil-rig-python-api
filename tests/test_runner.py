@@ -105,6 +105,9 @@ class _AutomaticConnection:
         return SimpleNamespace(
             stored_tick_results=stored,
             stored_application_errors=errors,
+            serial_bytes_read=0,
+            serial_bytes_written=0,
+            application_message_submitted=False,
         )
 
     def bind_result_builder(self, builder) -> None:

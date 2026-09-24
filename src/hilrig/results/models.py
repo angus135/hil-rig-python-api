@@ -40,6 +40,7 @@ class CommunicationPeripheral(str, Enum):
     I2C = "i2c"
     SPI = "spi"
     UART = "uart"
+    CAN = "can"
 
 
 @dataclass(frozen=True, slots=True)

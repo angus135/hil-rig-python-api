@@ -24,6 +24,7 @@ from hilrig.protocol import (
     FixedIOProtocolConnection,
     ManualApplicationMessage,
     ManualSendResult,
+    ProtocolFamily,
     ProtocolWorkflowState,
     ResponseCorrelation,
     SerialConnectionSettings,
@@ -99,6 +100,7 @@ class RunSnapshot:
     verdict: str | None = None
     error: str | None = None
     stepped: bool = False
+    protocol_family: str | None = None
     next_operation: str | None = None
 
     @property
@@ -135,6 +137,7 @@ class ManualSessionSnapshot:
 class _RunCommand:
     path: Path
     stepped: bool
+    protocol_family: ProtocolFamily = ProtocolFamily.VARIABLE
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,10 +247,23 @@ class ProtocolWorker:
             self._started = True
             self._thread.start()
 
-    def submit(self, path: str | Path, *, stepped: bool = False) -> bool:
+    def submit(
+        self,
+        path: str | Path,
+        *,
+        stepped: bool = False,
+        protocol_family: ProtocolFamily | str = ProtocolFamily.VARIABLE,
+    ) -> bool:
         """Queue one run, optionally pausing before each semantic upload operation."""
         if not isinstance(stepped, bool):
             raise TypeError("stepped must be a bool")
+        if isinstance(protocol_family, str):
+            try:
+                protocol_family = ProtocolFamily(protocol_family.lower())
+            except ValueError:
+                raise ValueError(f"Unknown protocol family: {protocol_family!r}")
+        elif not isinstance(protocol_family, ProtocolFamily):
+            raise TypeError("protocol_family must be a ProtocolFamily or str")
         self.start()
         candidate = Path(path).expanduser()
         with self._snapshot_lock:
@@ -263,8 +279,9 @@ class ProtocolWorker:
                 detail="Waiting for the protocol worker.",
                 test_path=candidate,
                 stepped=stepped,
+                protocol_family=protocol_family.value,
             )
-            self._commands.put(_RunCommand(candidate, stepped))
+            self._commands.put(_RunCommand(candidate, stepped, protocol_family))
         return True
 
     def manual_connect(
@@ -469,7 +486,7 @@ class ProtocolWorker:
                 if isinstance(command, _ManualConnectCommand):
                     self._execute_manual_session(command)
                 else:
-                    self._execute_run(command.path, stepped=command.stepped)
+                    self._execute_run(command.path, stepped=command.stepped, protocol_family=command.protocol_family)
             finally:
                 self._idle.set()
         self._set_snapshot(state=WorkerState.STOPPED, detail="Protocol worker stopped.")
@@ -694,7 +711,13 @@ class ProtocolWorker:
                 **changes,
             )
 
-    def _execute_run(self, requested_path: Path, *, stepped: bool) -> None:
+    def _execute_run(
+        self,
+        requested_path: Path,
+        *,
+        stepped: bool,
+        protocol_family: ProtocolFamily = ProtocolFamily.VARIABLE,
+    ) -> None:
         connection: Any | None = None
         builder: CapturedRunBuilder | None = None
         output_directory: Path | None = None
@@ -705,6 +728,7 @@ class ProtocolWorker:
                 detail="Loading and compiling the test definition.",
                 test_path=requested_path,
                 stepped=stepped,
+                protocol_family=protocol_family.value,
                 next_operation=None,
             )
             path, compiled = load_test_definition(requested_path)
@@ -723,11 +747,15 @@ class ProtocolWorker:
                 test_name=compiled.name,
                 output_directory=output_directory,
                 expected_tick_count=compiled.expected_tick_count,
+                protocol_family=protocol_family.value,
             )
-            self._notify(f"Loaded {compiled.name!r}; connecting to the RIG...")
+            self._notify(f"Loaded {compiled.name!r}; connecting to the RIG ({protocol_family.value} family)...")
             self._raise_if_aborted()
 
-            connection = self._connection_factory()
+            try:
+                connection = self._connection_factory(protocol_family=protocol_family)
+            except TypeError:
+                connection = self._connection_factory()
             while not connection.session_confirmed:
                 self._raise_if_aborted()
                 report = connection.service()

@@ -17,6 +17,9 @@ from hilrig.models.assertions import (
     AnalogueInputRemainWithinAssertion,
     AnalogueInputWithinAssertion,
     Assertion,
+    UARTReceiveAssertion,
+    SPIReceiveAssertion,
+    I2CReceiveAssertion,
     AssertionList,
     DigitalInputPointAssertion,
     DigitalInputRemainHighAssertion,
@@ -1165,6 +1168,144 @@ class AnalogueInputExpectation:
         )
 
 
+
+class UARTExpectation:
+    """Builder for assertions over received UART communication data."""
+
+    def __init__(self, test: Test, uart: UART) -> None:
+        self._test = test
+        self._uart = uart
+
+    def receive(
+        self,
+        data: bytes,
+        *,
+        from_tick: int | None = None,
+        until_tick: int | None = None,
+        from_ms: TimeValue | None = None,
+        until_ms: TimeValue | None = None,
+        from_s: TimeValue | None = None,
+        until_s: TimeValue | None = None,
+    ) -> UARTExpectation:
+        """Expect specific payload bytes received on this UART channel within a time range."""
+        payload = _bytes(data)
+        start, end = self._test._time_range(
+            ticks=_optional_pair(from_tick, until_tick, names="from_tick and until_tick"),
+            milliseconds=_optional_pair(from_ms, until_ms, names="from_ms and until_ms"),
+            seconds=_optional_pair(from_s, until_s, names="from_s and until_s"),
+        )
+        self._test._add_assertion(
+            lambda assertion_id: UARTReceiveAssertion(
+                assertion_id=assertion_id,
+                channel=self._uart.identity,
+                from_tick=start,
+                until_tick=end,
+                expected_payload=payload,
+            )
+        )
+        return self
+
+    def receive_text(
+        self,
+        data: str,
+        *,
+        encoding: str = "utf-8",
+        from_tick: int | None = None,
+        until_tick: int | None = None,
+        from_ms: TimeValue | None = None,
+        until_ms: TimeValue | None = None,
+        from_s: TimeValue | None = None,
+        until_s: TimeValue | None = None,
+    ) -> UARTExpectation:
+        """Expect specific text received on this UART channel within a time range."""
+        if not isinstance(data, str):
+            raise TypeError("data must be a string")
+        payload = data.encode(encoding)
+        return self.receive(
+            payload,
+            from_tick=from_tick,
+            until_tick=until_tick,
+            from_ms=from_ms,
+            until_ms=until_ms,
+            from_s=from_s,
+            until_s=until_s,
+        )
+
+
+class SPIExpectation:
+    """Builder for assertions over received SPI communication data."""
+
+    def __init__(self, test: Test, spi: SPI) -> None:
+        self._test = test
+        self._spi = spi
+
+    def receive(
+        self,
+        data: bytes,
+        *,
+        from_tick: int | None = None,
+        until_tick: int | None = None,
+        from_ms: TimeValue | None = None,
+        until_ms: TimeValue | None = None,
+        from_s: TimeValue | None = None,
+        until_s: TimeValue | None = None,
+    ) -> SPIExpectation:
+        """Expect specific payload bytes received on this SPI channel within a time range."""
+        payload = _bytes(data)
+        start, end = self._test._time_range(
+            ticks=_optional_pair(from_tick, until_tick, names="from_tick and until_tick"),
+            milliseconds=_optional_pair(from_ms, until_ms, names="from_ms and until_ms"),
+            seconds=_optional_pair(from_s, until_s, names="from_s and until_s"),
+        )
+        self._test._add_assertion(
+            lambda assertion_id: SPIReceiveAssertion(
+                assertion_id=assertion_id,
+                channel=self._spi.identity,
+                from_tick=start,
+                until_tick=end,
+                expected_payload=payload,
+            )
+        )
+        return self
+
+
+class I2CExpectation:
+    """Builder for assertions over received I2C communication data."""
+
+    def __init__(self, test: Test, i2c: I2C) -> None:
+        self._test = test
+        self._i2c = i2c
+
+    def receive(
+        self,
+        data: bytes,
+        *,
+        from_tick: int | None = None,
+        until_tick: int | None = None,
+        from_ms: TimeValue | None = None,
+        until_ms: TimeValue | None = None,
+        from_s: TimeValue | None = None,
+        until_s: TimeValue | None = None,
+    ) -> I2CExpectation:
+        """Expect specific payload bytes received on this I2C channel within a time range."""
+        payload = _bytes(data)
+        start, end = self._test._time_range(
+            ticks=_optional_pair(from_tick, until_tick, names="from_tick and until_tick"),
+            milliseconds=_optional_pair(from_ms, until_ms, names="from_ms and until_ms"),
+            seconds=_optional_pair(from_s, until_s, names="from_s and until_s"),
+        )
+        self._test._add_assertion(
+            lambda assertion_id: I2CReceiveAssertion(
+                assertion_id=assertion_id,
+                channel=self._i2c.identity,
+                from_tick=start,
+                until_tick=end,
+                expected_payload=payload,
+            )
+        )
+        return self
+
+
 class Test:
     """Root object containing one complete HIL-RIG test definition."""
 
@@ -1281,23 +1422,38 @@ class Test:
     @overload
     def expect(self, channel: AnalogueInput) -> AnalogueInputExpectation: ...
 
+    @overload
+    def expect(self, channel: UART) -> UARTExpectation: ...
+
+    @overload
+    def expect(self, channel: SPI) -> SPIExpectation: ...
+
+    @overload
+    def expect(self, channel: I2C) -> I2CExpectation: ...
+
     def expect(
         self,
-        channel: DigitalInput | PwmInput | AnalogueInput,
-    ) -> DigitalInputExpectation | PwmInputExpectation | AnalogueInputExpectation:
-        """Begin a host-side assertion for a supported input channel."""
+        channel: DigitalInput | PwmInput | AnalogueInput | UART | SPI | I2C,
+    ) -> DigitalInputExpectation | PwmInputExpectation | AnalogueInputExpectation | UARTExpectation | SPIExpectation | I2CExpectation:
+        """Begin a host-side assertion for a supported peripheral channel."""
         self._ensure_mutable()
-        if not isinstance(channel, (DigitalInput, PwmInput, AnalogueInput)):
+        if not isinstance(channel, (DigitalInput, PwmInput, AnalogueInput, UART, SPI, I2C)):
             raise TypeError(
-                "expect() supports digital, PWM, or analogue input handles from this Test"
+                "expect() supports digital, PWM, analogue, UART, SPI, or I2C handles from this Test"
             )
         if channel._test is not self:
-            raise TypeError("expect() requires an input handle from this Test")
+            raise TypeError("expect() requires a channel handle from this Test")
         if isinstance(channel, DigitalInput):
             return DigitalInputExpectation(self, channel)
         if isinstance(channel, PwmInput):
             return PwmInputExpectation(self, channel)
-        return AnalogueInputExpectation(self, channel)
+        if isinstance(channel, AnalogueInput):
+            return AnalogueInputExpectation(self, channel)
+        if isinstance(channel, UART):
+            return UARTExpectation(self, channel)
+        if isinstance(channel, SPI):
+            return SPIExpectation(self, channel)
+        return I2CExpectation(self, channel)
 
     def compile(self) -> CompiledTestIR:
         """Validate, snapshot, and freeze this test definition."""

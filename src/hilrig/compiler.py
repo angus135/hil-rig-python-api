@@ -11,6 +11,9 @@ from hilrig.models.assertions import (
     AnalogueInputRemainWithinAssertion,
     AnalogueInputWithinAssertion,
     Assertion,
+    UARTReceiveAssertion,
+    SPIReceiveAssertion,
+    I2CReceiveAssertion,
     AssertionList,
     DigitalInputPointAssertion,
     DigitalInputRemainHighAssertion,
@@ -82,6 +85,9 @@ _ASSERTION_OPERATIONS: dict[type[Assertion], str] = {
     AnalogueInputRemainWithinAssertion: "remain_within",
     AnalogueInputRemainAboveAssertion: "remain_above",
     AnalogueInputRemainBelowAssertion: "remain_below",
+    UARTReceiveAssertion: "receive",
+    SPIReceiveAssertion: "receive",
+    I2CReceiveAssertion: "receive",
 }
 
 _POST_TEST_SETTLING_SECONDS = 1
