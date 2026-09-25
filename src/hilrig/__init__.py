@@ -1,12 +1,15 @@
 """Public interface for the HIL-RIG host-side API."""
 
 from hilrig.api import (
+    CAN,
     I2C,
     SPI,
     UART,
     AnalogueInput,
     AnalogueInputExpectation,
     AnalogueOutput,
+    AssertionGroup,
+    CANExpectation,
     DigitalInput,
     DigitalInputExpectation,
     DigitalOutput,
@@ -17,9 +20,11 @@ from hilrig.api import (
 )
 from hilrig.evaluation import (
     AssertionEvaluator,
+    AssertionGroupResult,
     AssertionResult,
     EvaluationReport,
     EvaluationVerdict,
+    StimulusRecord,
     evaluate_assertions,
 )
 from hilrig.exceptions import (
@@ -41,6 +46,7 @@ from hilrig.exceptions import (
     ValidationError,
 )
 from hilrig.models.configuration import (
+    CANConfiguration,
     DigitalState,
     FrequencyMode,
     I2CRole,
@@ -100,7 +106,12 @@ __all__ = [
     "AnalogueInput",
     "AnalogueInputExpectation",
     "AnalogueOutput",
+    "CAN",
+    "CANExpectation",
+    "CANConfiguration",
     "ApplicationErrorRecord",
+    "AssertionGroup",
+    "AssertionGroupResult",
     "AssertionEvaluator",
     "AssertionResult",
     "CapturedAssertionSet",
@@ -157,6 +168,7 @@ __all__ = [
     "SPIRole",
     "SPISize",
     "StartMode",
+    "StimulusRecord",
     "SerialConnectionSettings",
     "SerialDiscoveryError",
     "Test",

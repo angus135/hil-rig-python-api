@@ -176,6 +176,7 @@ class CapturedRunIR:
             "assertions": {
                 "original_set_id": assertion_set.assertion_set_id,
                 "compiled_ir_version": assertion_set.compiled_ir_version,
+                "group_count": assertion_set.group_count,
                 "count": assertion_set.assertion_count,
             },
             "authoritative_data": self._database_path.name,

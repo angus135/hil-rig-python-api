@@ -9,6 +9,7 @@ from importlib import import_module
 from itertools import groupby
 from types import ModuleType
 from typing import Any
+import struct
 
 from hilrig.exceptions import ProtocolDependencyError, ProtocolIntegrationError
 from hilrig.models.execution import CompiledConfiguration, CompiledInstruction, CompiledTestIR
@@ -408,6 +409,16 @@ class FixedIOProtocolAdapter:
                     clock_polarity=clock_polarity,
                     clock_phase=clock_phase,
                 )
+            elif peripheral == "can":
+                bitrate = _require_positive_integer(parameters["bitrate"], "bitrate")
+                filter_id = _require_non_negative_integer(parameters["filter_id"], "filter_id")
+                filter_mask = _require_non_negative_integer(parameters["filter_mask"], "filter_mask")
+                can[channel] = p.CANConfig(
+                    enabled=True,
+                    bit_rate=bitrate,
+                    filter_id=filter_id,
+                    filter_mask=filter_mask,
+                )
             elif peripheral == "uart":
                 uart[channel] = p.UARTConfig(
                     enabled=True,
@@ -596,6 +607,12 @@ def _spi_clock_mode(protocol: Any, value: object) -> tuple[object, object]:
 def _require_positive_integer(value: object, name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ProtocolIntegrationError(f"{name} must be a positive integer in the compiled IR")
+    return value
+
+
+def _require_non_negative_integer(value: object, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ProtocolIntegrationError(f"{name} must be a non-negative integer in the compiled IR")
     return value
 
 
@@ -1085,11 +1102,14 @@ class VariableIOProtocolAdapter:
 
                 elif periph == "can":
                     can_data = _extract_bytes(arguments.get("data"))
+                    frame_id = _require_non_negative_integer(arguments.get("frame_id"), "frame_id")
+                    if frame_id > 0x7FF or len(can_data) > 8:
+                        raise ProtocolIntegrationError("CAN frame is outside the standard 11-bit/8-byte limits")
                     operations.append(
                         p.LogicalOperation(
                             peripheral_type=p.PeripheralType.CAN,
                             channel=instruction.channel,
-                            payload=can_data,
+                            payload=struct.pack("<HB8sB", frame_id, len(can_data), can_data, 0),
                         )
                     )
 

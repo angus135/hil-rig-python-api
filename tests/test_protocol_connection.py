@@ -96,7 +96,14 @@ def _drive_fake_rig_to_state(
                     )
                 ]
             elif type(request) is ProtocolTestInstruction:
-                responses = []
+                responses = [
+                    ApplicationResponse(
+                        request.test_id,
+                        ResponseScope.TICK,
+                        ResponseOutcome.ACCEPTED,
+                        tick_number=request.tick_number,
+                    )
+                ]
 
 
 

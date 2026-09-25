@@ -10,7 +10,7 @@ from typing import TypeAlias
 
 from hilrig.results.models import CaptureStatus
 
-EVALUATION_REPORT_SCHEMA_VERSION = "1.2"
+EVALUATION_REPORT_SCHEMA_VERSION = "1.4"
 EvaluationScalar: TypeAlias = str | int | float | bool | None
 
 
@@ -34,6 +34,9 @@ class AssertionResult:
     """Outcome and compact evidence summary for one compiled assertion."""
 
     assertion_id: int
+    group_id: int
+    group_name: str
+    subject_name: str
     verdict: EvaluationVerdict
     peripheral: str
     channel: int
@@ -48,6 +51,49 @@ class AssertionResult:
     violation_count: int
     first_failure_tick: int | None
     message: str
+
+
+@dataclass(frozen=True, slots=True)
+class StimulusRecord:
+    """Informational record of one commanded stimulus in a test group."""
+
+    instruction_id: int
+    group_id: int | None
+    group_name: str | None
+    subject_name: str
+    tick: int
+    time_ns: int
+    peripheral: str
+    channel: int
+    operation: str
+    arguments: MappingProxyType[str, EvaluationScalar]
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class AssertionGroupResult:
+    """Aggregate verdict for one named assertion group."""
+
+    group_id: int
+    name: str
+    verdict: EvaluationVerdict
+    stimuli: tuple[StimulusRecord, ...]
+    assertion_results: tuple[AssertionResult, ...]
+
+    @property
+    def passed_count(self) -> int:
+        return self._verdict_count(EvaluationVerdict.PASS)
+
+    @property
+    def failed_count(self) -> int:
+        return self._verdict_count(EvaluationVerdict.FAIL)
+
+    @property
+    def inconclusive_count(self) -> int:
+        return self._verdict_count(EvaluationVerdict.INCONCLUSIVE)
+
+    def _verdict_count(self, verdict: EvaluationVerdict) -> int:
+        return sum(result.verdict is verdict for result in self.assertion_results)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +112,8 @@ class EvaluationReport:
     compiled_ir_version: str
     evaluated_at: str
     verdict: EvaluationVerdict
+    assertion_groups: tuple[AssertionGroupResult, ...]
+    stimuli: tuple[StimulusRecord, ...]
     assertion_results: tuple[AssertionResult, ...]
     warnings: tuple[str, ...]
     schema_version: str = EVALUATION_REPORT_SCHEMA_VERSION

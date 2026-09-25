@@ -37,7 +37,7 @@ class IncomingResultAdapter:
         builder: CapturedRunBuilder,
         *,
         protocol_module: ModuleType | Any | None = None,
-        expected_family: ProtocolFamily | str = ProtocolFamily.VARIABLE,
+        expected_family: ProtocolFamily | str | None = None,
     ) -> None:
         if not isinstance(builder, CapturedRunBuilder):
             raise TypeError("builder must be a CapturedRunBuilder")
@@ -46,8 +46,8 @@ class IncomingResultAdapter:
                 expected_family = ProtocolFamily(expected_family.lower())
             except ValueError:
                 raise ValueError(f"Unknown protocol family: {expected_family!r}")
-        elif not isinstance(expected_family, ProtocolFamily):
-            raise TypeError("expected_family must be a ProtocolFamily or str")
+        elif expected_family is not None and not isinstance(expected_family, ProtocolFamily):
+            raise TypeError("expected_family must be a ProtocolFamily, str, or None")
         self.expected_family = expected_family
         self.builder = builder
         self.protocol = protocol_module or _load_protocol_module()
@@ -174,13 +174,23 @@ class IncomingResultAdapter:
                 )
                 self.builder.add_communication_result(comm_res)
             elif periph_type == p.PeripheralType.CAN:
-                comm_res = CommunicationResult(
-                    tick=tick,
-                    peripheral=CommunicationPeripheral.CAN,
-                    channel=record.channel,
-                    payload=bytes(record.data),
-                )
-                self.builder.add_communication_result(comm_res)
+                # CAN results may batch several fixed-size canonical frames.
+                # Keep one frame per stored communication so assertions can
+                # match a frame without depending on batching boundaries.
+                payload = bytes(record.data)
+                if len(payload) == 0 or len(payload) % 12:
+                    raise ProtocolSessionError(
+                        "CAN result payload is not a whole number of 12-byte frames"
+                    )
+                for offset in range(0, len(payload), 12):
+                    self.builder.add_communication_result(
+                        CommunicationResult(
+                            tick=tick,
+                            peripheral=CommunicationPeripheral.CAN,
+                            channel=record.channel,
+                            payload=payload[offset : offset + 12],
+                        )
+                    )
 
         result = TickResult(
             tick=tick,

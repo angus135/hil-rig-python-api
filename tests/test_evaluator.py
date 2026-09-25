@@ -56,6 +56,7 @@ def _capture(
         tick_period_ns=compiled.tick_period_ns,
         expected_tick_count=expected_tick_count,
         compiled_ir_version=compiled.schema_version,
+        compiled_assertion_groups=compiled.assertion_groups,
         compiled_assertions=compiled.assertions,
     )
     for tick in ticks:
@@ -428,7 +429,7 @@ def test_evaluation_report_exports_json_and_markdown(tmp_path: Path) -> None:
     document = json.loads(json_path.read_text(encoding="utf-8"))
     markdown = markdown_path.read_text(encoding="utf-8")
 
-    assert document["evaluation_report_version"] == "1.2"
+    assert document["evaluation_report_version"] == "1.4"
     assert document["run"]["application_test_id"] == ("0000000000000000000000000000d00d")
     assert document["evaluation"]["verdict"] == "pass"
     assert document["assertions"][0]["expected"]["target_uv"] == 5_000_000

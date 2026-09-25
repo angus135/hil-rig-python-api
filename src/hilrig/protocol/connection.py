@@ -145,7 +145,7 @@ class FixedIOProtocolConnection:
         application: FixedIOProtocolAdapter | VariableIOProtocolAdapter,
         transport: Any,
         result_adapter: IncomingResultAdapter | None = None,
-        protocol_family: ProtocolFamily | str = ProtocolFamily.VARIABLE,
+        protocol_family: ProtocolFamily | str | None = None,
         application_response_timeout_s: float = _DEFAULT_APPLICATION_RESPONSE_TIMEOUT_S,
         manual_mode: bool = False,
         skip_system_info: bool = False,
@@ -157,7 +157,13 @@ class FixedIOProtocolConnection:
         ):
             raise ValueError("application_response_timeout_s must be a positive number")
 
-        if isinstance(protocol_family, str):
+        if protocol_family is None:
+            protocol_family = (
+                ProtocolFamily.VARIABLE
+                if isinstance(application, VariableIOProtocolAdapter)
+                else ProtocolFamily.LEGACY
+            )
+        elif isinstance(protocol_family, str):
             try:
                 protocol_family = ProtocolFamily(protocol_family.lower())
             except ValueError:
@@ -804,7 +810,13 @@ class FixedIOProtocolConnection:
                 break
             encoded = bytes(self._incoming[2 : 2 + msg_len])
             del self._incoming[: 2 + msg_len]
-            message = self.application.decode(encoded)
+            try:
+                message = self.application.decode(encoded)
+            except Exception as error:
+                self._fail_workflow()
+                raise ProtocolSessionError(
+                    f"Failed to decode incoming message (length={msg_len}, hex={encoded.hex()}): {error}"
+                ) from error
             messages.append(message)
             if type(message) is p.SystemInfoResponse:
                 if (

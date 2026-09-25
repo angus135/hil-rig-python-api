@@ -16,6 +16,7 @@ class ChannelKind(str, Enum):
     ANALOGUE_INPUT = "analogue_input"
     ANALOGUE_OUTPUT = "analogue_output"
     I2C = "i2c"
+    CAN = "can"
     SPI = "spi"
     UART = "uart"
 
@@ -29,6 +30,7 @@ CHANNEL_COUNTS: Mapping[ChannelKind, int] = MappingProxyType(
         ChannelKind.ANALOGUE_INPUT: 2,
         ChannelKind.ANALOGUE_OUTPUT: 6,
         ChannelKind.I2C: 2,
+        ChannelKind.CAN: 2,
         ChannelKind.SPI: 2,
         ChannelKind.UART: 2,
     }

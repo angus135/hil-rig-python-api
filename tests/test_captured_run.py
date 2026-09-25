@@ -319,6 +319,7 @@ def test_manifest_and_csv_exports_are_derived_from_database(tmp_path: Path) -> N
     assert manifest["assertions"] == {
         "original_set_id": "original",
         "compiled_ir_version": "1.2",
+        "group_count": 1,
         "count": 0,
     }
     assert manifest["authoritative_data"] == "run.sqlite3"

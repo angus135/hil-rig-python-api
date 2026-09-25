@@ -6,13 +6,25 @@ from dataclasses import dataclass
 from hilrig.models.channels import Channel
 from hilrig.models.configuration import DigitalState
 
+DEFAULT_ASSERTION_GROUP_ID = 0
+DEFAULT_ASSERTION_GROUP_NAME = "Assertions"
+
 
 @dataclass(frozen=True, slots=True)
+class AssertionGroupDefinition:
+    """One named collection of related host-side assertions."""
+
+    group_id: int
+    name: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Assertion:
     """Information shared by every host-side assertion."""
 
     assertion_id: int
     channel: Channel
+    group_id: int = DEFAULT_ASSERTION_GROUP_ID
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,7 +155,6 @@ class AnalogueInputRemainBelowAssertion(RangeAssertion):
     threshold_uv: int
 
 
-
 @dataclass(frozen=True, slots=True)
 class CommunicationReceiveAssertion(RangeAssertion):
     """Expect specific payload bytes received on a communication peripheral within a tick range."""
@@ -164,6 +175,11 @@ class SPIReceiveAssertion(CommunicationReceiveAssertion):
 @dataclass(frozen=True, slots=True)
 class I2CReceiveAssertion(CommunicationReceiveAssertion):
     """Expect specific I2C payload bytes received within a tick range."""
+
+
+@dataclass(frozen=True, slots=True)
+class CANReceiveAssertion(CommunicationReceiveAssertion):
+    """Expect specific CAN frame payload bytes received within a tick range."""
 
 
 class AssertionList:

@@ -468,6 +468,43 @@ The following assertion definitions are implemented:
 - Analogue input: voltage near a target or within a band at one point; voltage remaining
   within a band, above a threshold, or below a threshold over a range.
 
+Stimuli and assertions can be collected into named groups using a context block. Group
+verdicts use assertions only: one failed assertion fails the group, otherwise an
+inconclusive assertion makes the group inconclusive, and every assertion must pass for
+the group to pass. Stimuli are informational records of what the test commanded.
+Nested groups are not supported. The original ungrouped `test.expect(...)` form remains
+available through the implicit `Assertions` group.
+
+Peripheral handles may also be assigned an explicit report-facing name. Python local
+variable names cannot be recovered reliably, so names are declared with `named()`:
+
+```python
+UART_ch1 = (
+    test.uart(channel=0)
+    .named("UART_ch1")
+    .configure(
+        mode=UARTMode.TTL_3V3,
+        baud_hz=115_200,
+        parity=UARTParity.NONE,
+        length=UARTLengthBits.EIGHT,
+        stop=UARTStopBits.ONE,
+    )
+)
+
+with test.group("UART Tests"):
+    UART_ch1.write(data=b"PING\r\n", at_tick=100)
+    test.expect(UART_ch1).receive(
+        b"READY\r\n",
+        from_tick=100,
+        until_tick=200,
+    )
+```
+
+The compiled and captured stimulus and assertion definitions retain the group ID, group
+name, report-facing subject name, and physical peripheral/channel identity. Reports
+show commanded stimuli as statements without pass/fail verdicts, followed by the
+assertions that determine the group verdict.
+
 For example:
 
 ```python
@@ -547,6 +584,8 @@ Bulk evidence is separated by shape:
 - `communication_results` stores raw variable-length I2C, SPI, or UART payloads;
 - `application_errors` stores diagnostics;
 - `assertion_sets` identifies versioned host-side assertion snapshots;
+- `assertion_groups` stores the named groups within each assertion snapshot;
+- `stimulus_definitions` stores grouped output commands for report context;
 - `assertion_definitions` stores each compiled assertion and its scalar arguments;
 - `run_metadata` stores the logical test ID, actual Application Test ID, run ID,
   timing, provenance, counts, and capture status.

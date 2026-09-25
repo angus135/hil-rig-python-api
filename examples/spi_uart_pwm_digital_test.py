@@ -42,7 +42,7 @@ from hilrig import (
 
 def build_test() -> Test:
     """Construct and return the multi-peripheral HIL-RIG test with full assertions."""
-    test = Test(name="SPI1, UART2, PWM LV->CH1, and DOUT1->DIN10 Multi-Peripheral Test")
+    test = Test(name="SPI1, uart2, PWM LV->CH1, and DOUT1->DIN10 Multi-Peripheral Test")
     test.configure(
         frequency_mode=FrequencyMode.HZ_10K,
         start_mode=StartMode.IMMEDIATE,
@@ -166,9 +166,9 @@ def build_test() -> Test:
     test.expect(spi1).receive(spi_pkt4, from_ms=850, until_ms=990)
 
     # =========================================================================
-    # 4. UART Channel 1 (UART 2): TTL 3.3V Serial Writes & Receive Assertions
+    # 4. UART Channel 1 (UART 1): TTL 3.3V Serial Writes & Receive Assertions
     # =========================================================================
-    uart2 = test.uart(channel=1)
+    uart2 = test.uart(channel=0)
     uart2.configure(
         mode=UARTMode.TTL_3V3,
         baud_hz=115_200,

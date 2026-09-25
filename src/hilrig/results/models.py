@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from hilrig.models.execution import CompiledAssertion
+from hilrig.models.execution import CompiledAssertion, CompiledAssertionGroup, CompiledInstruction
 
-RESULT_IR_SCHEMA_VERSION = "1.2"
+RESULT_IR_SCHEMA_VERSION = "1.4"
 ORIGINAL_ASSERTION_SET_ID = "original"
 
 DIGITAL_INPUT_CHANNEL_COUNT = 10
@@ -224,12 +224,24 @@ class CapturedAssertionSet:
     name: str
     compiled_ir_version: str
     created_at: str
+    groups: tuple[CompiledAssertionGroup, ...]
+    stimuli: tuple[CompiledInstruction, ...]
     assertions: tuple[CompiledAssertion, ...]
+
+    @property
+    def group_count(self) -> int:
+        """Return the number of named groups in this assertion snapshot."""
+        return len(self.groups)
 
     @property
     def assertion_count(self) -> int:
         """Return the number of assertion definitions in this set."""
         return len(self.assertions)
+
+    @property
+    def stimulus_count(self) -> int:
+        """Return the number of grouped stimulus definitions in this set."""
+        return len(self.stimuli)
 
 
 @dataclass(frozen=True, slots=True)

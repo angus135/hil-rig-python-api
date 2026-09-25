@@ -1,5 +1,6 @@
 """Validation and compilation of the internal test model."""
 
+from collections.abc import Mapping, Sequence
 from dataclasses import fields
 from enum import Enum
 
@@ -11,14 +12,14 @@ from hilrig.models.assertions import (
     AnalogueInputRemainWithinAssertion,
     AnalogueInputWithinAssertion,
     Assertion,
-    UARTReceiveAssertion,
-    SPIReceiveAssertion,
-    I2CReceiveAssertion,
+    AssertionGroupDefinition,
     AssertionList,
+    CANReceiveAssertion,
     DigitalInputPointAssertion,
     DigitalInputRemainHighAssertion,
     DigitalInputRemainLowAssertion,
     DigitalInputTransitionAssertion,
+    I2CReceiveAssertion,
     PointAssertion,
     PwmInputDutyCycleNearAssertion,
     PwmInputDutyCycleRemainWithinAssertion,
@@ -27,11 +28,14 @@ from hilrig.models.assertions import (
     PwmInputPeriodNearAssertion,
     PwmInputWaveformNearAssertion,
     RangeAssertion,
+    SPIReceiveAssertion,
+    UARTReceiveAssertion,
 )
 from hilrig.models.channels import Channel, validate_channel_index
 from hilrig.models.configuration import Configuration, configuration_type_for
 from hilrig.models.execution import (
     CompiledAssertion,
+    CompiledAssertionGroup,
     CompiledConfiguration,
     CompiledInstruction,
     CompiledTestIR,
@@ -41,6 +45,7 @@ from hilrig.models.execution import (
 )
 from hilrig.models.instructions import (
     AnalogueOutputInstruction,
+    CANTransmitInstruction,
     DigitalOutputInstruction,
     I2CPreloadResponseInstruction,
     I2CReadInstruction,
@@ -67,6 +72,7 @@ _INSTRUCTION_OPERATIONS: dict[type[Instruction], str] = {
     I2CPreloadResponseInstruction: "preload_response",
     SPITransferInstruction: "transfer",
     UARTWriteInstruction: "write",
+    CANTransmitInstruction: "transmit",
 }
 
 _ASSERTION_OPERATIONS: dict[type[Assertion], str] = {
@@ -88,6 +94,7 @@ _ASSERTION_OPERATIONS: dict[type[Assertion], str] = {
     UARTReceiveAssertion: "receive",
     SPIReceiveAssertion: "receive",
     I2CReceiveAssertion: "receive",
+    CANReceiveAssertion: "receive",
 }
 
 _POST_TEST_SETTLING_SECONDS = 1
@@ -101,11 +108,15 @@ def compile_test(
     configuration: Configuration,
     instructions: InstructionList,
     assertions: AssertionList,
+    assertion_groups: Sequence[AssertionGroupDefinition],
+    channel_names: Mapping[Channel, str],
+    instruction_group_ids: Mapping[int, int] | None = None,
 ) -> CompiledTestIR:
     """Validate and copy a test definition into an immutable intermediate form."""
     _validate_configuration_channels(configuration)
     _validate_instructions(instructions, configuration=configuration)
     _validate_assertions(assertions, configuration=configuration)
+    _validate_assertion_groups(assertions, assertion_groups)
 
     ordered_instructions = tuple(
         sorted(
@@ -122,8 +133,32 @@ def compile_test(
             key=lambda item: (item[0].kind.value, item[0].index),
         )
     )
-    compiled_instructions = tuple(_compile_instruction(item) for item in ordered_instructions)
-    compiled_assertions = tuple(_compile_assertion(item) for item in assertions)
+    instruction_groups = {} if instruction_group_ids is None else dict(instruction_group_ids)
+    _validate_instruction_groups(instructions, assertion_groups, instruction_groups)
+    compiled_instructions = tuple(
+        _compile_instruction(
+            item,
+            group_id=instruction_groups.get(item.instruction_id),
+            subject_name=channel_names.get(
+                item.channel,
+                f"{item.channel.kind.value}[{item.channel.index}]",
+            ),
+        )
+        for item in ordered_instructions
+    )
+    compiled_assertion_groups = tuple(
+        CompiledAssertionGroup(group_id=item.group_id, name=item.name) for item in assertion_groups
+    )
+    compiled_assertions = tuple(
+        _compile_assertion(
+            item,
+            subject_name=channel_names.get(
+                item.channel,
+                f"{item.channel.kind.value}[{item.channel.index}]",
+            ),
+        )
+        for item in assertions
+    )
     expected_tick_count = _expected_tick_count(
         instructions=ordered_instructions,
         assertions=assertions,
@@ -143,6 +178,7 @@ def compile_test(
         start_mode=configuration.start_mode.name,
         configurations=compiled_configurations,
         instructions=compiled_instructions,
+        assertion_groups=compiled_assertion_groups,
         assertions=compiled_assertions,
         time_slots=time_slots,
     )
@@ -200,7 +236,12 @@ def _compile_configuration(
     )
 
 
-def _compile_instruction(instruction: Instruction) -> CompiledInstruction:
+def _compile_instruction(
+    instruction: Instruction,
+    *,
+    group_id: int | None,
+    subject_name: str,
+) -> CompiledInstruction:
     operation = _INSTRUCTION_OPERATIONS.get(type(instruction))
     if operation is None:
         raise ValidationError(
@@ -219,16 +260,18 @@ def _compile_instruction(instruction: Instruction) -> CompiledInstruction:
         channel=instruction.channel.index,
         operation=operation,
         arguments=immutable_fields(arguments),
+        group_id=group_id,
+        subject_name=subject_name,
     )
 
 
-def _compile_assertion(assertion: Assertion) -> CompiledAssertion:
+def _compile_assertion(assertion: Assertion, *, subject_name: str) -> CompiledAssertion:
     operation = _ASSERTION_OPERATIONS.get(type(assertion))
     if operation is None:
         raise ValidationError(
             f"No human-readable representation is defined for {type(assertion).__name__}"
         )
-    excluded = {"assertion_id", "channel"}
+    excluded = {"assertion_id", "channel", "group_id"}
     arguments = {
         ("tick" if field.name == "timestamp" else field.name): _ir_value(
             getattr(assertion, field.name)
@@ -238,11 +281,50 @@ def _compile_assertion(assertion: Assertion) -> CompiledAssertion:
     }
     return CompiledAssertion(
         assertion_id=assertion.assertion_id,
+        group_id=assertion.group_id,
+        subject_name=subject_name,
         peripheral=assertion.channel.kind.value,
         channel=assertion.channel.index,
         assertion=operation,
         arguments=immutable_fields(arguments),
     )
+
+
+def _validate_assertion_groups(
+    assertions: AssertionList,
+    assertion_groups: Sequence[AssertionGroupDefinition],
+) -> None:
+    if not assertion_groups:
+        raise ValidationError("A test must define the default assertion group")
+    group_ids = {group.group_id for group in assertion_groups}
+    if len(group_ids) != len(assertion_groups):
+        raise ValidationError("Assertion group IDs must be unique")
+    for expected_id, group in enumerate(assertion_groups):
+        if group.group_id != expected_id:
+            raise ValidationError("Assertion group IDs must be sequential from zero")
+        if not isinstance(group.name, str) or not group.name.strip():
+            raise ValidationError("Assertion group names must be non-empty")
+    for assertion in assertions:
+        if assertion.group_id not in group_ids:
+            raise ValidationError(
+                f"Assertion {assertion.assertion_id} references unknown group {assertion.group_id}"
+            )
+
+
+def _validate_instruction_groups(
+    instructions: InstructionList,
+    assertion_groups: Sequence[AssertionGroupDefinition],
+    instruction_group_ids: Mapping[int, int],
+) -> None:
+    instruction_ids = {instruction.instruction_id for instruction in instructions}
+    group_ids = {group.group_id for group in assertion_groups}
+    for instruction_id, group_id in instruction_group_ids.items():
+        if instruction_id not in instruction_ids:
+            raise ValidationError(f"Unknown grouped instruction ID {instruction_id}")
+        if group_id not in group_ids:
+            raise ValidationError(
+                f"Instruction {instruction_id} references unknown group {group_id}"
+            )
 
 
 def _ir_value(value: object) -> IRScalar:

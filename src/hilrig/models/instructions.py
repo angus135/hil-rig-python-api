@@ -105,6 +105,14 @@ class UARTWriteInstruction(Instruction):
     data: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class CANTransmitInstruction(Instruction):
+    """Transmit one standard CAN frame."""
+
+    frame_id: int
+    data: bytes
+
+
 class InstructionList:
     """Insertion-ordered collection of stimulus instructions under construction."""
 

@@ -4,38 +4,45 @@ from __future__ import annotations
 
 import math
 import secrets
+import struct
 from collections.abc import Callable
+from dataclasses import replace
 from decimal import Decimal, InvalidOperation
-from typing import TypeVar, overload
+from typing import Self, TypeVar, overload
 
 from hilrig.compiler import compile_test
 from hilrig.exceptions import ConfigurationError, FrozenTestError, PeripheralError, TimingError
 from hilrig.models.assertions import (
+    DEFAULT_ASSERTION_GROUP_ID,
+    DEFAULT_ASSERTION_GROUP_NAME,
     AnalogueInputNearAssertion,
     AnalogueInputRemainAboveAssertion,
     AnalogueInputRemainBelowAssertion,
     AnalogueInputRemainWithinAssertion,
     AnalogueInputWithinAssertion,
     Assertion,
-    UARTReceiveAssertion,
-    SPIReceiveAssertion,
-    I2CReceiveAssertion,
+    AssertionGroupDefinition,
     AssertionList,
+    CANReceiveAssertion,
     DigitalInputPointAssertion,
     DigitalInputRemainHighAssertion,
     DigitalInputRemainLowAssertion,
     DigitalInputTransitionAssertion,
+    I2CReceiveAssertion,
     PwmInputDutyCycleNearAssertion,
     PwmInputDutyCycleRemainWithinAssertion,
     PwmInputFrequencyNearAssertion,
     PwmInputFrequencyRemainWithinAssertion,
     PwmInputPeriodNearAssertion,
     PwmInputWaveformNearAssertion,
+    SPIReceiveAssertion,
+    UARTReceiveAssertion,
 )
 from hilrig.models.channels import Channel, ChannelKind, validate_channel_index
 from hilrig.models.configuration import (
     AnalogueInputConfiguration,
     AnalogueOutputConfiguration,
+    CANConfiguration,
     Configuration,
     DigitalInputConfiguration,
     DigitalOutputConfiguration,
@@ -65,6 +72,7 @@ from hilrig.models.configuration import (
 from hilrig.models.execution import CompiledTestIR
 from hilrig.models.instructions import (
     AnalogueOutputInstruction,
+    CANTransmitInstruction,
     DigitalOutputAction,
     DigitalOutputInstruction,
     I2CPreloadResponseInstruction,
@@ -104,6 +112,16 @@ class _ChannelHandle:
     def identity(self) -> Channel:
         """Return the shared internal channel identity."""
         return self._identity
+
+    @property
+    def name(self) -> str:
+        """Return the report-facing name for this peripheral channel."""
+        return self._test._channel_name(self._identity)
+
+    def named(self, name: str) -> Self:
+        """Assign a stable report-facing name to this peripheral channel."""
+        self._test._name_channel(self._identity, name)
+        return self
 
 
 class DigitalInput(_ChannelHandle):
@@ -510,6 +528,67 @@ class I2C(_ChannelHandle):
             )
 
 
+class CAN(_ChannelHandle):
+    """A reusable handle for one CAN channel."""
+
+    def configure(
+        self,
+        *,
+        bitrate: int,
+        filter_id: int = 0,
+        filter_mask: int = 0,
+    ) -> CAN:
+        """Configure a CAN channel for standard 11-bit frames."""
+        bit_rate = _positive_integer(bitrate, name="bitrate")
+        can_filter_id = _non_negative_integer(filter_id, name="filter_id")
+        can_filter_mask = _non_negative_integer(filter_mask, name="filter_mask")
+        if can_filter_id > 0x7FF or can_filter_mask > 0x7FF:
+            raise ValueError("filter_id and filter_mask must fit an 11-bit CAN identifier")
+        self._test._configure_channel(
+            self._identity,
+            CANConfiguration(
+                bitrate=bit_rate,
+                filter_id=can_filter_id,
+                filter_mask=can_filter_mask,
+            ),
+        )
+        return self
+
+    def transmit(
+        self,
+        *,
+        frame_id: int,
+        data: bytes,
+        at_tick: int | None = None,
+        at_ms: TimeValue | None = None,
+        at_s: TimeValue | None = None,
+    ) -> CAN:
+        """Schedule one standard CAN data frame."""
+        configuration = self._test.configuration.for_channel(self._identity)
+        if not isinstance(configuration, CANConfiguration):
+            raise ConfigurationError(
+                f"CAN channel {self.channel} must be configured before adding stimuli"
+            )
+        if not isinstance(frame_id, int) or isinstance(frame_id, bool):
+            raise TypeError("frame_id must be an integer")
+        if not 0 <= frame_id <= 0x7FF:
+            raise ValueError("frame_id must be an 11-bit standard CAN identifier")
+        payload = _bytes(data)
+        if len(payload) > 8:
+            raise ValueError("CAN data must contain at most 8 bytes")
+        timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
+        self._test._schedule(
+            lambda instruction_id: CANTransmitInstruction(
+                instruction_id=instruction_id,
+                timestamp=timestamp,
+                channel=self._identity,
+                frame_id=frame_id,
+                data=payload,
+            )
+        )
+        return self
+
+
 class SPI(_ChannelHandle):
     """A reusable handle for one SPI channel."""
 
@@ -604,8 +683,7 @@ class UART(_ChannelHandle):
         _require_enum(length, UARTLengthBits, name="length")
         _require_enum(stop, UARTStopBits, name="stop")
         baud = _positive_integer(baud_hz, name="baud_hz")
-        if baud > 921_600:
-            raise ValueError("baud_hz must not exceed 921600")
+
         self._test._configure_channel(
             self._identity,
             UARTConfiguration(
@@ -664,11 +742,38 @@ class UART(_ChannelHandle):
         return self
 
 
-class DigitalInputExpectation:
+class _ExpectationBuilder:
+    """Shared grouping metadata for one peripheral expectation builder."""
+
+    def __init__(
+        self,
+        test: Test,
+        channel: _ChannelHandle,
+        *,
+        group_id: int = DEFAULT_ASSERTION_GROUP_ID,
+    ) -> None:
+        self._test = test
+        self._expectation_channel = channel
+        self._group_id = group_id
+
+    def _add_assertion(
+        self,
+        factory: Callable[[int], AssertionType],
+    ) -> AssertionType:
+        return self._test._add_assertion(factory, group_id=self._group_id)
+
+
+class DigitalInputExpectation(_ExpectationBuilder):
     """Builder for assertions over one digital input's returned time series."""
 
-    def __init__(self, test: Test, digital_input: DigitalInput) -> None:
-        self._test = test
+    def __init__(
+        self,
+        test: Test,
+        digital_input: DigitalInput,
+        *,
+        group_id: int = DEFAULT_ASSERTION_GROUP_ID,
+    ) -> None:
+        super().__init__(test, digital_input, group_id=group_id)
         self._input = digital_input
 
     def high(
@@ -707,7 +812,7 @@ class DigitalInputExpectation:
             milliseconds=_optional_pair(from_ms, until_ms, names="from_ms and until_ms"),
             seconds=_optional_pair(from_s, until_s, names="from_s and until_s"),
         )
-        self._test._add_assertion(
+        self._add_assertion(
             lambda assertion_id: DigitalInputRemainHighAssertion(
                 assertion_id=assertion_id,
                 channel=self._input.identity,
@@ -733,7 +838,7 @@ class DigitalInputExpectation:
             milliseconds=_optional_pair(from_ms, until_ms, names="from_ms and until_ms"),
             seconds=_optional_pair(from_s, until_s, names="from_s and until_s"),
         )
-        self._test._add_assertion(
+        self._add_assertion(
             lambda assertion_id: DigitalInputRemainLowAssertion(
                 assertion_id=assertion_id,
                 channel=self._input.identity,
@@ -762,7 +867,7 @@ class DigitalInputExpectation:
             milliseconds=between_ms,
             seconds=between_s,
         )
-        self._test._add_assertion(
+        self._add_assertion(
             lambda assertion_id: DigitalInputTransitionAssertion(
                 assertion_id=assertion_id,
                 channel=self._input.identity,
@@ -783,7 +888,7 @@ class DigitalInputExpectation:
         at_s: TimeValue | None,
     ) -> DigitalInputExpectation:
         timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
-        self._test._add_assertion(
+        self._add_assertion(
             lambda assertion_id: DigitalInputPointAssertion(
                 assertion_id=assertion_id,
                 channel=self._input.identity,
@@ -794,11 +899,17 @@ class DigitalInputExpectation:
         return self
 
 
-class PwmInputExpectation:
+class PwmInputExpectation(_ExpectationBuilder):
     """Builder for assertions over one PWM input's returned measurements."""
 
-    def __init__(self, test: Test, pwm_input: PwmInput) -> None:
-        self._test = test
+    def __init__(
+        self,
+        test: Test,
+        pwm_input: PwmInput,
+        *,
+        group_id: int = DEFAULT_ASSERTION_GROUP_ID,
+    ) -> None:
+        super().__init__(test, pwm_input, group_id=group_id)
         self._input = pwm_input
 
     def period_near(
@@ -814,7 +925,7 @@ class PwmInputExpectation:
         period = _positive_integer(period_ns, name="period_ns")
         tolerance = _non_negative_integer(tolerance_ns, name="tolerance_ns")
         timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
-        self._test._add_assertion(
+        self._add_assertion(
             lambda assertion_id: PwmInputPeriodNearAssertion(
                 assertion_id=assertion_id,
                 channel=self._input.identity,
@@ -838,7 +949,7 @@ class PwmInputExpectation:
         frequency = _positive_number(frequency_hz, name="frequency_hz")
         tolerance = _non_negative_number(tolerance_hz, name="tolerance_hz")
         timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
-        self._test._add_assertion(
+        self._add_assertion(
             lambda assertion_id: PwmInputFrequencyNearAssertion(
                 assertion_id=assertion_id,
                 channel=self._input.identity,
@@ -862,7 +973,7 @@ class PwmInputExpectation:
         duty = _duty_cycle(duty_cycle, name="duty_cycle")
         tolerance = _duty_cycle(duty_cycle_tolerance, name="duty_cycle_tolerance")
         timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
-        self._test._add_assertion(
+        self._add_assertion(
             lambda assertion_id: PwmInputDutyCycleNearAssertion(
                 assertion_id=assertion_id,
                 channel=self._input.identity,
@@ -893,7 +1004,7 @@ class PwmInputExpectation:
         duty = _duty_cycle(duty_cycle, name="duty_cycle")
         duty_tolerance = _duty_cycle(duty_cycle_tolerance, name="duty_cycle_tolerance")
         timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
-        self._test._add_assertion(
+        self._add_assertion(
             lambda assertion_id: PwmInputWaveformNearAssertion(
                 assertion_id=assertion_id,
                 channel=self._input.identity,
@@ -930,7 +1041,7 @@ class PwmInputExpectation:
             from_s=from_s,
             until_s=until_s,
         )
-        self._test._add_assertion(
+        self._add_assertion(
             lambda assertion_id: PwmInputFrequencyRemainWithinAssertion(
                 assertion_id=assertion_id,
                 channel=self._input.identity,
@@ -970,7 +1081,7 @@ class PwmInputExpectation:
             from_s=from_s,
             until_s=until_s,
         )
-        self._test._add_assertion(
+        self._add_assertion(
             lambda assertion_id: PwmInputDutyCycleRemainWithinAssertion(
                 assertion_id=assertion_id,
                 channel=self._input.identity,
@@ -999,11 +1110,17 @@ class PwmInputExpectation:
         )
 
 
-class AnalogueInputExpectation:
+class AnalogueInputExpectation(_ExpectationBuilder):
     """Builder for assertions over one analogue input's returned microvolt samples."""
 
-    def __init__(self, test: Test, analogue_input: AnalogueInput) -> None:
-        self._test = test
+    def __init__(
+        self,
+        test: Test,
+        analogue_input: AnalogueInput,
+        *,
+        group_id: int = DEFAULT_ASSERTION_GROUP_ID,
+    ) -> None:
+        super().__init__(test, analogue_input, group_id=group_id)
         self._input = analogue_input
 
     def near(
@@ -1019,7 +1136,7 @@ class AnalogueInputExpectation:
         target_uv = _volts_to_microvolts(target_v, name="target_v")
         tolerance_uv = _non_negative_microvolts(tolerance_v, name="tolerance_v")
         timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
-        self._test._add_assertion(
+        self._add_assertion(
             lambda assertion_id: AnalogueInputNearAssertion(
                 assertion_id=assertion_id,
                 channel=self._input.identity,
@@ -1042,7 +1159,7 @@ class AnalogueInputExpectation:
         """Expect a voltage to be within an inclusive band at one time."""
         minimum_uv, maximum_uv = _voltage_bounds(minimum_v, maximum_v)
         timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
-        self._test._add_assertion(
+        self._add_assertion(
             lambda assertion_id: AnalogueInputWithinAssertion(
                 assertion_id=assertion_id,
                 channel=self._input.identity,
@@ -1075,7 +1192,7 @@ class AnalogueInputExpectation:
             from_s=from_s,
             until_s=until_s,
         )
-        self._test._add_assertion(
+        self._add_assertion(
             lambda assertion_id: AnalogueInputRemainWithinAssertion(
                 assertion_id=assertion_id,
                 channel=self._input.identity,
@@ -1108,7 +1225,7 @@ class AnalogueInputExpectation:
             from_s=from_s,
             until_s=until_s,
         )
-        self._test._add_assertion(
+        self._add_assertion(
             lambda assertion_id: AnalogueInputRemainAboveAssertion(
                 assertion_id=assertion_id,
                 channel=self._input.identity,
@@ -1140,7 +1257,7 @@ class AnalogueInputExpectation:
             from_s=from_s,
             until_s=until_s,
         )
-        self._test._add_assertion(
+        self._add_assertion(
             lambda assertion_id: AnalogueInputRemainBelowAssertion(
                 assertion_id=assertion_id,
                 channel=self._input.identity,
@@ -1168,12 +1285,17 @@ class AnalogueInputExpectation:
         )
 
 
-
-class UARTExpectation:
+class UARTExpectation(_ExpectationBuilder):
     """Builder for assertions over received UART communication data."""
 
-    def __init__(self, test: Test, uart: UART) -> None:
-        self._test = test
+    def __init__(
+        self,
+        test: Test,
+        uart: UART,
+        *,
+        group_id: int = DEFAULT_ASSERTION_GROUP_ID,
+    ) -> None:
+        super().__init__(test, uart, group_id=group_id)
         self._uart = uart
 
     def receive(
@@ -1194,7 +1316,7 @@ class UARTExpectation:
             milliseconds=_optional_pair(from_ms, until_ms, names="from_ms and until_ms"),
             seconds=_optional_pair(from_s, until_s, names="from_s and until_s"),
         )
-        self._test._add_assertion(
+        self._add_assertion(
             lambda assertion_id: UARTReceiveAssertion(
                 assertion_id=assertion_id,
                 channel=self._uart.identity,
@@ -1232,11 +1354,17 @@ class UARTExpectation:
         )
 
 
-class SPIExpectation:
+class SPIExpectation(_ExpectationBuilder):
     """Builder for assertions over received SPI communication data."""
 
-    def __init__(self, test: Test, spi: SPI) -> None:
-        self._test = test
+    def __init__(
+        self,
+        test: Test,
+        spi: SPI,
+        *,
+        group_id: int = DEFAULT_ASSERTION_GROUP_ID,
+    ) -> None:
+        super().__init__(test, spi, group_id=group_id)
         self._spi = spi
 
     def receive(
@@ -1257,7 +1385,7 @@ class SPIExpectation:
             milliseconds=_optional_pair(from_ms, until_ms, names="from_ms and until_ms"),
             seconds=_optional_pair(from_s, until_s, names="from_s and until_s"),
         )
-        self._test._add_assertion(
+        self._add_assertion(
             lambda assertion_id: SPIReceiveAssertion(
                 assertion_id=assertion_id,
                 channel=self._spi.identity,
@@ -1269,11 +1397,68 @@ class SPIExpectation:
         return self
 
 
-class I2CExpectation:
+class CANExpectation(_ExpectationBuilder):
+    """Builder for assertions over received CAN frame payloads."""
+
+    def __init__(
+        self,
+        test: Test,
+        can: CAN,
+        *,
+        group_id: int = DEFAULT_ASSERTION_GROUP_ID,
+    ) -> None:
+        super().__init__(test, can, group_id=group_id)
+        self._can = can
+
+    def receive(
+        self,
+        *,
+        frame_id: int,
+        data: bytes,
+        from_tick: int | None = None,
+        until_tick: int | None = None,
+        from_ms: TimeValue | None = None,
+        until_ms: TimeValue | None = None,
+        from_s: TimeValue | None = None,
+        until_s: TimeValue | None = None,
+    ) -> CANExpectation:
+        """Expect a CAN payload within a half-open time range."""
+        if not isinstance(frame_id, int) or isinstance(frame_id, bool):
+            raise TypeError("frame_id must be an integer")
+        if not 0 <= frame_id <= 0x7FF:
+            raise ValueError("frame_id must be an 11-bit standard CAN identifier")
+        payload = _bytes(data)
+        if len(payload) > 8:
+            raise ValueError("CAN data must contain at most 8 bytes")
+        expected_frame = struct.pack("<HB8sB", frame_id, len(payload), payload, 0)
+        start, end = self._test._time_range(
+            ticks=_optional_pair(from_tick, until_tick, names="from_tick and until_tick"),
+            milliseconds=_optional_pair(from_ms, until_ms, names="from_ms and until_ms"),
+            seconds=_optional_pair(from_s, until_s, names="from_s and until_s"),
+        )
+        self._add_assertion(
+            lambda assertion_id: CANReceiveAssertion(
+                assertion_id=assertion_id,
+                channel=self._can.identity,
+                from_tick=start,
+                until_tick=end,
+                expected_payload=expected_frame,
+            )
+        )
+        return self
+
+
+class I2CExpectation(_ExpectationBuilder):
     """Builder for assertions over received I2C communication data."""
 
-    def __init__(self, test: Test, i2c: I2C) -> None:
-        self._test = test
+    def __init__(
+        self,
+        test: Test,
+        i2c: I2C,
+        *,
+        group_id: int = DEFAULT_ASSERTION_GROUP_ID,
+    ) -> None:
+        super().__init__(test, i2c, group_id=group_id)
         self._i2c = i2c
 
     def receive(
@@ -1294,7 +1479,7 @@ class I2CExpectation:
             milliseconds=_optional_pair(from_ms, until_ms, names="from_ms and until_ms"),
             seconds=_optional_pair(from_s, until_s, names="from_s and until_s"),
         )
-        self._test._add_assertion(
+        self._add_assertion(
             lambda assertion_id: I2CReceiveAssertion(
                 assertion_id=assertion_id,
                 channel=self._i2c.identity,
@@ -1304,6 +1489,48 @@ class I2CExpectation:
             )
         )
         return self
+
+
+class AssertionGroup:
+    """User-facing context that groups stimuli and assertions."""
+
+    def __init__(self, test: Test, definition: AssertionGroupDefinition) -> None:
+        self._test = test
+        self._definition = definition
+
+    @property
+    def group_id(self) -> int:
+        """Return the test-local sequential group identifier."""
+        return self._definition.group_id
+
+    @property
+    def name(self) -> str:
+        """Return the report-facing group name."""
+        return self._definition.name
+
+    def __enter__(self) -> AssertionGroup:
+        """Make this group active for stimuli and assertions in the block."""
+        self._test._enter_group(self.group_id)
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        """Restore ungrouped definition building after the block."""
+        self._test._leave_group(self.group_id)
+
+    def expect(
+        self,
+        channel: DigitalInput | PwmInput | AnalogueInput | UART | SPI | CAN | I2C,
+    ) -> (
+        DigitalInputExpectation
+        | PwmInputExpectation
+        | AnalogueInputExpectation
+        | UARTExpectation
+        | SPIExpectation
+        | CANExpectation
+        | I2CExpectation
+    ):
+        """Begin an assertion assigned to this group."""
+        return self._test._expect(channel, group_id=self.group_id)
 
 
 class Test:
@@ -1319,6 +1546,15 @@ class Test:
         self._test_configuration_set = False
         self._instructions = InstructionList()
         self._assertions = AssertionList()
+        default_group = AssertionGroupDefinition(
+            group_id=DEFAULT_ASSERTION_GROUP_ID,
+            name=DEFAULT_ASSERTION_GROUP_NAME,
+        )
+        self._assertion_groups = [default_group]
+        self._assertion_group_handles = {default_group.name: AssertionGroup(self, default_group)}
+        self._active_group_id: int | None = None
+        self._instruction_group_ids: dict[int, int] = {}
+        self._channel_names: dict[Channel, str] = {}
         self._next_instruction_id = 0
         self._next_assertion_id = 0
         self._handles: dict[tuple[ChannelKind, int], _ChannelHandle] = {}
@@ -1348,6 +1584,11 @@ class Test:
     def assertions(self) -> AssertionList:
         """Return the host-side assertion collection."""
         return self._assertions
+
+    @property
+    def assertion_groups(self) -> tuple[AssertionGroupDefinition, ...]:
+        """Return assertion group definitions in creation order."""
+        return tuple(self._assertion_groups)
 
     @property
     def is_compiled(self) -> bool:
@@ -1413,6 +1654,34 @@ class Test:
         """Return a stable UART channel handle."""
         return self._handle(ChannelKind.UART, channel, UART)
 
+    def can(self, *, channel: int) -> CAN:
+        """Return a stable CAN channel handle."""
+        return self._handle(ChannelKind.CAN, channel, CAN)
+
+    def assertion_group(self, name: str) -> AssertionGroup:
+        """Return a named group, creating it on first use.
+
+        Prefer :meth:`group` for new definitions. This name remains as a
+        compatibility alias for explicitly grouped assertions.
+        """
+        return self.group(name)
+
+    def group(self, name: str) -> AssertionGroup:
+        """Return a context that groups stimuli and assertions by intent."""
+        self._ensure_mutable()
+        group_name = _non_blank_text(name, name="name")
+        existing = self._assertion_group_handles.get(group_name)
+        if existing is not None:
+            return existing
+        definition = AssertionGroupDefinition(
+            group_id=len(self._assertion_groups),
+            name=group_name,
+        )
+        group = AssertionGroup(self, definition)
+        self._assertion_groups.append(definition)
+        self._assertion_group_handles[group_name] = group
+        return group
+
     @overload
     def expect(self, channel: DigitalInput) -> DigitalInputExpectation: ...
 
@@ -1429,31 +1698,66 @@ class Test:
     def expect(self, channel: SPI) -> SPIExpectation: ...
 
     @overload
+    def expect(self, channel: CAN) -> CANExpectation: ...
+
+    @overload
     def expect(self, channel: I2C) -> I2CExpectation: ...
 
     def expect(
         self,
-        channel: DigitalInput | PwmInput | AnalogueInput | UART | SPI | I2C,
-    ) -> DigitalInputExpectation | PwmInputExpectation | AnalogueInputExpectation | UARTExpectation | SPIExpectation | I2CExpectation:
+        channel: DigitalInput | PwmInput | AnalogueInput | UART | SPI | CAN | I2C,
+    ) -> (
+        DigitalInputExpectation
+        | PwmInputExpectation
+        | AnalogueInputExpectation
+        | UARTExpectation
+        | SPIExpectation
+        | CANExpectation
+        | I2CExpectation
+    ):
         """Begin a host-side assertion for a supported peripheral channel."""
+        group_id = (
+            DEFAULT_ASSERTION_GROUP_ID
+            if self._active_group_id is None
+            else self._active_group_id
+        )
+        return self._expect(channel, group_id=group_id)
+
+    def _expect(
+        self,
+        channel: DigitalInput | PwmInput | AnalogueInput | UART | SPI | CAN | I2C,
+        *,
+        group_id: int,
+    ) -> (
+        DigitalInputExpectation
+        | PwmInputExpectation
+        | AnalogueInputExpectation
+        | UARTExpectation
+        | SPIExpectation
+        | CANExpectation
+        | I2CExpectation
+    ):
         self._ensure_mutable()
-        if not isinstance(channel, (DigitalInput, PwmInput, AnalogueInput, UART, SPI, I2C)):
+        if not isinstance(channel, (DigitalInput, PwmInput, AnalogueInput, UART, SPI, CAN, I2C)):
             raise TypeError(
-                "expect() supports digital, PWM, analogue, UART, SPI, or I2C handles from this Test"
+                "expect() supports digital, PWM, analogue, UART, SPI, CAN, or I2C "
+                "handles from this Test"
             )
         if channel._test is not self:
             raise TypeError("expect() requires a channel handle from this Test")
         if isinstance(channel, DigitalInput):
-            return DigitalInputExpectation(self, channel)
+            return DigitalInputExpectation(self, channel, group_id=group_id)
         if isinstance(channel, PwmInput):
-            return PwmInputExpectation(self, channel)
+            return PwmInputExpectation(self, channel, group_id=group_id)
         if isinstance(channel, AnalogueInput):
-            return AnalogueInputExpectation(self, channel)
+            return AnalogueInputExpectation(self, channel, group_id=group_id)
         if isinstance(channel, UART):
-            return UARTExpectation(self, channel)
+            return UARTExpectation(self, channel, group_id=group_id)
         if isinstance(channel, SPI):
-            return SPIExpectation(self, channel)
-        return I2CExpectation(self, channel)
+            return SPIExpectation(self, channel, group_id=group_id)
+        if isinstance(channel, CAN):
+            return CANExpectation(self, channel, group_id=group_id)
+        return I2CExpectation(self, channel, group_id=group_id)
 
     def compile(self) -> CompiledTestIR:
         """Validate, snapshot, and freeze this test definition."""
@@ -1464,6 +1768,9 @@ class Test:
                 configuration=self._configuration,
                 instructions=self._instructions,
                 assertions=self._assertions,
+                assertion_groups=self._assertion_groups,
+                channel_names=self._channel_names,
+                instruction_group_ids=self._instruction_group_ids,
             )
         return self._compiled_plan
 
@@ -1519,16 +1826,59 @@ class Test:
         instruction = factory(self._next_instruction_id)
         self._require_configured_channel(instruction.channel, usage="stimuli")
         self._instructions._append(instruction)
+        if self._active_group_id is not None:
+            self._instruction_group_ids[instruction.instruction_id] = self._active_group_id
         self._next_instruction_id += 1
         return instruction
 
-    def _add_assertion(self, factory: Callable[[int], AssertionType]) -> AssertionType:
+    def _enter_group(self, group_id: int) -> None:
+        self._ensure_mutable()
+        if self._active_group_id is not None:
+            active_name = self._assertion_groups[self._active_group_id].name
+            requested_name = self._assertion_groups[group_id].name
+            raise ConfigurationError(
+                f"Cannot enter group {requested_name!r} while group {active_name!r} is active; "
+                "nested groups are not supported"
+            )
+        self._active_group_id = group_id
+
+    def _leave_group(self, group_id: int) -> None:
+        if self._active_group_id != group_id:
+            raise ConfigurationError("Test group context exited out of order")
+        self._active_group_id = None
+
+    def _add_assertion(
+        self,
+        factory: Callable[[int], AssertionType],
+        *,
+        group_id: int = DEFAULT_ASSERTION_GROUP_ID,
+    ) -> AssertionType:
         self._ensure_mutable()
         assertion = factory(self._next_assertion_id)
+        assertion = replace(assertion, group_id=group_id)
         self._require_configured_channel(assertion.channel, usage="assertions")
         self._assertions._append(assertion)
         self._next_assertion_id += 1
         return assertion
+
+    def _name_channel(self, channel: Channel, name: str) -> None:
+        self._ensure_mutable()
+        channel_name = _non_blank_text(name, name="name")
+        current = self._channel_names.get(channel)
+        if current is not None and current != channel_name:
+            raise ConfigurationError(
+                f"{channel.kind.value} channel {channel.index} is already named {current!r}"
+            )
+        owner = next(
+            (item for item, value in self._channel_names.items() if value == channel_name),
+            None,
+        )
+        if owner is not None and owner != channel:
+            raise ConfigurationError(f"Peripheral name {channel_name!r} is already in use")
+        self._channel_names[channel] = channel_name
+
+    def _channel_name(self, channel: Channel) -> str:
+        return self._channel_names.get(channel, f"{channel.kind.value}[{channel.index}]")
 
     def _require_configured_channel(self, channel: Channel, *, usage: str) -> None:
         configuration = self._configuration.for_channel(channel)
@@ -1547,6 +1897,14 @@ class Test:
 def _require_enum(value: object, enum_type: type[object], *, name: str) -> None:
     if not isinstance(value, enum_type):
         raise TypeError(f"{name} must be a {enum_type.__name__}")
+
+
+def _non_blank_text(value: object, *, name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    if not value.strip():
+        raise ValueError(f"{name} must be non-empty")
+    return value
 
 
 def _number(value: int | float, *, name: str) -> float:

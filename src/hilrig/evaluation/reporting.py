@@ -37,9 +37,41 @@ def as_evaluation_report(report: EvaluationReport) -> dict[str, object]:
             "inconclusive_count": report.inconclusive_count,
             "warnings": list(report.warnings),
         },
+        "assertion_groups": [
+            {
+                "group_id": group.group_id,
+                "name": group.name,
+                "verdict": group.verdict.value,
+                "passed_count": group.passed_count,
+                "failed_count": group.failed_count,
+                "inconclusive_count": group.inconclusive_count,
+                "stimulus_ids": [stimulus.instruction_id for stimulus in group.stimuli],
+                "assertion_ids": [result.assertion_id for result in group.assertion_results],
+            }
+            for group in report.assertion_groups
+        ],
+        "stimuli": [
+            {
+                "instruction_id": stimulus.instruction_id,
+                "group_id": stimulus.group_id,
+                "group_name": stimulus.group_name,
+                "subject_name": stimulus.subject_name,
+                "tick": stimulus.tick,
+                "time_ns": stimulus.time_ns,
+                "peripheral": stimulus.peripheral,
+                "channel": stimulus.channel,
+                "operation": stimulus.operation,
+                "arguments": dict(stimulus.arguments),
+                "message": stimulus.message,
+            }
+            for stimulus in report.stimuli
+        ],
         "assertions": [
             {
                 "assertion_id": result.assertion_id,
+                "group_id": result.group_id,
+                "group_name": result.group_name,
+                "subject_name": result.subject_name,
                 "verdict": result.verdict.value,
                 "peripheral": result.peripheral,
                 "channel": result.channel,
@@ -100,29 +132,62 @@ def render_evaluation_report_markdown(report: EvaluationReport) -> str:
         f"- Failed: {report.failed_count}",
         f"- Inconclusive: {report.inconclusive_count}",
         "",
-        "## Assertion results",
+        "## Assertion groups",
         "",
-        "| ID | Verdict | Assertion | Channel | Tick/window | Summary |",
-        "|---:|---|---|---:|---|---|",
     ]
-    if report.assertion_results:
-        lines.extend(
-            "| "
-            f"{result.assertion_id} | {result.verdict.value.upper()} | "
-            f"{_cell(result.peripheral)}.{_cell(result.assertion)} | {result.channel} | "
-            f"{_tick_window(result.evaluated_from_tick, result.evaluated_until_tick)} | "
-            f"{_cell(result.message)} |"
-            for result in report.assertion_results
-        )
+    if report.assertion_groups:
+        for group in report.assertion_groups:
+            lines.extend(
+                [
+                    f"### {_heading(group.name)}: {group.verdict.value.upper()}",
+                    "",
+                ]
+            )
+            if group.stimuli:
+                lines.extend(
+                    [
+                        "**Commanded stimuli**",
+                        "",
+                        "| Instruction | Time | Statement |",
+                        "|---:|---|---|",
+                    ]
+                )
+                lines.extend(
+                    f"| {stimulus.instruction_id} | "
+                    f"{_stimulus_time(stimulus.tick, stimulus.time_ns)} | "
+                    f"{_cell(stimulus.message)} |"
+                    for stimulus in group.stimuli
+                )
+                lines.append("")
+            lines.extend(
+                [
+                    "**Assertions**",
+                    "",
+                    "| ID | Verdict | Subject | Assertion | Tick/window | Summary |",
+                    "|---:|---|---|---|---|---|",
+                ]
+            )
+            lines.extend(
+                "| "
+                f"{result.assertion_id} | {result.verdict.value.upper()} | "
+                f"{_cell(result.subject_name)} | {_cell(result.assertion)} | "
+                f"{_tick_window(result.evaluated_from_tick, result.evaluated_until_tick)} | "
+                f"{_cell(result.message)} |"
+                for result in group.assertion_results
+            )
+            lines.append("")
     else:
-        lines.append("| - | INCONCLUSIVE | No assertions | - | - | Nothing to evaluate. |")
+        lines.append("No assertions were evaluated.")
 
+    lines.extend(["", "## Assertion details"])
     for result in report.assertion_results:
         lines.extend(
             [
                 "",
                 f"### Assertion {result.assertion_id}: {result.verdict.value.upper()}",
                 "",
+                f"- Group: `{result.group_name}`",
+                f"- Subject: `{result.subject_name}`",
                 f"- Definition: `{result.peripheral}[{result.channel}].{result.assertion}`",
                 "- Tick/window: "
                 f"`{_tick_window(result.evaluated_from_tick, result.evaluated_until_tick)}`",
@@ -147,6 +212,14 @@ def render_evaluation_report_markdown(report: EvaluationReport) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _stimulus_time(tick: int, time_ns: int) -> str:
+    if time_ns % 1_000_000 == 0:
+        return f"tick {tick} ({time_ns // 1_000_000} ms)"
+    if time_ns % 1_000 == 0:
+        return f"tick {tick} ({time_ns // 1_000} µs)"
+    return f"tick {tick} ({time_ns} ns)"
+
+
 def write_evaluation_report_markdown(
     report: EvaluationReport,
     path: str | Path,
@@ -167,6 +240,10 @@ def _tick_window(from_tick: int, until_tick: int) -> str:
 
 def _cell(value: str) -> str:
     return value.replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
+def _heading(value: str) -> str:
+    return value.replace("\r", " ").replace("\n", " ").strip()
 
 
 def _format_fields(values: Mapping[str, EvaluationScalar]) -> str:
