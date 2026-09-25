@@ -15,10 +15,113 @@ class PeripheralVoltage(IntEnum):
     V_24V = 4
 
 
+class BusRole(IntEnum):
+    INVALID = 0
+    MASTER = 1
+    SLAVE = 2
+
+
+class SPIDataWidth(IntEnum):
+    INVALID = 0
+    BITS_8 = 1
+    BITS_16 = 2
+
+
+class SPIBitOrder(IntEnum):
+    INVALID = 0
+    MSB_FIRST = 1
+    LSB_FIRST = 2
+
+
+class SPIClockPolarity(IntEnum):
+    INVALID = 0
+    IDLE_LOW = 1
+    IDLE_HIGH = 2
+
+
+class SPIClockPhase(IntEnum):
+    INVALID = 0
+    FIRST_EDGE = 1
+    SECOND_EDGE = 2
+
+
+class UARTElectricalMode(IntEnum):
+    INVALID = 0
+    TTL_3V3 = 1
+    TTL_5V = 2
+    RS232 = 3
+
+
+class UARTWordLength(IntEnum):
+    INVALID = 0
+    BITS_8 = 1
+    BITS_9 = 2
+
+
+class UARTParity(IntEnum):
+    INVALID = 0
+    NONE = 1
+    EVEN = 2
+    ODD = 3
+
+
+class UARTStopBits(IntEnum):
+    INVALID = 0
+    BITS_1 = 1
+    BITS_2 = 2
+
+
 class ResultCondition(IntEnum):
     OK = 0
     PARTIAL = 1
     EXECUTION_PROBLEM = 2
+
+
+class PeripheralType(IntEnum):
+    INVALID = 0
+    DIGITAL_INPUT = 1
+    DIGITAL_OUTPUT = 2
+    ANALOG_INPUT = 3
+    ANALOG_OUTPUT = 4
+    PWM_INPUT = 5
+    PWM_OUTPUT = 6
+    UART = 16
+    SPI = 17
+    I2C = 18
+    CAN = 19
+    RESERVED = 255
+
+
+@dataclass(frozen=True)
+class LogicalOperation:
+    peripheral_type: PeripheralType
+    channel: int
+    payload: bytes
+
+
+@dataclass(frozen=True)
+class CapturedRecord:
+    peripheral_type: PeripheralType
+    channel: int
+    data: bytes
+
+
+@dataclass(frozen=True)
+class UpdateInstruction:
+    test_id: TestId
+    tick_number: int = 0
+    flags: int = 0
+    operations: tuple[LogicalOperation, ...] = ()
+
+
+@dataclass(frozen=True)
+class VariableTestResult:
+    test_id: TestId
+    tick_number: int = 0
+    condition: ResultCondition = ResultCondition.OK
+    flags: int = 0
+    problem_detail: int = 0
+    records: tuple[CapturedRecord, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -28,7 +131,7 @@ class ProtocolVersion:
     patch: int
 
 
-PROTOCOL_VERSION = ProtocolVersion(0, 2, 0)
+PROTOCOL_VERSION = ProtocolVersion(0, 3, 0)
 
 
 class ControlCommand(IntEnum):
@@ -156,6 +259,12 @@ class ExecutionControl:
 
 
 @dataclass(frozen=True)
+class FinalizeTestUpload:
+    test_id: TestId
+    flags: int = 0
+
+
+@dataclass(frozen=True)
 class GlobalControl:
     command: GlobalControlCommand
     flags: int = 0
@@ -226,6 +335,42 @@ class PWMOutputConfig:
 
 
 @dataclass(frozen=True)
+class CANConfig:
+    enabled: bool = False
+    bit_rate: int = 0
+    filter_id: int = 0
+    filter_mask: int = 0
+
+
+@dataclass(frozen=True)
+class SPIConfig:
+    enabled: bool = False
+    bit_rate: int = 0
+    role: BusRole = BusRole.INVALID
+    data_width: SPIDataWidth = SPIDataWidth.INVALID
+    bit_order: SPIBitOrder = SPIBitOrder.INVALID
+    clock_polarity: SPIClockPolarity = SPIClockPolarity.INVALID
+    clock_phase: SPIClockPhase = SPIClockPhase.INVALID
+
+
+@dataclass(frozen=True)
+class UARTConfig:
+    enabled: bool = False
+    baud_rate: int = 0
+    electrical_mode: UARTElectricalMode = UARTElectricalMode.INVALID
+    word_length: UARTWordLength = UARTWordLength.INVALID
+    parity: UARTParity = UARTParity.INVALID
+    stop_bits: UARTStopBits = UARTStopBits.INVALID
+    rx_enabled: bool = False
+    tx_enabled: bool = False
+
+
+@dataclass(frozen=True)
+class I2CConfig:
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
 class DigitalOutputValue:
     high: bool = False
 
@@ -269,6 +414,10 @@ class TestConfiguration:
     analog_out: tuple[AnalogOutputConfig, ...] = (AnalogOutputConfig(),) * 6
     pwm_in: tuple[PWMInputConfig, ...] = (PWMInputConfig(),) * 2
     pwm_out: tuple[PWMOutputConfig, ...] = (PWMOutputConfig(),) * 2
+    can: tuple[CANConfig, ...] = (CANConfig(),) * 2
+    spi: tuple[SPIConfig, ...] = (SPIConfig(),) * 2
+    uart: tuple[UARTConfig, ...] = (UARTConfig(),) * 2
+    i2c: tuple[I2CConfig, ...] = (I2CConfig(),) * 2
 
 
 @dataclass(frozen=True)
@@ -331,6 +480,7 @@ class FakeProtocol:
     SystemInfoRequest = SystemInfoRequest
     SystemInfoResponse = SystemInfoResponse
     ExecutionControl = ExecutionControl
+    FinalizeTestUpload = FinalizeTestUpload
     GlobalControl = GlobalControl
     ApplicationResponse = ApplicationResponse
     ApplicationErrorMessage = ApplicationErrorMessage
@@ -347,6 +497,19 @@ class FakeProtocol:
     AnalogOutputConfig = AnalogOutputConfig
     PWMInputConfig = PWMInputConfig
     PWMOutputConfig = PWMOutputConfig
+    CANConfig = CANConfig
+    SPIConfig = SPIConfig
+    UARTConfig = UARTConfig
+    I2CConfig = I2CConfig
+    BusRole = BusRole
+    SPIDataWidth = SPIDataWidth
+    SPIBitOrder = SPIBitOrder
+    SPIClockPolarity = SPIClockPolarity
+    SPIClockPhase = SPIClockPhase
+    UARTElectricalMode = UARTElectricalMode
+    UARTWordLength = UARTWordLength
+    UARTParity = UARTParity
+    UARTStopBits = UARTStopBits
     DigitalOutputValue = DigitalOutputValue
     AnalogOutputValue = AnalogOutputValue
     PWMOutputValue = PWMOutputValue
@@ -356,6 +519,11 @@ class FakeProtocol:
     TestConfiguration = TestConfiguration
     TestInstruction = TestInstruction
     TestResult = TestResult
+    PeripheralType = PeripheralType
+    LogicalOperation = LogicalOperation
+    CapturedRecord = CapturedRecord
+    UpdateInstruction = UpdateInstruction
+    VariableTestResult = VariableTestResult
     PeripheralVoltage = PeripheralVoltage
     ResultCondition = ResultCondition
     TransportStatus = TransportStatus

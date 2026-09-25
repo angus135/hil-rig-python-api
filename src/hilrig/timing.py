@@ -43,7 +43,7 @@ def resolve_time_range(
     milliseconds: TimeRange | None = None,
     seconds: TimeRange | None = None,
 ) -> tuple[int, int]:
-    """Resolve exactly one two-value time range into inclusive tick bounds."""
+    """Resolve exactly one two-value time range into half-open tick bounds."""
     supplied = sum(value is not None for value in (ticks, milliseconds, seconds))
     if supplied != 1:
         raise TimingError("Specify exactly one tick, millisecond, or second range")
@@ -67,8 +67,8 @@ def resolve_time_range(
             resolve_timestamp(frequency_mode, at_s=end),
         )
 
-    if bounds[0] > bounds[1]:
-        raise TimingError("The start of a time range must not be after its end")
+    if bounds[0] >= bounds[1]:
+        raise TimingError("The start of a time range must be before its end")
     return bounds
 
 

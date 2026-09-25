@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from hilrig.evaluation.context import EvaluationContext
-from hilrig.evaluation.models import EvaluationReport, EvaluationVerdict
+from hilrig.evaluation.models import (
+    AssertionGroupResult,
+    AssertionResult,
+    EvaluationReport,
+    EvaluationVerdict,
+    StimulusRecord,
+    immutable_evaluation_fields,
+)
 from hilrig.evaluation.registry import EVALUATOR_REGISTRY
 from hilrig.exceptions import EvaluationError, UnsupportedAssertionError
 from hilrig.results import ORIGINAL_ASSERTION_SET_ID, CapturedRunIR, CaptureStatus
@@ -28,6 +36,19 @@ class AssertionEvaluator:
 
         assertion_set = captured_run.assertion_set(assertion_set_id)
         context = EvaluationContext(captured_run)
+        group_names = {group.group_id: group.name for group in assertion_set.groups}
+        stimuli = tuple(
+            _stimulus_record(
+                stimulus,
+                group_name=(
+                    None
+                    if stimulus.group_id is None
+                    else group_names.get(stimulus.group_id, "")
+                ),
+                tick_period_ns=metadata.tick_period_ns,
+            )
+            for stimulus in assertion_set.stimuli
+        )
         results = []
         for assertion in assertion_set.assertions:
             key = (assertion.peripheral, assertion.assertion)
@@ -37,7 +58,10 @@ class AssertionEvaluator:
                     f"No evaluator is registered for {key[0]}.{key[1]} "
                     f"(assertion {assertion.assertion_id})"
                 )
-            results.append(handler(assertion, context))
+            group_name = next(
+                group.name for group in assertion_set.groups if group.group_id == assertion.group_id
+            )
+            results.append(replace(handler(assertion, context), group_name=group_name))
 
         application_errors = tuple(captured_run.iter_application_errors())
         non_recoverable_error_count = sum(not error.recoverable for error in application_errors)
@@ -54,6 +78,12 @@ class AssertionEvaluator:
             capture_status=metadata.status,
             non_recoverable_error_count=non_recoverable_error_count,
         )
+        group_results = tuple(
+            _group_result(group.group_id, group.name, stimuli, tuple(results))
+            for group in assertion_set.groups
+            if any(result.group_id == group.group_id for result in results)
+            or any(stimulus.group_id == group.group_id for stimulus in stimuli)
+        )
         return EvaluationReport(
             test_id=metadata.test_id,
             application_test_id=metadata.application_test_id,
@@ -67,6 +97,8 @@ class AssertionEvaluator:
             compiled_ir_version=assertion_set.compiled_ir_version,
             evaluated_at=datetime.now(timezone.utc).isoformat(),
             verdict=verdict,
+            assertion_groups=group_results,
+            stimuli=stimuli,
             assertion_results=tuple(results),
             warnings=warnings,
         )
@@ -100,6 +132,66 @@ def _overall_verdict(
     ):
         return EvaluationVerdict.INCONCLUSIVE
     return EvaluationVerdict.PASS
+
+
+def _group_result(
+    group_id: int,
+    name: str,
+    stimuli: tuple[StimulusRecord, ...],
+    results: tuple[AssertionResult, ...],
+) -> AssertionGroupResult:
+    members = tuple(result for result in results if result.group_id == group_id)
+    verdicts = tuple(result.verdict for result in members)
+    if EvaluationVerdict.FAIL in verdicts:
+        verdict = EvaluationVerdict.FAIL
+    elif not verdicts or EvaluationVerdict.INCONCLUSIVE in verdicts:
+        verdict = EvaluationVerdict.INCONCLUSIVE
+    else:
+        verdict = EvaluationVerdict.PASS
+    return AssertionGroupResult(
+        group_id=group_id,
+        name=name,
+        verdict=verdict,
+        stimuli=tuple(stimulus for stimulus in stimuli if stimulus.group_id == group_id),
+        assertion_results=members,
+    )
+
+
+def _stimulus_record(stimulus, *, group_name: str | None, tick_period_ns: int) -> StimulusRecord:
+    arguments = immutable_evaluation_fields(dict(stimulus.arguments))
+    return StimulusRecord(
+        instruction_id=stimulus.instruction_id,
+        group_id=stimulus.group_id,
+        group_name=group_name,
+        subject_name=stimulus.subject_name,
+        tick=stimulus.tick,
+        time_ns=stimulus.tick * tick_period_ns,
+        peripheral=stimulus.peripheral,
+        channel=stimulus.channel,
+        operation=stimulus.operation,
+        arguments=arguments,
+        message=_stimulus_message(
+            stimulus.subject_name,
+            stimulus.operation,
+            dict(stimulus.arguments),
+            stimulus.tick,
+        ),
+    )
+
+
+def _stimulus_message(
+    subject_name: str,
+    operation: str,
+    arguments: dict[str, object],
+    tick: int,
+) -> str:
+    if operation in {"write", "transmit"} and "data" in arguments:
+        return f"{subject_name} sent {arguments['data']} at tick {tick}."
+    if operation == "set_state" and "action" in arguments:
+        return f"{subject_name} was set {str(arguments['action']).lower()} at tick {tick}."
+    details = ", ".join(f"{name}={value}" for name, value in arguments.items())
+    suffix = f" ({details})" if details else ""
+    return f"{subject_name} {operation.replace('_', ' ')}{suffix} at tick {tick}."
 
 
 def _warnings(

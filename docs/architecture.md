@@ -121,7 +121,7 @@ also provides stable sorting and grouping helpers.
 
 Assertions remain separate from stimulus instructions and are intended to be evaluated
 on the host against returned time-series data. Reusable `PointAssertion` and
-`RangeAssertion` bases hold the converted point tick or inclusive tick bounds. Concrete
+`RangeAssertion` bases hold the converted point tick or half-open tick bounds. Concrete
 definitions currently cover digital states and transitions, PWM period/frequency/duty
 measurements, and analogue voltage targets, bands, and thresholds. Evaluator handlers are
 registered by the compiled `(peripheral, assertion)` operation pair, so adding a new
@@ -151,19 +151,25 @@ peripheral configurations, and chronological stimulus instructions. It omits ass
 because those are host-side operations and must not be sent to the RIG. Bytes are hex,
 test IDs are fixed-width hex, and enums are stored by symbolic member name.
 
-Compilation also derives an inclusive expected result count:
+Compilation also derives a half-open expected result count:
 
 ```text
-latest_relevant_tick = max(latest stimulus, latest assertion end, 0)
-expected_tick_count = latest_relevant_tick + frequency_hz + 1
+latest_relevant_end = max(
+    latest stimulus tick + 1,
+    latest point assertion tick + 1,
+    latest range assertion until_tick,
+    0,
+)
+expected_tick_count = latest_relevant_end + frequency_hz
 ```
 
-`frequency_hz` supplies exactly one second of settling ticks. The final `+1` represents
-tick zero: a count of 1,001 describes ticks `0..1000`, not `0..1001`. Point assertions
-use their timestamp; range assertions use `until_tick`. Assertions remain absent from
+`frequency_hz` supplies exactly one second of settling intervals. A count of 1,000
+describes ticks `0..999`. Point assertions require the interval containing their
+timestamp; range assertions already carry an exclusive `until_tick`. Assertions remain absent from
 the machine instruction list, but their latest required tick can extend this transmitted
 duration so the RIG captures enough evidence for host evaluation. The additive field
-changes the outgoing IR schema version from 1.0 to 1.1.
+originally changed the outgoing IR schema version from 1.0 to 1.1; adopting half-open
+range semantics changes it to 1.2.
 
 The human-readable `.xlsx` view contains `Test Summary`, `Configurations`,
 `Instructions`, and `Assertions` sheets. It is generated from the same compiled
@@ -203,6 +209,30 @@ state, and the merged state is emitted once for tick zero.
 - the stateless Application codec and fixed-I/O state adapter; and
 - an optional `IncomingResultAdapter` bound to a `CapturedRunBuilder`.
 
+The installed terminal application adds a deliberately thin layer above this
+connection. The main thread owns command input and immutable status rendering. A
+dedicated protocol worker thread creates and exclusively owns every
+`FixedIOProtocolConnection`, receives run, step, continue, and abort requests through
+thread-safe signals, and publishes immutable snapshots and user-facing notifications. Test files
+expose `build_test() -> Test`; they do not own protocol or artifact lifetimes.
+
+The worker supports the automatic strict workflow and an operator-stepped variant. Its
+boundary is operation-oriented rather than encoded-message-oriented: it observes public
+workflow states and releases public `UploadOperation` objects, never individual encoded
+messages. One gate release therefore covers a complete configuration, tick, or START
+operation. A future operation can contain several variable-peripheral messages followed
+by one Application Response without changing the terminal/worker threading model.
+
+The same worker also owns an exclusive persistent manual session. This path does not
+construct a `Test` or `UploadPlan`: a standalone JSON document is validated into one
+public protocol value, encoded by the Application codec, and submitted as one Transport
+payload. A normal manual send remains pending through reliable Transport delivery and a
+correlated Application Response. A Transport-only send completes on delivery
+confirmation and treats any later Application message as inbox data. Manual sessions
+can bypass System Information/version discovery, but never bypass Transport session
+establishment or reliable-delivery handling. Normal runs continue using automatic
+base-description COM discovery; manual sessions may explicitly select a COM device.
+
 The caller repeatedly invokes non-blocking `service()`. The connection retains partial
 Transport input and serial output, advances Transport with monotonic wrapped
 milliseconds, drains events/application data, and submits at most one reliable
@@ -213,11 +243,15 @@ contains one fixed instruction today and can later contain declared communicatio
 without changing the stop-and-wait state machine.
 
 Every established Transport session begins with BASIC System Information discovery and
-an exact major/minor/patch compatibility check. The response-gated sequence is Test
-Configuration, each non-consecutive sparse tick, automatic Complete Test validation,
-and optional START. IMMEDIATE queues START automatically; HOST_COMMAND waits for an
-explicit `start()` call. EXTERNAL_TRIGGER remains in the protocol-neutral IR but has no
-protocol behavior. ABORT and RESET_APPLICATION use the same single-outstanding-operation
+an exact major/minor/patch compatibility check. `UploadPlan` then supplies ordered,
+immutable operations containing their wire-message group and response-correlation
+metadata. The control-gated sequence is Test Configuration, pipelined non-consecutive sparse
+ticks (streamed without per-tick Application Response overhead), `FINALIZE_TEST_UPLOAD`, and optional START. Automatic mode preserves the
+start-mode behavior: IMMEDIATE queues START automatically and HOST_COMMAND waits for an
+explicit `start()` call. Operator-gated mode pauses configuration, every tick, and START;
+upload finalization and Complete Test acceptance remain automatic. `continue_upload()` switches the remaining plan back to
+automatic advancement without bypassing acknowledgements. EXTERNAL_TRIGGER remains in
+the protocol-neutral IR but has no protocol behavior. ABORT and RESET_APPLICATION use the same single-outstanding-operation
 mechanism. Session reset, delivery failure, response timeout, negative response, or
 correlation mismatch abandons the workflow; an upload is never blindly replayed.
 
@@ -323,7 +357,7 @@ The IR derives optional review artifacts while keeping bulk values out of JSON:
 `AssertionEvaluator` accepts a finalized `CapturedRunIR` and selects a stored assertion
 set (the immutable `original` set by default). It steps through the definitions in
 assertion-ID order. A registry maps each `(peripheral, assertion)` pair to a small handler
-for that operation. Shared query helpers provide point evidence or stream inclusive tick
+for that operation. Shared query helpers provide point evidence or stream half-open tick
 ranges while making missing ticks explicit.
 
 Each handler returns an immutable `AssertionResult` containing the verdict, expected

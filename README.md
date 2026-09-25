@@ -10,16 +10,16 @@ persistent captured-run storage, and host-side assertion evaluation with JSON an
 Markdown reports. The optional protocol integration lowers fixed Digital, Analogue,
 and PWM configuration/stimulus state through `hil-rig-protocol`, services its Transport
 over a USB CDC COM port, and stores decoded fixed Test Results in the captured-run
-database. Protocol v0.2.0 discovery, semantic Responses, Application Errors, START,
-ABORT, and RESET_APPLICATION are integrated. Variable communication messages remain
-deferred.
+database. Protocol v0.3.0 discovery, semantic Responses, upload finalization, Application
+Errors, START, ABORT, and RESET_APPLICATION are integrated. Variable communication
+messages remain deferred.
 
 ## Requirements
 
 - Python 3.12 or newer
 - Git
 
-Fixed-I/O hardware communication additionally requires `hil-rig-protocol` 0.2.0 or newer
+Fixed-I/O hardware communication additionally requires `hil-rig-protocol` 0.3.0 or newer
 and `pyserial`. Until dependency packaging is finalized, install them into the active
 environment from the adjacent protocol checkout:
 
@@ -40,6 +40,232 @@ python -m pip install -e ".[dev]"
 
 The editable install (`-e`) means changes under `src/hilrig/` are used immediately
 without reinstalling the package.
+
+## HIL-RIG terminal application
+
+The installed `hil-rig` command starts a persistent terminal application. It runs one
+test at a time on a dedicated protocol worker thread, so the terminal stays responsive
+to status and abort commands while the worker owns and services the USB connection.
+
+Start it from an activated development environment:
+
+```powershell
+hil-rig
+```
+
+It can also be started without activating the environment:
+
+```powershell
+.\.venv\Scripts\hil-rig.exe
+```
+
+A terminal-loadable Python test file must define a no-argument `build_test()` function
+that creates and returns a fresh `hilrig.Test`. The file describes the test only; the
+terminal owns compilation, connection, upload, capture, evaluation, and output files:
+
+```python
+from hilrig import FrequencyMode, LogicVoltage, StartMode, Test
+
+
+def build_test() -> Test:
+    test = Test(name="Observation test")
+    test.configure(
+        frequency_mode=FrequencyMode.HZ_1K,
+        start_mode=StartMode.IMMEDIATE,
+    )
+    test.digital_input(channel=0).configure(voltage=LogicVoltage.V3_3)
+    return test
+```
+
+Test-definition files are trusted Python code. Loading one executes its top-level code
+before `build_test()` is called. Do not run files from untrusted sources.
+
+The terminal provides these commands:
+
+```text
+help
+ports
+run <path>
+run --step <path>
+step
+continue
+status
+abort
+reset
+manual connect [COM=<n>] [--skip-system-info]
+manual send <message-file> [--transport-only]
+manual finalize <test-id>
+manual reset
+manual inbox [clear]
+manual status
+manual disconnect
+clear / cls
+quit
+```
+
+The terminal supports Tab autocompletion for commands, subcommands, and `.py`/`.json` file paths, command history navigation (Up/Down arrows and Ctrl+R), and shorthand aliases (`r` for `run`, `s` for `status`, `st` for `step`, `c` for `continue`, `p` for `ports`, `q` for `quit`).
+
+Paths containing spaces may be quoted. For example:
+
+```text
+HIL-RIG> run "C:\HIL-RIG Tests\motor-startup.py"
+Run queued: C:\HIL-RIG Tests\motor-startup.py
+
+HIL-RIG> status
+State: running
+Detail: Receiving test results (412 received).
+Results: 412/1751 ticks
+```
+
+`run` uses the strict protocol-v0.3 workflow: System Information discovery, exact
+version confirmation, correlated Application Responses for configuration and sparse
+ticks, Complete Test acceptance, START completion, and the complete ordered result
+set. `HOST_COMMAND` tests are started automatically by this automatic runner after
+upload acceptance.
+
+Use `run --step <path>` when debugging the upload/start sequence. Discovery and version
+confirmation still happen automatically. The terminal then pauses before each semantic
+operation in this order:
+
+```text
+configuration -> tick <n> -> tick <n> -> ... -> START
+```
+
+At a pause, `step` releases exactly that one operation. An operation may contain more
+than one wire message in future protocol versions; it remains one terminal step. After
+release, the worker waits for Transport delivery and the operation's correlated
+Application Response before offering the next step. After the final tick is accepted,
+the host sends `FINALIZE_TEST_UPLOAD` and waits for Complete Test acceptance
+automatically, so there is no separate operator step for it. START is always a manual
+step in stepped mode, including for tests configured with `StartMode.IMMEDIATE`.
+
+`continue` releases the currently paused operation and disables stepping for the rest
+of that run. It does not disable delivery checks, Application acknowledgements,
+correlation, or timeouts. Test results are received continuously after START; individual
+result messages are not stepped. `step` and `continue` report an error if no stepped run
+is currently paused. `status` shows the next operation while a run is waiting:
+
+```text
+HIL-RIG> run --step "examples\terminal_test.py"
+Stepped run queued: examples\terminal_test.py
+
+Paused before configuration. Enter 'step' to release it or 'continue' to finish automatically.
+HIL-RIG> step
+Step requested.
+
+Paused before tick 100. Enter 'step' to release it or 'continue' to finish automatically.
+HIL-RIG> continue
+Continue requested; the remainder will run automatically.
+```
+
+`EXTERNAL_TRIGGER` is not supported by the terminal runner.
+
+Application Error messages received during a normal or stepped run are printed as they
+arrive and retained in a bounded, run-scoped inbox. The inbox is reset when a new run is
+queued and can be inspected or cleared without interrupting the run:
+
+```text
+HIL-RIG> inbox
+HIL-RIG> inbox clear
+```
+
+`status` includes the number of retained run-inbox messages. This is separate from
+`manual inbox`, which only contains messages received by a persistent manual session.
+
+### Manual Application-message mode
+
+Manual mode is independent of test definitions, upload plans, captured-run databases,
+and evaluation. It keeps one protocol connection open so standalone JSON Application
+messages can be sent for firmware debugging.
+
+Connect using automatic COM-port discovery:
+
+```text
+HIL-RIG> manual connect
+```
+
+Or select a Windows COM port explicitly and optionally skip the Application-level
+System Information request/version check:
+
+```text
+HIL-RIG> manual connect COM=2 --skip-system-info
+```
+
+`COM=2` opens `COM2` directly. When it is omitted, the host retains its normal behavior
+of selecting the first port whose base description is exactly `USB Serial Device`.
+`--skip-system-info` does not skip COM discovery or Transport session establishment.
+
+Send one message and require both Transport delivery and its correlated Application
+Response:
+
+```text
+HIL-RIG> manual send "examples\manual_messages\instruction.json"
+```
+
+To finish the send after reliable Transport delivery without requiring an Application
+Response, add `--transport-only`:
+
+```text
+HIL-RIG> manual send "examples\manual_messages\instruction.json" --transport-only
+```
+
+Send upload finalization for an accepted instruction sequence and wait for its Complete
+Test Response:
+
+```text
+HIL-RIG> manual finalize 00112233445566778899aabbccddeeff
+```
+
+Inbound messages—including responses received after a Transport-only send—are retained
+in a bounded terminal inbox:
+
+```text
+HIL-RIG> manual inbox
+HIL-RIG> manual status
+HIL-RIG> manual disconnect
+```
+
+A manual session and a normal test run cannot own the serial connection at the same
+time. The current standalone JSON loader supports `test_configuration`,
+`test_instruction`, `execution_control`, and `global_control`. Example files are in
+[`examples/manual_messages`](examples/manual_messages). Configuration channels omitted
+from a file are disabled. Instruction outputs omitted from a file are encoded as their
+protocol zero/false values, so the JSON describes the complete emitted message rather
+than modifying a retained test definition.
+
+Each run creates a unique directory beside the test file:
+
+```text
+runs/
+`-- 20260916-184200-observation-test-<run-id>/
+    |-- test-definition.json
+    |-- test-review.xlsx
+    |-- captured-run.sqlite3
+    |-- run-manifest.json
+    |-- fixed-results.csv
+    |-- communication-results.csv
+    |-- application-errors.csv
+    |-- evaluation-report.json
+    `-- evaluation-report.md
+```
+
+The terminal prints that directory when the run finishes. An aborted run retains and
+reports any partial capture. A failed run writes `run-error.txt` when its output
+directory had already been created. After a run completes, fails, or is aborted, the
+same terminal can run another test. The initial implementation opens a fresh protocol
+connection for every run.
+
+See [`examples/terminal_test.py`](examples/terminal_test.py) for a dedicated terminal
+definition. The existing [`examples/basic_digital_test.py`](examples/basic_digital_test.py)
+also follows the contract and can either be loaded by the terminal or executed directly:
+
+```text
+HIL-RIG> run "examples\basic_digital_test.py"
+```
+
+`examples/captured_run.py` and `examples/assertion_evaluator.py` are offline
+demonstrations that fabricate captured data, so they are not terminal-loadable hardware
+test definitions. `examples/example_test.py` also retains its older standalone form.
 
 ## Current API example
 
@@ -134,6 +360,10 @@ expectation.to_transition(
     between_s=(0.1, 0.5),
 )
 ```
+
+Ranges are half-open: `from` is included and `until` is excluded. At 100 Hz,
+`from_s=3, until_s=6` evaluates result ticks `300..599`. Adjacent ranges can therefore
+share an endpoint without evaluating the same result twice.
 
 `from_state` is used because `from` is a reserved Python keyword.
 
@@ -238,6 +468,43 @@ The following assertion definitions are implemented:
 - Analogue input: voltage near a target or within a band at one point; voltage remaining
   within a band, above a threshold, or below a threshold over a range.
 
+Stimuli and assertions can be collected into named groups using a context block. Group
+verdicts use assertions only: one failed assertion fails the group, otherwise an
+inconclusive assertion makes the group inconclusive, and every assertion must pass for
+the group to pass. Stimuli are informational records of what the test commanded.
+Nested groups are not supported. The original ungrouped `test.expect(...)` form remains
+available through the implicit `Assertions` group.
+
+Peripheral handles may also be assigned an explicit report-facing name. Python local
+variable names cannot be recovered reliably, so names are declared with `named()`:
+
+```python
+UART_ch1 = (
+    test.uart(channel=0)
+    .named("UART_ch1")
+    .configure(
+        mode=UARTMode.TTL_3V3,
+        baud_hz=115_200,
+        parity=UARTParity.NONE,
+        length=UARTLengthBits.EIGHT,
+        stop=UARTStopBits.ONE,
+    )
+)
+
+with test.group("UART Tests"):
+    UART_ch1.write(data=b"PING\r\n", at_tick=100)
+    test.expect(UART_ch1).receive(
+        b"READY\r\n",
+        from_tick=100,
+        until_tick=200,
+    )
+```
+
+The compiled and captured stimulus and assertion definitions retain the group ID, group
+name, report-facing subject name, and physical peripheral/channel identity. Reports
+show commanded stimuli as statements without pass/fail verdicts, followed by the
+assertions that determine the group verdict.
+
 For example:
 
 ```python
@@ -317,6 +584,8 @@ Bulk evidence is separated by shape:
 - `communication_results` stores raw variable-length I2C, SPI, or UART payloads;
 - `application_errors` stores diagnostics;
 - `assertion_sets` identifies versioned host-side assertion snapshots;
+- `assertion_groups` stores the named groups within each assertion snapshot;
+- `stimulus_definitions` stores grouped output commands for report context;
 - `assertion_definitions` stores each compiled assertion and its scalar arguments;
 - `run_metadata` stores the logical test ID, actual Application Test ID, run ID,
   timing, provenance, counts, and capture status.
@@ -349,8 +618,10 @@ measurements. The capture database retains both the wire ID and immutable logica
 
 ## Fixed-I/O protocol and USB CDC connection
 
-`FixedIOProtocolAdapter` turns a `CompiledTestIR` and `UploadAttempt` into the public
-`hil-rig-protocol` values. Configuration arrays are always complete; unconfigured
+`FixedIOProtocolAdapter` turns a `CompiledTestIR` and `UploadAttempt` into an
+`UploadPlan` of semantic `UploadOperation` objects and the public `hil-rig-protocol`
+values. Each operation owns all its encoded messages and its expected response
+correlation. Configuration arrays are always complete; unconfigured
 channels use canonical disabled records. Communication peripheral configuration and
 instructions stay in the host IR but are deliberately not emitted yet.
 
@@ -394,7 +665,9 @@ with FixedIOProtocolConnection.connect() as connection:
 ```
 
 The connection scans `serial.tools.list_ports.comports()` and uses the first port whose
-description is exactly `USB Serial Device`. No match is an error. It opens that port as
+base description is exactly `USB Serial Device`. On Windows, pySerial may append the
+port name, such as `(COM11)`, to that description; this suffix is accepted when it
+matches the port's reported device. No match is an error. It opens that port as
 115200 baud, 8 data bits, no parity, one stop bit, no flow control, non-blocking reads,
 and with DTR/RTS disabled. The baud/line coding is explicit even if the direct USB CDC
 firmware ignores it.
@@ -405,10 +678,13 @@ commits a Transport output only after pySerial accepts every byte. Each new Tran
 session first exchanges System Information and requires an exact protocol-version
 match. Configuration and sparse tick operations then wait for both Transport delivery
 and their correlated Application Response before the next operation is submitted.
-After the final sparse tick is accepted, the connection waits for the firmware's
-Complete Test Response.
+After the final sparse tick is accepted, the connection sends `FINALIZE_TEST_UPLOAD`
+with the same Application Test ID and waits for the firmware's Complete Test Response.
 
-`IMMEDIATE` automatically queues `START`; `HOST_COMMAND` exposes `connection.start()`.
+By default, `IMMEDIATE` automatically queues `START`; `HOST_COMMAND` exposes
+`connection.start()`. Passing `advance_mode=UploadAdvanceMode.OPERATOR_GATED` to
+`queue_upload()` instead pauses configuration, each tick operation, and START behind
+`release_next_operation()`/`continue_upload()` while retaining all response checks.
 `connection.abort()` and `connection.reset_application()` send the corresponding
 response-gated controls. `EXTERNAL_TRIGGER` remains representable in the compiled IR
 but intentionally performs no protocol action. Responses are correlated by scope,
@@ -498,15 +774,19 @@ than sent to the RIG. The JSON test summary does include `expected_tick_count`, 
 calculated as:
 
 ```text
-max(latest stimulus tick, latest assertion tick/range end, 0)
-    + one second of ticks
-    + 1 for inclusive tick zero
+latest_relevant_end = max(
+    latest stimulus tick + 1,
+    latest point assertion tick + 1,
+    latest range assertion until_tick,
+    0,
+)
+expected_tick_count = latest_relevant_end + one second of ticks
 ```
 
-For example, a final event at tick 750 in 1 kHz mode produces 1,751 expected application
-results, covering ticks `0..1750`. An observation-only test in that mode produces 1,001
-results covering ticks `0..1000`. This keeps the RIG capturing long enough for host-side
-assertions even though their definitions are not transmitted. Compilation rejects an
+For example, a range ending at tick 750 in 1 kHz mode produces 1,750 expected
+application results, covering ticks `0..1749`. An observation-only test in that mode
+produces 1,000 results covering ticks `0..999`. This keeps the RIG capturing long enough
+for host-side assertions even though their definitions are not transmitted. Compilation rejects an
 expected tick count of 1,000,000 or greater so the complete test remains within the
 protocol-compatible limit.
 
@@ -547,8 +827,11 @@ python -m ruff format .
 |-- .github/workflows/ci.yml       Pull request and main-branch checks
 |-- docs/architecture.md           Model boundaries and extension guide
 |-- examples/basic_digital_test.py Small runnable example
+|-- reference.md                   Teammate-oriented repository and change guide
 |-- src/hilrig/                    Installable Python package
 |   |-- api.py                     Public Test and channel-handle API
+|   |-- runner.py                  Automatic run controller and protocol worker
+|   |-- terminal.py                Persistent `hil-rig` command shell
 |   |-- timing.py                  Exact conversion into ticks
 |   |-- compiler.py                Validation and immutable IR snapshot construction
 |   |-- exporters/                 JSON machine IR and human-readable Excel export
@@ -561,7 +844,8 @@ python -m ruff format .
 `-- pyproject.toml                 Package, dependency, and tool configuration
 ```
 
-See [docs/architecture.md](docs/architecture.md) for the current model boundaries.
+See [reference.md](reference.md) for a practical repository map and change guide, and
+[docs/architecture.md](docs/architecture.md) for the detailed model boundaries.
 
 ## Continuous integration
 

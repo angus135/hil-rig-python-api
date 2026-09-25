@@ -9,6 +9,8 @@ htmlcov/
 # Virtual environments
 .venv/
 venv/
+.python_api_venv/
+python_api_venv/
 
 # Package build output
 build/
@@ -23,3 +25,6 @@ Thumbs.db
 
 # Local temporary files
 tmp/
+
+# Generated HIL-RIG execution results
+**/runs/

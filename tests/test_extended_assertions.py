@@ -271,7 +271,7 @@ def test_compiler_represents_new_assertions_and_uses_latest_range_end() -> None:
         "minimum_uv": 4_900_000,
         "maximum_uv": 5_100_000,
     }
-    assert compiled.expected_tick_count == 1_501
+    assert compiled.expected_tick_count == 1_500
 
 
 def test_new_assertions_are_written_to_the_human_excel_view(tmp_path: Path) -> None:

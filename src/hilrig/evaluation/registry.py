@@ -1,6 +1,6 @@
 """Dispatcher registry for compiled assertion operations."""
 
-from hilrig.evaluation import analogue, digital, pwm
+from hilrig.evaluation import analogue, communication, digital, pwm
 from hilrig.evaluation.common import AssertionHandler
 
 EVALUATOR_REGISTRY: dict[tuple[str, str], AssertionHandler] = {
@@ -19,4 +19,8 @@ EVALUATOR_REGISTRY: dict[tuple[str, str], AssertionHandler] = {
     ("analogue_input", "remain_within"): analogue.evaluate_remain_within,
     ("analogue_input", "remain_above"): analogue.evaluate_remain_above,
     ("analogue_input", "remain_below"): analogue.evaluate_remain_below,
+    ("uart", "receive"): communication.evaluate_communication_receive,
+    ("spi", "receive"): communication.evaluate_communication_receive,
+    ("i2c", "receive"): communication.evaluate_communication_receive,
+    ("can", "receive"): communication.evaluate_communication_receive,
 }

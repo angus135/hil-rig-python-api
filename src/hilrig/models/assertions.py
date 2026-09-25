@@ -6,13 +6,25 @@ from dataclasses import dataclass
 from hilrig.models.channels import Channel
 from hilrig.models.configuration import DigitalState
 
+DEFAULT_ASSERTION_GROUP_ID = 0
+DEFAULT_ASSERTION_GROUP_NAME = "Assertions"
+
 
 @dataclass(frozen=True, slots=True)
+class AssertionGroupDefinition:
+    """One named collection of related host-side assertions."""
+
+    group_id: int
+    name: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Assertion:
     """Information shared by every host-side assertion."""
 
     assertion_id: int
     channel: Channel
+    group_id: int = DEFAULT_ASSERTION_GROUP_ID
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,7 +36,7 @@ class PointAssertion(Assertion):
 
 @dataclass(frozen=True, slots=True)
 class RangeAssertion(Assertion):
-    """Information shared by assertions evaluated over an inclusive tick range."""
+    """Information shared by assertions evaluated over a half-open tick range."""
 
     from_tick: int
     until_tick: int
@@ -39,17 +51,17 @@ class DigitalInputPointAssertion(PointAssertion):
 
 @dataclass(frozen=True, slots=True)
 class DigitalInputRemainHighAssertion(RangeAssertion):
-    """Expect a digital input to remain high over an inclusive tick range."""
+    """Expect a digital input to remain high over a half-open tick range."""
 
 
 @dataclass(frozen=True, slots=True)
 class DigitalInputRemainLowAssertion(RangeAssertion):
-    """Expect a digital input to remain low over an inclusive tick range."""
+    """Expect a digital input to remain low over a half-open tick range."""
 
 
 @dataclass(frozen=True, slots=True)
 class DigitalInputTransitionAssertion(RangeAssertion):
-    """Expect a digital input transition within an inclusive tick range."""
+    """Expect a digital input transition within a half-open tick range."""
 
     from_state: DigitalState
     to_state: DigitalState
@@ -91,7 +103,7 @@ class PwmInputWaveformNearAssertion(PointAssertion):
 
 @dataclass(frozen=True, slots=True)
 class PwmInputFrequencyRemainWithinAssertion(RangeAssertion):
-    """Expect PWM frequency to remain within an inclusive band."""
+    """Expect PWM frequency to remain within a band over a half-open tick range."""
 
     minimum_hz: float
     maximum_hz: float
@@ -99,7 +111,7 @@ class PwmInputFrequencyRemainWithinAssertion(RangeAssertion):
 
 @dataclass(frozen=True, slots=True)
 class PwmInputDutyCycleRemainWithinAssertion(RangeAssertion):
-    """Expect PWM duty cycle to remain within an inclusive band."""
+    """Expect PWM duty cycle to remain within a band over a half-open tick range."""
 
     minimum_duty_cycle: float
     maximum_duty_cycle: float
@@ -123,7 +135,7 @@ class AnalogueInputWithinAssertion(PointAssertion):
 
 @dataclass(frozen=True, slots=True)
 class AnalogueInputRemainWithinAssertion(RangeAssertion):
-    """Expect an analogue voltage to remain within an inclusive band."""
+    """Expect an analogue voltage to remain within a band over a half-open tick range."""
 
     minimum_uv: int
     maximum_uv: int
@@ -141,6 +153,33 @@ class AnalogueInputRemainBelowAssertion(RangeAssertion):
     """Expect an analogue voltage to remain below a threshold."""
 
     threshold_uv: int
+
+
+@dataclass(frozen=True, slots=True)
+class CommunicationReceiveAssertion(RangeAssertion):
+    """Expect specific payload bytes received on a communication peripheral within a tick range."""
+
+    expected_payload: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class UARTReceiveAssertion(CommunicationReceiveAssertion):
+    """Expect specific UART payload bytes received within a tick range."""
+
+
+@dataclass(frozen=True, slots=True)
+class SPIReceiveAssertion(CommunicationReceiveAssertion):
+    """Expect specific SPI payload bytes received within a tick range."""
+
+
+@dataclass(frozen=True, slots=True)
+class I2CReceiveAssertion(CommunicationReceiveAssertion):
+    """Expect specific I2C payload bytes received within a tick range."""
+
+
+@dataclass(frozen=True, slots=True)
+class CANReceiveAssertion(CommunicationReceiveAssertion):
+    """Expect specific CAN frame payload bytes received within a tick range."""
 
 
 class AssertionList:

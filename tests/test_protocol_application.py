@@ -2,6 +2,7 @@ from protocol_fakes import (
     ControlCommand,
     ExecutionControl,
     FakeProtocol,
+    FinalizeTestUpload,
     GlobalControl,
     GlobalControlCommand,
     PeripheralVoltage,
@@ -15,6 +16,7 @@ from hilrig import (
     LogicVoltage,
     StartMode,
     UploadAttempt,
+    UploadOperationKind,
 )
 from hilrig import Test as HilRigTest
 
@@ -132,18 +134,56 @@ def test_upload_encoding_keeps_configuration_first() -> None:
     assert adapter.codec.encoded[encoded[1]] is upload.instructions[0]
 
 
+def test_upload_plan_groups_messages_by_semantic_operation_and_owns_correlation() -> None:
+    adapter = FixedIOProtocolAdapter(protocol_module=FakeProtocol)
+
+    plan = adapter.build_upload_plan(_compiled_fixed_io_test())
+
+    assert [operation.kind for operation in plan.operations] == [
+        UploadOperationKind.CONFIGURATION,
+        *([UploadOperationKind.TICK] * len(plan.upload.instructions)),
+        UploadOperationKind.FINALIZE,
+        UploadOperationKind.START,
+    ]
+    assert all(len(operation.encoded_messages) == 1 for operation in plan.operations)
+    assert (
+        plan.transfer_operations[0].response.scope is FakeProtocol.ResponseScope.TEST_CONFIGURATION
+    )
+    tick_operations = tuple(
+        operation
+        for operation in plan.transfer_operations
+        if operation.kind is UploadOperationKind.TICK
+    )
+    assert [operation.tick for operation in tick_operations] == [
+        instruction.tick_number for instruction in plan.upload.instructions
+    ]
+    finalize = plan.transfer_operations[-1]
+    assert finalize.kind is UploadOperationKind.FINALIZE
+    assert finalize.response.scope is FakeProtocol.ResponseScope.COMPLETE_TEST
+    finalize_message = adapter.codec.decode(finalize.encoded_messages[0])
+    assert type(finalize_message) is FinalizeTestUpload
+    assert finalize_message.flags == 0
+    assert finalize_message.test_id == plan.upload.configuration.test_id
+    assert plan.start_operation is not None
+    assert plan.start_operation.response.control_command is ControlCommand.START
+
+
 def test_control_flow_builders_use_the_upload_attempt_wire_id() -> None:
     compiled = _compiled_fixed_io_test()
     attempt = compiled.new_upload_attempt()
     adapter = FixedIOProtocolAdapter(protocol_module=FakeProtocol)
 
     discovery = adapter.build_system_info_request()
+    finalize = adapter.build_finalize_test_upload(attempt.application_test_id)
     start = adapter.build_start(attempt)
     abort = adapter.build_abort(attempt)
     reset = adapter.build_reset_application()
 
     assert type(discovery) is SystemInfoRequest
     assert discovery.request_firmware_git_hash
+    assert type(finalize) is FinalizeTestUpload
+    assert finalize.flags == 0
+    assert finalize.test_id.bytes == attempt.application_test_id.to_bytes(16, "big")
     assert type(start) is ExecutionControl
     assert start.command is ControlCommand.START
     assert start.test_id.bytes == attempt.application_test_id.to_bytes(16, "big")

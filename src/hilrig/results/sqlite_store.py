@@ -11,7 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from hilrig.exceptions import CaptureSchemaError, CaptureStorageError
-from hilrig.models.execution import CompiledAssertion, IRScalar, immutable_fields
+from hilrig.models.assertions import DEFAULT_ASSERTION_GROUP_NAME
+from hilrig.models.execution import (
+    CompiledAssertion,
+    CompiledAssertionGroup,
+    CompiledInstruction,
+    IRScalar,
+    immutable_fields,
+)
 from hilrig.results.models import (
     ORIGINAL_ASSERTION_SET_ID,
     RESULT_IR_SCHEMA_VERSION,
@@ -63,11 +70,44 @@ CREATE TABLE assertion_sets (
 CREATE TABLE assertion_definitions (
     assertion_set_id TEXT NOT NULL,
     assertion_id INTEGER NOT NULL CHECK (assertion_id >= 0),
+    group_id INTEGER NOT NULL CHECK (group_id >= 0),
+    subject_name TEXT NOT NULL CHECK (length(trim(subject_name)) > 0),
     peripheral TEXT NOT NULL CHECK (length(trim(peripheral)) > 0),
     channel INTEGER NOT NULL CHECK (channel >= 0),
     operation TEXT NOT NULL CHECK (length(trim(operation)) > 0),
     arguments_json TEXT NOT NULL,
     PRIMARY KEY (assertion_set_id, assertion_id),
+    FOREIGN KEY (assertion_set_id, group_id)
+        REFERENCES assertion_groups (assertion_set_id, group_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY (assertion_set_id) REFERENCES assertion_sets (assertion_set_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+);
+
+CREATE TABLE assertion_groups (
+    assertion_set_id TEXT NOT NULL,
+    group_id INTEGER NOT NULL CHECK (group_id >= 0),
+    name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+    PRIMARY KEY (assertion_set_id, group_id),
+    UNIQUE (assertion_set_id, name),
+    FOREIGN KEY (assertion_set_id) REFERENCES assertion_sets (assertion_set_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+);
+
+CREATE TABLE stimulus_definitions (
+    assertion_set_id TEXT NOT NULL,
+    instruction_id INTEGER NOT NULL CHECK (instruction_id >= 0),
+    group_id INTEGER NOT NULL CHECK (group_id >= 0),
+    subject_name TEXT NOT NULL CHECK (length(trim(subject_name)) > 0),
+    tick INTEGER NOT NULL CHECK (tick >= 0),
+    peripheral TEXT NOT NULL CHECK (length(trim(peripheral)) > 0),
+    channel INTEGER NOT NULL CHECK (channel >= 0),
+    operation TEXT NOT NULL CHECK (length(trim(operation)) > 0),
+    arguments_json TEXT NOT NULL,
+    PRIMARY KEY (assertion_set_id, instruction_id),
+    FOREIGN KEY (assertion_set_id, group_id)
+        REFERENCES assertion_groups (assertion_set_id, group_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
     FOREIGN KEY (assertion_set_id) REFERENCES assertion_sets (assertion_set_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT
 );
@@ -131,8 +171,21 @@ CREATE INDEX application_error_tick_lookup ON application_errors (tick);
 
 _ASSERTION_INSERT = """
 INSERT INTO assertion_definitions (
-    assertion_set_id, assertion_id, peripheral, channel, operation, arguments_json
-) VALUES (?, ?, ?, ?, ?, ?)
+    assertion_set_id, assertion_id, group_id, subject_name,
+    peripheral, channel, operation, arguments_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+_ASSERTION_GROUP_INSERT = """
+INSERT INTO assertion_groups (assertion_set_id, group_id, name)
+VALUES (?, ?, ?)
+"""
+
+_STIMULUS_INSERT = """
+INSERT INTO stimulus_definitions (
+    assertion_set_id, instruction_id, group_id, subject_name,
+    tick, peripheral, channel, operation, arguments_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _TICK_INSERT = """
@@ -160,10 +213,12 @@ _REQUIRED_TABLES = frozenset(
     {
         "application_errors",
         "assertion_definitions",
+        "assertion_groups",
         "assertion_sets",
         "communication_results",
         "result_ir_schema",
         "run_metadata",
+        "stimulus_definitions",
         "tick_results",
     }
 )
@@ -179,6 +234,8 @@ def initialize_capture_database(
     tick_period_ns: int,
     expected_tick_count: int,
     compiled_ir_version: str,
+    compiled_assertion_groups: Sequence[CompiledAssertionGroup],
+    compiled_stimuli: Sequence[CompiledInstruction],
     compiled_assertions: Sequence[CompiledAssertion],
     application_protocol_version: str | None,
     firmware_version: str | None,
@@ -236,12 +293,24 @@ def initialize_capture_database(
                 assertion_set_created_at,
             ),
         )
+        groups = tuple(compiled_assertion_groups) or (
+            CompiledAssertionGroup(group_id=0, name=DEFAULT_ASSERTION_GROUP_NAME),
+        )
+        validated_groups = tuple(_validated_assertion_groups(groups))
+        validated_stimuli = tuple(_validated_stimuli(compiled_stimuli))
+        validated_assertions = tuple(_validated_assertions(compiled_assertions))
+        _validate_group_references(validated_groups, validated_stimuli, validated_assertions)
+        connection.executemany(
+            _ASSERTION_GROUP_INSERT,
+            ((ORIGINAL_ASSERTION_SET_ID, group.group_id, group.name) for group in validated_groups),
+        )
+        connection.executemany(
+            _STIMULUS_INSERT,
+            (_stimulus_parameters(stimulus) for stimulus in validated_stimuli),
+        )
         connection.executemany(
             _ASSERTION_INSERT,
-            (
-                _assertion_parameters(assertion)
-                for assertion in _validated_assertions(compiled_assertions)
-            ),
+            (_assertion_parameters(assertion) for assertion in validated_assertions),
         )
         connection.commit()
     except Exception:
@@ -441,12 +510,17 @@ def read_assertion_set(path: Path, assertion_set_id: str) -> CapturedAssertionSe
         ).fetchone()
         if set_row is None:
             raise KeyError(f"Unknown assertion set: {assertion_set_id}")
+        groups = _read_assertion_groups(connection, assertion_set_id)
+        stimuli = _read_stimuli(connection, assertion_set_id)
         assertions = _read_assertions(connection, assertion_set_id)
+        _validate_group_references(groups, stimuli, assertions, stored=True)
     return CapturedAssertionSet(
         assertion_set_id=str(set_row[0]),
         name=str(set_row[1]),
         compiled_ir_version=str(set_row[2]),
         created_at=str(set_row[3]),
+        groups=groups,
+        stimuli=stimuli,
         assertions=assertions,
     )
 
@@ -467,6 +541,8 @@ def iter_assertion_sets(path: Path) -> Iterator[CapturedAssertionSet]:
                 name=str(row[1]),
                 compiled_ir_version=str(row[2]),
                 created_at=str(row[3]),
+                groups=_read_assertion_groups(connection, str(row[0])),
+                stimuli=_read_stimuli(connection, str(row[0])),
                 assertions=_read_assertions(connection, str(row[0])),
             )
             for row in rows
@@ -487,11 +563,11 @@ def iter_ticks(
     from_tick: int,
     until_tick: int | None,
 ) -> Iterator[CapturedTickResult]:
-    """Stream fixed tick rows in chronological order over an inclusive range."""
+    """Stream fixed tick rows in chronological order over a half-open range."""
     query = "SELECT * FROM tick_results WHERE tick >= ?"
     parameters: list[object] = [from_tick]
     if until_tick is not None:
-        query += " AND tick <= ?"
+        query += " AND tick < ?"
         parameters.append(until_tick)
     query += " ORDER BY tick"
     with closing(_read_connection(path)) as connection:
@@ -513,7 +589,7 @@ def iter_communications(
     clauses = ["tick >= ?"]
     parameters: list[object] = [from_tick]
     if until_tick is not None:
-        clauses.append("tick <= ?")
+        clauses.append("tick < ?")
         parameters.append(until_tick)
     if peripheral is not None:
         clauses.append("peripheral = ?")
@@ -620,6 +696,83 @@ def _validated_assertions(
         yield assertion
 
 
+def _validated_stimuli(
+    stimuli: Sequence[CompiledInstruction],
+) -> Iterator[CompiledInstruction]:
+    if isinstance(stimuli, (str, bytes)) or not isinstance(stimuli, Sequence):
+        raise TypeError("compiled_stimuli must be a sequence of CompiledInstruction values")
+    seen_ids: set[int] = set()
+    for stimulus in stimuli:
+        if not isinstance(stimulus, CompiledInstruction):
+            raise TypeError("compiled_stimuli must contain only CompiledInstruction values")
+        if stimulus.instruction_id in seen_ids:
+            raise ValueError("Stored stimulus instruction IDs must be unique")
+        if stimulus.group_id is None:
+            raise ValueError("Stored stimuli must belong to a group")
+        seen_ids.add(stimulus.instruction_id)
+        yield stimulus
+
+
+def _validated_assertion_groups(
+    groups: Sequence[CompiledAssertionGroup],
+) -> Iterator[CompiledAssertionGroup]:
+    if isinstance(groups, (str, bytes)) or not isinstance(groups, Sequence):
+        raise TypeError(
+            "compiled_assertion_groups must be a sequence of CompiledAssertionGroup values"
+        )
+    names: set[str] = set()
+    for expected_id, group in enumerate(groups):
+        if not isinstance(group, CompiledAssertionGroup):
+            raise TypeError(
+                "compiled_assertion_groups must contain only CompiledAssertionGroup values"
+            )
+        if group.group_id != expected_id:
+            raise ValueError("Stored assertion group IDs must be sequential from zero")
+        if not isinstance(group.name, str) or not group.name.strip():
+            raise ValueError("Stored assertion group names must be non-empty")
+        if group.name in names:
+            raise ValueError("Stored assertion group names must be unique")
+        names.add(group.name)
+        yield group
+
+
+def _validate_group_references(
+    groups: Sequence[CompiledAssertionGroup],
+    stimuli: Sequence[CompiledInstruction],
+    assertions: Sequence[CompiledAssertion],
+    *,
+    stored: bool = False,
+) -> None:
+    group_ids = {group.group_id for group in groups}
+    for stimulus in stimuli:
+        if stimulus.group_id not in group_ids:
+            message = (
+                f"Stimulus {stimulus.instruction_id} references unknown group "
+                f"{stimulus.group_id}"
+            )
+            if stored:
+                raise CaptureSchemaError(message)
+            raise ValueError(message)
+        if not isinstance(stimulus.subject_name, str) or not stimulus.subject_name.strip():
+            message = f"Stimulus {stimulus.instruction_id} subject name must be non-empty"
+            if stored:
+                raise CaptureSchemaError(message)
+            raise ValueError(message)
+    for assertion in assertions:
+        if assertion.group_id not in group_ids:
+            message = (
+                f"Assertion {assertion.assertion_id} references unknown group {assertion.group_id}"
+            )
+            if stored:
+                raise CaptureSchemaError(message)
+            raise ValueError(message)
+        if not isinstance(assertion.subject_name, str) or not assertion.subject_name.strip():
+            message = f"Assertion {assertion.assertion_id} subject name must be non-empty"
+            if stored:
+                raise CaptureSchemaError(message)
+            raise ValueError(message)
+
+
 def _assertion_parameters(assertion: CompiledAssertion) -> tuple[object, ...]:
     try:
         arguments_json = json.dumps(
@@ -636,10 +789,74 @@ def _assertion_parameters(assertion: CompiledAssertion) -> tuple[object, ...]:
     return (
         ORIGINAL_ASSERTION_SET_ID,
         assertion.assertion_id,
+        assertion.group_id,
+        assertion.subject_name,
         assertion.peripheral,
         assertion.channel,
         assertion.assertion,
         arguments_json,
+    )
+
+
+def _stimulus_parameters(stimulus: CompiledInstruction) -> tuple[object, ...]:
+    arguments_json = _encode_arguments(
+        stimulus.arguments,
+        label=f"Stimulus {stimulus.instruction_id}",
+    )
+    return (
+        ORIGINAL_ASSERTION_SET_ID,
+        stimulus.instruction_id,
+        stimulus.group_id,
+        stimulus.subject_name,
+        stimulus.tick,
+        stimulus.peripheral,
+        stimulus.channel,
+        stimulus.operation,
+        arguments_json,
+    )
+
+
+def _encode_arguments(arguments: object, *, label: str) -> str:
+    try:
+        return json.dumps(
+            dict(arguments),  # type: ignore[arg-type]
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{label} arguments are not valid IR scalar values") from error
+
+
+def _read_stimuli(
+    connection: sqlite3.Connection,
+    assertion_set_id: str,
+) -> tuple[CompiledInstruction, ...]:
+    rows = connection.execute(
+        """
+        SELECT instruction_id, group_id, subject_name, tick,
+               peripheral, channel, operation, arguments_json
+        FROM stimulus_definitions
+        WHERE assertion_set_id = ?
+        ORDER BY tick, instruction_id
+        """,
+        (assertion_set_id,),
+    ).fetchall()
+    return tuple(
+        CompiledInstruction(
+            instruction_id=int(row[0]),
+            group_id=int(row[1]),
+            subject_name=str(row[2]),
+            tick=int(row[3]),
+            peripheral=str(row[4]),
+            channel=int(row[5]),
+            operation=str(row[6]),
+            arguments=immutable_fields(
+                _decode_arguments(row[7], label=f"Stimulus {int(row[0])}")
+            ),
+        )
+        for row in rows
     )
 
 
@@ -649,7 +866,8 @@ def _read_assertions(
 ) -> tuple[CompiledAssertion, ...]:
     rows = connection.execute(
         """
-        SELECT assertion_id, peripheral, channel, operation, arguments_json
+        SELECT assertion_id, group_id, subject_name,
+               peripheral, channel, operation, arguments_json
         FROM assertion_definitions
         WHERE assertion_set_id = ?
         ORDER BY assertion_id
@@ -663,34 +881,66 @@ def _read_assertions(
             raise CaptureSchemaError(
                 f"Assertion IDs in set {assertion_set_id!r} must be sequential from zero"
             )
-        arguments = _decode_assertion_arguments(row[4], assertion_id=assertion_id)
+        arguments = _decode_assertion_arguments(row[6], assertion_id=assertion_id)
         assertions.append(
             CompiledAssertion(
                 assertion_id=assertion_id,
-                peripheral=str(row[1]),
-                channel=int(row[2]),
-                assertion=str(row[3]),
+                group_id=int(row[1]),
+                subject_name=str(row[2]),
+                peripheral=str(row[3]),
+                channel=int(row[4]),
+                assertion=str(row[5]),
                 arguments=immutable_fields(arguments),
             )
         )
     return tuple(assertions)
 
 
+def _read_assertion_groups(
+    connection: sqlite3.Connection,
+    assertion_set_id: str,
+) -> tuple[CompiledAssertionGroup, ...]:
+    rows = connection.execute(
+        """
+        SELECT group_id, name
+        FROM assertion_groups
+        WHERE assertion_set_id = ?
+        ORDER BY group_id
+        """,
+        (assertion_set_id,),
+    ).fetchall()
+    groups: list[CompiledAssertionGroup] = []
+    for expected_id, row in enumerate(rows):
+        group_id = int(row[0])
+        if group_id != expected_id:
+            raise CaptureSchemaError(
+                f"Assertion group IDs in set {assertion_set_id!r} must be sequential from zero"
+            )
+        groups.append(CompiledAssertionGroup(group_id=group_id, name=str(row[1])))
+    if not groups:
+        raise CaptureSchemaError(f"Assertion set {assertion_set_id!r} has no groups")
+    return tuple(groups)
+
+
 def _decode_assertion_arguments(value: object, *, assertion_id: int) -> dict[str, IRScalar]:
+    return _decode_arguments(value, label=f"Assertion {assertion_id}")
+
+
+def _decode_arguments(value: object, *, label: str) -> dict[str, IRScalar]:
     if not isinstance(value, str):
-        raise CaptureSchemaError(f"Assertion {assertion_id} arguments must be JSON text")
+        raise CaptureSchemaError(f"{label} arguments must be JSON text")
     try:
         decoded = json.loads(value)
     except (json.JSONDecodeError, ValueError) as error:
-        raise CaptureSchemaError(f"Assertion {assertion_id} has invalid arguments JSON") from error
+        raise CaptureSchemaError(f"{label} has invalid arguments JSON") from error
     if not isinstance(decoded, dict):
-        raise CaptureSchemaError(f"Assertion {assertion_id} arguments must be a JSON object")
+        raise CaptureSchemaError(f"{label} arguments must be a JSON object")
 
     arguments: dict[str, IRScalar] = {}
     for name, argument in decoded.items():
         if not isinstance(name, str) or not _is_ir_scalar(argument):
             raise CaptureSchemaError(
-                f"Assertion {assertion_id} arguments must contain only IR scalar values"
+                f"{label} arguments must contain only IR scalar values"
             )
         arguments[name] = argument
     return arguments

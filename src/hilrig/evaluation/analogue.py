@@ -166,7 +166,8 @@ def _evaluate_range(
     message = range_message(
         verdict=verdict,
         success=(
-            f"Analogue input remained {expected_text} from tick {from_tick} through {until_tick}."
+            f"Analogue input remained {expected_text} in tick range "
+            f"[{from_tick}, {until_tick})."
         ),
         failure=(
             f"Analogue input did not remain {expected_text}; observed {violation_count} "

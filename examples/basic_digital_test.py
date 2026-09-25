@@ -1,36 +1,26 @@
-from hilrig import (
-    DigitalState,
-    FrequencyMode,
-    LogicVoltage,
-    StartMode,
-    Test,
-)
+"""Basic definition usable by both the terminal and direct Python execution."""
 
-test = Test(name="Digital input/output example")
-test.configure(
-    frequency_mode=FrequencyMode.HZ_1K,
-    start_mode=StartMode.IMMEDIATE,
-)
+from hilrig import DigitalState, FrequencyMode, LogicVoltage, StartMode, Test
 
-button = test.digital_input(channel=0)
-button.configure(voltage=LogicVoltage.V3_3)
 
-led = test.digital_output(channel=0)
-led.configure(voltage=LogicVoltage.V3_3, initial_state=DigitalState.LOW)
-led.high(at_ms=100)
-led.low(at_s=0.2)
+def build_test() -> Test:
+    """Return a fresh digital input/output test for one terminal run."""
+    test = Test(name="Digital input/output example")
+    test.configure(
+        frequency_mode=FrequencyMode.HZ_100,
+        start_mode=StartMode.IMMEDIATE,
+    )
 
-test.expect(button).high(at_tick=100)
-test.expect(button).remain_high(from_ms=100, until_ms=150)
+    digital_input_ch1 = test.digital_input(channel=9)
+    digital_input_ch1.configure(voltage=LogicVoltage.V3_3)
 
-print(f"test ID: {test.test_id:032x}")
-for instruction in test.instructions:
-    print(instruction)
-for assertion in test.assertions:
-    print(assertion)
+    digital_output_ch1 = test.digital_output(channel=0)
+    digital_output_ch1.configure(voltage=LogicVoltage.V3_3, initial_state=DigitalState.LOW)
 
-compiled = test.compile()
+    test.expect(digital_input_ch1).remain_low(from_s=0, until_s=3)
+    digital_output_ch1.high(at_s=3)
+    test.expect(digital_input_ch1).remain_high(from_s=3, until_s=6)
+    digital_output_ch1.low(at_s=6)
+    test.expect(digital_input_ch1).remain_low(from_s=6, until_s=10)
 
-json_text = compiled.to_json()  # JSON string, no file created
-compiled.write_json("build/my-test.json")  # machine-readable RIG input
-compiled.write_excel("build/my-test.xlsx")  # human-readable review workbook
+    return test

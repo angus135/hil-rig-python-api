@@ -40,18 +40,18 @@ def test_empty_internal_model_can_be_compiled() -> None:
     plan = test.compile()
 
     assert plan.time_slots == ()
-    assert plan.expected_tick_count == 1_001
+    assert plan.expected_tick_count == 1_000
 
 
 @pytest.mark.parametrize(
     ("frequency_mode", "expected_tick_count", "tick_period_ns"),
     [
-        (FrequencyMode.HZ_100, 101, 10_000_000),
-        (FrequencyMode.HZ_1K, 1_001, 1_000_000),
-        (FrequencyMode.HZ_10K, 10_001, 100_000),
+        (FrequencyMode.HZ_100, 100, 10_000_000),
+        (FrequencyMode.HZ_1K, 1_000, 1_000_000),
+        (FrequencyMode.HZ_10K, 10_000, 100_000),
     ],
 )
-def test_observation_only_test_captures_one_second_inclusively(
+def test_observation_only_test_captures_one_second_as_half_open_intervals(
     frequency_mode: FrequencyMode,
     expected_tick_count: int,
     tick_period_ns: int,
@@ -77,7 +77,7 @@ def test_expected_tick_count_uses_latest_assertion_end_plus_one_second() -> None
 
     plan = test.compile()
 
-    assert plan.expected_tick_count == 1_751
+    assert plan.expected_tick_count == 1_750
 
 
 def test_expected_tick_count_uses_latest_stimulus_when_it_is_later() -> None:
