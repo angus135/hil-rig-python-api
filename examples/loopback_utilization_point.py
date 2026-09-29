@@ -42,9 +42,9 @@ PROFILE = LoopbackProfile(
 )
 
 DEFAULT_POINT = LoopbackWorkloadPoint(
-    frequency_hz=1_000,
+    frequency_hz=100,
     duration_s=1,
-    target_utilization_percent=10.0,
+    target_utilization_percent=90.0,
     burst_interval_ticks=1,
     seed=1,
 )
@@ -60,8 +60,10 @@ def _boundary_transfers(transfers):
 
 def build_test_for_point(point: LoopbackWorkloadPoint) -> Test:
     """Build one fresh test for one requested utilisation point."""
-    if point.frequency_hz != FrequencyMode.HZ_1K.hertz:
-        raise ValueError("This example currently uses FrequencyMode.HZ_1K")
+    try:
+        frequency_mode = FrequencyMode(point.frequency_hz)
+    except ValueError:
+        raise ValueError(f"Unsupported frequency_hz: {point.frequency_hz}")
 
     workload = compile_loopback_workload(PROFILE, point)
     test = Test(
@@ -71,7 +73,7 @@ def build_test_for_point(point: LoopbackWorkloadPoint) -> Test:
         )
     )
     test.configure(
-        frequency_mode=FrequencyMode.HZ_1K,
+        frequency_mode=frequency_mode,
         start_mode=StartMode.IMMEDIATE,
     )
 
@@ -123,7 +125,7 @@ def build_test_for_point(point: LoopbackWorkloadPoint) -> Test:
             test.expect(SPI_ch1).receive(
                 transfer.data,
                 from_tick=transfer.tick,
-                until_tick=transfer.tick + 2,
+                until_tick=transfer.tick + 10,
             )
     with test.group("CAN Workload"):
         for transfer in _boundary_transfers(payloads.can):

@@ -14,11 +14,13 @@ from hilrig.models.instructions import DigitalOutputAction
 
 def test_preliminary_compile_preserves_test_id_and_groups_stably() -> None:
     test = HilRigTest(name="Out-of-order definition")
-    output = test.digital_output(channel=0)
-    output.configure(voltage=LogicVoltage.V3_3, initial_state=DigitalState.LOW)
-    output.high(at_tick=200)
-    output.low(at_tick=100)
-    output.toggle(at_tick=100)
+    output_0 = test.digital_output(channel=0)
+    output_0.configure(voltage=LogicVoltage.V3_3, initial_state=DigitalState.LOW)
+    output_1 = test.digital_output(channel=1)
+    output_1.configure(voltage=LogicVoltage.V3_3, initial_state=DigitalState.LOW)
+    output_0.high(at_tick=200)
+    output_0.low(at_tick=100)
+    output_1.toggle(at_tick=100)
 
     plan = test.compile()
 
@@ -32,6 +34,17 @@ def test_preliminary_compile_preserves_test_id_and_groups_stably() -> None:
         1,
         2,
     ]
+
+
+def test_duplicate_instruction_on_same_channel_and_tick_raises_validation_error() -> None:
+    test = HilRigTest(name="Duplicate instruction")
+    output = test.digital_output(channel=0)
+    output.configure(voltage=LogicVoltage.V3_3, initial_state=DigitalState.LOW)
+    output.low(at_tick=100)
+    output.toggle(at_tick=100)
+
+    with pytest.raises(ValidationError, match="Multiple stimulus instructions scheduled on channel digital_output"):
+        test.compile()
 
 
 def test_empty_internal_model_can_be_compiled() -> None:

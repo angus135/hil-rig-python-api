@@ -465,3 +465,48 @@ def test_legacy_fixed_adapter_rejects_communication_peripherals() -> None:
         ProtocolIntegrationError, match="not supported in the legacy fixed-I/O message family"
     ):
         legacy_adapter.build_upload(compiled)
+
+
+def test_variable_adapter_encodes_multi_frame_can_in_single_instruction() -> None:
+    test = HilRigTest(name="Multi-frame CAN test")
+    test.configure(frequency_mode=FrequencyMode.HZ_1K, start_mode=StartMode.IMMEDIATE)
+    can = test.can(channel=0).configure(bitrate=500_000)
+    # 16 bytes = 2 full 8-byte frames
+    can.transmit(frame_id=0x123, data=b"12345678abcdefgh", at_tick=5)
+    compiled = test.compile()
+
+    adapter = VariableIOProtocolAdapter(protocol_module=FakeProtocol)
+    upload = adapter.build_upload(compiled)
+
+    assert len(upload.instructions) == 1
+    inst = upload.instructions[0]
+    assert inst.tick_number == 5
+    assert len(inst.operations) == 1
+    op = inst.operations[0]
+    assert op.peripheral_type == PeripheralType.CAN
+    assert op.channel == 0
+    assert len(op.payload) == 24
+    frame1 = op.payload[:12]
+    frame2 = op.payload[12:]
+    assert frame1 == struct.pack("<HB8sB", 0x123, 8, b"12345678", 0)
+    assert frame2 == struct.pack("<HB8sB", 0x123, 8, b"abcdefgh", 0)
+
+
+def test_loopback_workload_points_encode_cleanly_at_high_utilisations() -> None:
+    from hilrig import LoopbackProfile, LoopbackWorkloadPoint
+    from examples.loopback_utilization_point import PROFILE, build_test_for_point
+
+    adapter = VariableIOProtocolAdapter()
+    for pct in [20.0, 25.0, 27.0, 28.0, 29.0, 30.0, 35.0]:
+        point = LoopbackWorkloadPoint(
+            frequency_hz=1000,
+            duration_s=1,
+            target_utilization_percent=pct,
+            burst_interval_ticks=1,
+            seed=1,
+        )
+        test = build_test_for_point(point)
+        compiled = test.compile()
+        plan = adapter.build_upload_plan(compiled)
+        assert len(plan.operations) > 0
+

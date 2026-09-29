@@ -574,8 +574,10 @@ class CAN(_ChannelHandle):
         if not 0 <= frame_id <= 0x7FF:
             raise ValueError("frame_id must be an 11-bit standard CAN identifier")
         payload = _bytes(data)
-        if len(payload) > 8:
-            raise ValueError("CAN data must contain at most 8 bytes")
+        if len(payload) == 0:
+            raise ValueError("CAN data must contain at least 1 byte")
+        if len(payload) > 65535:
+            raise ValueError("CAN data must contain at most 65535 bytes")
         timestamp = self._test._timestamp(at_tick=at_tick, at_ms=at_ms, at_s=at_s)
         self._test._schedule(
             lambda instruction_id: CANTransmitInstruction(
@@ -1428,23 +1430,39 @@ class CANExpectation(_ExpectationBuilder):
         if not 0 <= frame_id <= 0x7FF:
             raise ValueError("frame_id must be an 11-bit standard CAN identifier")
         payload = _bytes(data)
-        if len(payload) > 8:
-            raise ValueError("CAN data must contain at most 8 bytes")
-        expected_frame = struct.pack("<HB8sB", frame_id, len(payload), payload, 0)
+        if len(payload) == 0:
+            raise ValueError("CAN data must contain at least 1 byte")
+        if len(payload) > 65535:
+            raise ValueError("CAN data must contain at most 65535 bytes")
         start, end = self._test._time_range(
             ticks=_optional_pair(from_tick, until_tick, names="from_tick and until_tick"),
             milliseconds=_optional_pair(from_ms, until_ms, names="from_ms and until_ms"),
             seconds=_optional_pair(from_s, until_s, names="from_s and until_s"),
         )
-        self._add_assertion(
-            lambda assertion_id: CANReceiveAssertion(
-                assertion_id=assertion_id,
-                channel=self._can.identity,
-                from_tick=start,
-                until_tick=end,
-                expected_payload=expected_frame,
+        if len(payload) <= 8:
+            expected_frame = struct.pack("<HB8sB", frame_id, len(payload), payload, 0)
+            self._add_assertion(
+                lambda assertion_id: CANReceiveAssertion(
+                    assertion_id=assertion_id,
+                    channel=self._can.identity,
+                    from_tick=start,
+                    until_tick=end,
+                    expected_payload=expected_frame,
+                )
             )
-        )
+        else:
+            for offset in range(0, len(payload), 8):
+                chunk = payload[offset : offset + 8]
+                expected_frame = struct.pack("<HB8sB", frame_id, len(chunk), chunk, 0)
+                self._add_assertion(
+                    lambda assertion_id, exp=expected_frame: CANReceiveAssertion(
+                        assertion_id=assertion_id,
+                        channel=self._can.identity,
+                        from_tick=start,
+                        until_tick=end,
+                        expected_payload=exp,
+                    )
+                )
         return self
 
 

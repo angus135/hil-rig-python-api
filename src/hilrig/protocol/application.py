@@ -1091,7 +1091,12 @@ class VariableIOProtocolAdapter:
 
                 elif periph == "spi":
                     tx_data = _extract_bytes(arguments.get("tx_data"))
-                    spi_payload = bytes([1, len(tx_data)]) + tx_data
+                    if len(tx_data) <= 255:
+                        spi_payload = bytes([1, len(tx_data)]) + tx_data
+                    else:
+                        chunks = [tx_data[i : i + 255] for i in range(0, len(tx_data), 255)]
+                        header = bytes([len(chunks)]) + bytes(len(c) for c in chunks)
+                        spi_payload = header + tx_data
                     operations.append(
                         p.LogicalOperation(
                             peripheral_type=p.PeripheralType.SPI,
@@ -1103,13 +1108,23 @@ class VariableIOProtocolAdapter:
                 elif periph == "can":
                     can_data = _extract_bytes(arguments.get("data"))
                     frame_id = _require_non_negative_integer(arguments.get("frame_id"), "frame_id")
-                    if frame_id > 0x7FF or len(can_data) > 8:
-                        raise ProtocolIntegrationError("CAN frame is outside the standard 11-bit/8-byte limits")
+                    if frame_id > 0x7FF or len(can_data) == 0:
+                        raise ProtocolIntegrationError("CAN frame is outside the standard 11-bit limits")
+                    if len(can_data) <= 8:
+                        can_payload = struct.pack("<HB8sB", frame_id, len(can_data), can_data.ljust(8, b"\x00"), 0)
+                    else:
+                        frames = []
+                        for offset in range(0, len(can_data), 8):
+                            chunk = can_data[offset : offset + 8]
+                            frames.append(
+                                struct.pack("<HB8sB", frame_id, len(chunk), chunk.ljust(8, b"\x00"), 0)
+                            )
+                        can_payload = b"".join(frames)
                     operations.append(
                         p.LogicalOperation(
                             peripheral_type=p.PeripheralType.CAN,
                             channel=instruction.channel,
-                            payload=struct.pack("<HB8sB", frame_id, len(can_data), can_data, 0),
+                            payload=can_payload,
                         )
                     )
 
@@ -1125,6 +1140,14 @@ class VariableIOProtocolAdapter:
                 )
 
             if operations:
+                seen_ops: set[tuple[object, int]] = set()
+                for op in operations:
+                    op_key = (op.peripheral_type, op.channel)
+                    if op_key in seen_ops:
+                        raise ProtocolIntegrationError(
+                            f"Duplicate logical operation scheduled on tick {tick} for {op.peripheral_type} channel {op.channel}"
+                        )
+                    seen_ops.add(op_key)
                 messages.append(
                     p.UpdateInstruction(
                         test_id=test_id,

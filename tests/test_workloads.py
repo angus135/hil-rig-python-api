@@ -98,14 +98,16 @@ def test_fractional_can_rate_is_spread_across_the_full_duration() -> None:
 
 
 def test_payloads_are_split_to_protocol_safe_instruction_sizes() -> None:
-    compiled = compile_loopback_workload(
+    smooth = compile_loopback_workload(_profile(), _point(target_utilization_percent=10))
+    burst = compile_loopback_workload(
         _profile(),
         _point(burst_interval_ticks=1_000, target_utilization_percent=100),
     )
 
-    assert max(item.payload_bytes for item in compiled.uart.transfers) <= 255
-    assert max(item.payload_bytes for item in compiled.spi.transfers) <= 255
-    assert all(item.payload_bytes == 8 for item in compiled.can.transfers)
+    assert max(item.payload_bytes for item in burst.uart.transfers) <= 65535
+    assert max(item.payload_bytes for item in burst.spi.transfers) <= 65535
+    assert all(item.payload_bytes == 8 for item in smooth.can.transfers)
+    assert all(item.payload_bytes % 8 == 0 for item in burst.can.transfers)
 
 
 def test_workload_hash_covers_profile_and_requested_point() -> None:

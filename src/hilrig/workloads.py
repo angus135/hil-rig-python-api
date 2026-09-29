@@ -23,8 +23,8 @@ class LoopbackProfile:
     uart_bits_per_byte: int = 10
     can_payload_bytes_per_frame: int = 8
     can_wire_bits_per_frame: int = 135
-    max_uart_payload_bytes: int = 255
-    max_spi_payload_bytes: int = 255
+    max_uart_payload_bytes: int = 65535
+    max_spi_payload_bytes: int = 65535
 
     def __post_init__(self) -> None:
         for name in (
@@ -380,11 +380,10 @@ def _compile_can_workload(
     transfers = tuple(
         ScheduledTransfer(
             tick=tick,
-            payload_bytes=profile.can_payload_bytes_per_frame,
-            wire_bits=profile.can_wire_bits_per_frame,
+            payload_bytes=profile.can_payload_bytes_per_frame * frame_count,
+            wire_bits=profile.can_wire_bits_per_frame * frame_count,
         )
         for tick, frame_count in _distribute(frame_budget, _burst_ticks(point))
-        for _ in range(frame_count)
     )
     return _peripheral_workload(
         peripheral="can",

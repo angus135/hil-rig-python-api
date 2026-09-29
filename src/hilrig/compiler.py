@@ -352,6 +352,15 @@ def _validate_instructions(
             label="Instruction",
         )
         _validate_tick(instruction.timestamp, label="Instruction timestamp")
+    seen_channel_timestamps: set[tuple[Channel, int]] = set()
+    for instruction in instructions:
+        key = (instruction.channel, instruction.timestamp)
+        if key in seen_channel_timestamps:
+            raise ValidationError(
+                f"Multiple stimulus instructions scheduled on channel "
+                f"{instruction.channel.kind.value}[{instruction.channel.index}] at tick {instruction.timestamp}"
+            )
+        seen_channel_timestamps.add(key)
 
 
 def _validate_assertions(
