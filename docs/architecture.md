@@ -3,12 +3,13 @@
 ## Current responsibility
 
 The implemented library constructs an in-memory description of a test and compiles it
-into a protocol-neutral intermediate representation. The returned-data side now has a
+into a protocol-neutral intermediate representation. The returned-data side has a
 protocol-neutral typed ingestion boundary and SQLite-backed captured-run IR. Fixed
-Digital, Analogue, and PWM data is lowered through the public Application wrapper and
-its Transport is serviced over USB CDC. Host-side evaluation of the current digital,
-PWM, and analogue assertions is implemented against finalized captured runs. Variable
-communication messages and Application Response/Execution Control remain deferred.
+Digital, Analogue, and PWM data plus UART, SPI, and CAN traffic is lowered through the
+public Application wrapper and sent with direct length-prefixed framing over USB CDC.
+Host-side evaluation covers fixed and communication assertions against finalized
+captured runs. Application Responses, Execution Control, upload finalization, and both
+legacy and variable result families are integrated.
 
 ```text
 User script
@@ -28,9 +29,9 @@ Internal model
 Immutable CompiledTestIR
     |-- versioned machine JSON (summary, configurations, instructions)
     |-- human Excel workbook (also includes assertions)
-    `-- fixed-I/O state expander -> ApplicationCodec -> Transport -> USB CDC
+    `-- protocol-family adapter -> ApplicationCodec -> 2-byte framing -> USB CDC
 
-USB CDC -> Transport -> ApplicationCodec -> fixed TestResult adapter
+USB CDC -> 2-byte framing -> ApplicationCodec -> result adapter
                                               |
                                               v
     typed result records -> batched CapturedRunBuilder -> SQLite -> CapturedRunIR
@@ -182,31 +183,37 @@ changing the user-facing test API.
 An observation-only test may contain assertions without stimulus instructions, because
 the rig is expected to record all channels.
 
-## Fixed-I/O protocol boundary
+## Application protocol boundary
 
-`FixedIOProtocolAdapter` depends only on `CompiledTestIR`, `UploadAttempt`, and the
-public `hil_rig_protocol` module. It builds the complete fixed configuration arrays,
-leaving every unconfigured and communication record canonical-disabled. The logical
-definition ID never appears on the wire: the adapter encodes the upload attempt's
-128-bit Application Test ID as 16 big-endian bytes in configuration, instruction, and
-result correlation.
+The protocol adapters depend only on `CompiledTestIR`, `UploadAttempt`, and the public
+`hil_rig_protocol` module. `VariableIOProtocolAdapter` is the default and builds sparse
+`UpdateInstruction` messages containing fixed output changes and UART, SPI, or CAN
+logical operations. `FixedIOProtocolAdapter` retains the legacy fixed-message family.
+Both build complete configuration arrays and leave unconfigured records
+canonical-disabled. The logical definition ID never appears on the wire: each adapter
+encodes the upload attempt's 128-bit Application Test ID as 16 big-endian bytes for
+configuration, instructions, and result correlation. I2C remains in the
+protocol-neutral model but is rejected by the variable adapter because the current RIG
+hardware path is unavailable.
 
-The outgoing iterator is a state expander rather than a tick counter. It initializes
-Digital and PWM output state from configuration, separately retains the requested PWM
-period/duty and enabled flag, then groups fixed-output IR instructions by their existing
-sparse ticks. Every group is applied in instruction-ID order and produces one complete
-fixed `TestInstruction`. A disabled PWM produces protocol period/duty `0/0`; changing
-its frequency or duty updates retained state so a later enable restores the requested
-waveform. Analogue initial voltage is absent from the protocol configuration, so any
-configured Analogue output inserts tick zero into the sparse sequence. All real
-tick-zero instructions are then applied in instruction-ID order to that initialized
-state, and the merged state is emitted once for tick zero.
+The fixed-output portion of either adapter is a state expander rather than a tick
+counter. It initializes Digital and PWM output state from configuration, separately
+retains the requested PWM period/duty and enabled flag, then groups fixed-output IR
+instructions by their existing sparse ticks. Every group is applied in instruction-ID
+order. The legacy adapter emits a complete fixed `TestInstruction`; the variable
+adapter emits the logical operations changed on that tick. A disabled PWM produces
+protocol period/duty `0/0`; changing its frequency or duty updates retained state so a
+later enable restores the requested waveform. Analogue initial voltage is absent from
+the protocol configuration, so any configured Analogue output inserts tick zero into
+the sparse sequence. All real tick-zero instructions are applied in instruction-ID
+order to that initialized state, and the merged update is emitted once for tick zero.
 
-`FixedIOProtocolConnection` composes four replaceable pieces:
+`FixedIOProtocolConnection` composes four replaceable pieces (its historical class name
+is retained for API compatibility):
 
 - exact-name COM discovery and a pySerial byte stream;
-- one host-role protocol `Transport` owned and serviced on the creating thread;
-- the stateless Application codec and fixed-I/O state adapter; and
+- direct two-byte little-endian length framing over that byte stream;
+- the stateless Application codec and selected family adapter; and
 - an optional `IncomingResultAdapter` bound to a `CapturedRunBuilder`.
 
 The installed terminal application adds a deliberately thin layer above this
@@ -220,48 +227,48 @@ The worker supports the automatic strict workflow and an operator-stepped varian
 boundary is operation-oriented rather than encoded-message-oriented: it observes public
 workflow states and releases public `UploadOperation` objects, never individual encoded
 messages. One gate release therefore covers a complete configuration, tick, or START
-operation. A future operation can contain several variable-peripheral messages followed
-by one Application Response without changing the terminal/worker threading model.
+operation. Variable-family tick operations intentionally carry no response correlation;
+configuration, finalization, and control operations remain response-gated.
 
 The same worker also owns an exclusive persistent manual session. This path does not
 construct a `Test` or `UploadPlan`: a standalone JSON document is validated into one
-public protocol value, encoded by the Application codec, and submitted as one Transport
-payload. A normal manual send remains pending through reliable Transport delivery and a
-correlated Application Response. A Transport-only send completes on delivery
-confirmation and treats any later Application message as inbox data. Manual sessions
-can bypass System Information/version discovery, but never bypass Transport session
-establishment or reliable-delivery handling. Normal runs continue using automatic
+public protocol value, encoded by the Application codec, framed, and submitted to the
+serial stream. A normal manual send remains pending for a correlated Application
+Response. The historically named `--transport-only` option sends without requiring
+that response and treats any later Application message as inbox data. Manual sessions
+can bypass System Information/version discovery. Normal runs continue using automatic
 base-description COM discovery; manual sessions may explicitly select a COM device.
 
-The caller repeatedly invokes non-blocking `service()`. The connection retains partial
-Transport input and serial output, advances Transport with monotonic wrapped
-milliseconds, drains events/application data, and submits at most one reliable
-Application message at a time. A separate Application workflow retains each operation
-after submission and advances only when both Transport delivery and the correlated
-semantic response are complete. A pending tick owns a tuple of encoded messages: it
-contains one fixed instruction today and can later contain declared communication data
-without changing the stop-and-wait state machine.
+The caller repeatedly invokes non-blocking `service()`. The connection retains
+incomplete incoming frames and partial serial-output offsets, decodes complete
+Application messages, and submits at most one Application message per pass. A separate
+Application workflow retains response-bearing operations until their correlated
+semantic response arrives. Variable-family tick updates advance after submission and
+whole-upload acceptance is established by `FINALIZE_TEST_UPLOAD`.
 
-Every established Transport session begins with BASIC System Information discovery and
+Every connection begins with BASIC System Information discovery and
 an exact major/minor/patch compatibility check. `UploadPlan` then supplies ordered,
 immutable operations containing their wire-message group and response-correlation
-metadata. The control-gated sequence is Test Configuration, pipelined non-consecutive sparse
-ticks (streamed without per-tick Application Response overhead), `FINALIZE_TEST_UPLOAD`, and optional START. Automatic mode preserves the
-start-mode behavior: IMMEDIATE queues START automatically and HOST_COMMAND waits for an
-explicit `start()` call. Operator-gated mode pauses configuration, every tick, and START;
-upload finalization and Complete Test acceptance remain automatic. `continue_upload()` switches the remaining plan back to
-automatic advancement without bypassing acknowledgements. EXTERNAL_TRIGGER remains in
-the protocol-neutral IR but has no protocol behavior. ABORT and RESET_APPLICATION use the same single-outstanding-operation
-mechanism. Session reset, delivery failure, response timeout, negative response, or
-correlation mismatch abandons the workflow; an upload is never blindly replayed.
+metadata. The control-gated sequence is Test Configuration, non-consecutive sparse
+ticks (streamed without per-tick Application Response overhead),
+`FINALIZE_TEST_UPLOAD`, and optional START. Automatic mode preserves the start-mode
+behavior: IMMEDIATE queues START automatically and HOST_COMMAND waits for an explicit
+`start()` call. Operator-gated mode pauses configuration, every tick, and START; upload
+finalization and Complete Test acceptance remain automatic. `continue_upload()`
+switches the remaining plan back to automatic advancement without bypassing required
+acknowledgements. EXTERNAL_TRIGGER
+remains in the protocol-neutral IR but has no protocol behavior. ABORT and
+RESET_APPLICATION use the same single-outstanding-operation mechanism. A serial error,
+response timeout, negative response, family mismatch, or correlation mismatch abandons
+the workflow; an upload is never blindly replayed.
 
 ## Captured-run boundary
 
-The incoming protocol is isolated from result storage. The implemented fixed adapter
-turns one complete Application `TestResult` into one `TickResult`, while decoded
-Application Errors become `ApplicationErrorRecord` values. Future public variable
-result wrappers will add raw `CommunicationResult` values at the same boundary. These
-typed storage records have no dependency on CFFI objects or USB framing.
+The incoming protocol is isolated from result storage. The result adapter turns each
+complete Application `TestResult` or `VariableTestResult` into one `TickResult` and
+adds raw UART, SPI, and CAN records as `CommunicationResult` values. Decoded Application
+Errors become `ApplicationErrorRecord` values. These typed storage records have no
+dependency on CFFI objects or USB framing.
 
 `TickResult` currently mirrors the stable semantic content identified in the
 application design:
@@ -389,11 +396,11 @@ the same captured evidence and assertion snapshot can be evaluated again later.
 
 ## Remaining planned boundaries
 
-When the protocol exposes variable communication instruction and result messages, add
-their mappings beside the fixed mappings. Each tick operation already supports a tuple
-of separately delivered messages followed by one Tick Response, so serial discovery,
-Transport servicing, response correlation, upload identity, capture storage, and fixed
-state expansion do not need to change for those additions.
+I2C can be added to the variable adapter when the RIG hardware path is available. The
+protocol-neutral model, captured communication record, and assertion evaluator already
+provide the surrounding boundary; the missing work is the wire mapping and hardware
+validation. `EXTERNAL_TRIGGER` also remains representable but has no terminal-run
+behavior.
 
 ## Testing approach
 
@@ -406,9 +413,10 @@ state expansion do not need to change for those additions.
   invalid evidence, transition gaps, application errors, and JSON/Markdown reports.
 - Captured-run tests verify batching barriers, transactional rollback, finalization,
   validity normalization, raw payload preservation, queries, and derived exports.
-- Protocol adapter tests verify full-array configuration, sparse state retention,
-  PWM disable/restore behavior, tick-zero Analogue initialization, result mapping,
-  exact COM discovery, and partial serial writes.
+- Protocol adapter tests verify both message families, full-array configuration, sparse
+  state retention, communication operations and results, zero per-tick acknowledgements,
+  PWM disable/restore behavior, tick-zero Analogue initialization, exact COM discovery,
+  direct framing, and partial serial writes.
 - Future hardware tests should be a separate, explicitly selected test category.
 
 The default CI workflow runs deterministic tests that require no connected rig.

@@ -1,4 +1,4 @@
-"""Caller-driven composition of pySerial, Transport, and Application workflows."""
+"""Caller-driven composition of direct serial framing and Application workflows."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def monotonic_now_ms() -> int:
 
 
 class ProtocolWorkflowState(str, Enum):
-    """Host-visible state of the Application transaction layered over Transport."""
+    """Host-visible state of an Application transaction over the serial connection."""
 
     CONNECTING = "connecting"
     DISCOVERING = "discovering"
@@ -64,7 +64,7 @@ class ProtocolWorkflowState(str, Enum):
 
 
 class UploadAdvanceMode(str, Enum):
-    """How semantic upload operations are released to Transport."""
+    """How semantic upload operations are released to the serial workflow."""
 
     AUTOMATIC = "automatic"
     OPERATOR_GATED = "operator_gated"
@@ -72,7 +72,7 @@ class UploadAdvanceMode(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class RigSystemInfo:
-    """Version and diagnostic information confirmed for one Transport session."""
+    """Version and diagnostic information confirmed for one serial connection."""
 
     protocol_version: str
     firmware_version: str
@@ -109,7 +109,7 @@ class ManualSendResult:
 
 @dataclass(slots=True)
 class _ApplicationOperation:
-    """One response-gated operation, containing one or more Transport messages."""
+    """One operation containing one or more encoded Application messages."""
 
     kind: str
     encoded_messages: tuple[bytes, ...]
@@ -383,7 +383,7 @@ class FixedIOProtocolConnection:
 
     @property
     def upload_delivery_complete(self) -> bool:
-        """Whether every upload message, including finalization, was Transport-confirmed."""
+        """Whether every upload message, including finalization, was submitted."""
         return (
             self._active_upload is not None
             and self._upload_message_count > 0
@@ -459,7 +459,7 @@ class FixedIOProtocolConnection:
         upload_attempt: UploadAttempt | None = None,
         advance_mode: UploadAdvanceMode = UploadAdvanceMode.AUTOMATIC,
     ) -> UploadAttempt:
-        """Queue configuration, sparse fixed-I/O states, and upload finalization."""
+        """Queue configuration, sparse family-specific updates, and finalization."""
         self._require_open()
         if self._manual_mode:
             raise ProtocolSessionError("Test uploads are unavailable in a manual session")
@@ -589,7 +589,7 @@ class FixedIOProtocolConnection:
             report = self.service()
             if time.monotonic() >= deadline:
                 raise TimeoutError(
-                    "Timed out before firmware accepted the complete fixed-I/O upload"
+                    "Timed out before firmware accepted the complete Application upload"
                 )
             if poll_interval_s and not (
                 report.serial_bytes_read
@@ -635,7 +635,7 @@ class FixedIOProtocolConnection:
         )
 
     def reset_application(self) -> None:
-        """Queue a test-independent Application reset without resetting Transport."""
+        """Queue a test-independent Application reset."""
         self._require_open()
         if not self._session_confirmed:
             raise ProtocolSessionError("Application compatibility has not been confirmed")
@@ -1025,7 +1025,7 @@ class FixedIOProtocolConnection:
                     else operation.response_error or "Application response failed."
                 )
             else:
-                detail = "Transport delivery confirmed; Application response was not required."
+                detail = "Application message submitted; a response was not required."
             self._last_manual_send_result = ManualSendResult(
                 sequence=operation.manual_sequence or 0,
                 label=operation.manual_label or "Application message",
@@ -1351,7 +1351,7 @@ class FixedIOProtocolConnection:
 
     def _require_open(self) -> None:
         if self._closed:
-            raise ProtocolSessionError("The fixed-I/O protocol connection is closed")
+            raise ProtocolSessionError("The Application protocol connection is closed")
 
     def __enter__(self) -> FixedIOProtocolConnection:
         self._require_open()

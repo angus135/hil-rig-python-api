@@ -56,7 +56,7 @@ class IncomingResultAdapter:
         self._latched_pwm_inputs = [PWMMeasurement(period_ns=0, duty_permyriad=0)] * 2
 
     def receive_usb_bytes(self, data: bytes) -> None:
-        """Reject unframed bytes; the serial Transport connection owns this step."""
+        """Reject framed bytes; the serial connection owns deframing."""
         if not isinstance(data, bytes):
             raise TypeError("data must be bytes")
         raise ProtocolSessionError(

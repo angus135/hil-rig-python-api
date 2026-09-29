@@ -1,4 +1,4 @@
-"""Fixed-I/O Application/Transport integration for the HIL-RIG host API."""
+"""Application protocol and direct serial integration for the HIL-RIG host API."""
 
 from hilrig.protocol.application import (
     FixedIOProtocolAdapter,

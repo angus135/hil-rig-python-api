@@ -1,4 +1,4 @@
-"""Translate the protocol-neutral IR into fixed-I/O Application messages."""
+"""Translate the protocol-neutral IR into legacy or variable Application messages."""
 
 from __future__ import annotations
 
@@ -290,7 +290,7 @@ class FixedIOProtocolAdapter:
         return UploadPlan(upload=upload, operations=tuple(operations))
 
     def decode(self, data: bytes) -> object:
-        """Decode one complete Application message received from Transport."""
+        """Decode one complete, deframed Application message."""
         return self.codec.decode(data)
 
     def encode(self, message: object) -> bytes:
@@ -298,7 +298,7 @@ class FixedIOProtocolAdapter:
         return self.codec.encode(message)
 
     def build_system_info_request(self, *, request_firmware_git_hash: bool = True) -> object:
-        """Build the discovery request required for each new Transport session."""
+        """Build the discovery request required for each new connection."""
         if not isinstance(request_firmware_git_hash, bool):
             raise TypeError("request_firmware_git_hash must be a bool")
         return self.protocol.SystemInfoRequest(request_firmware_git_hash=request_firmware_git_hash)

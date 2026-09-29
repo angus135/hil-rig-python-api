@@ -3,6 +3,12 @@
 These files each construct and send exactly one Application message. They do not create
 a `Test`, compile a test definition, or generate run artifacts.
 
+The terminal encodes each value with the Application codec and sends it over USB CDC
+with a two-byte little-endian payload-length prefix. A normal send waits for the
+message's Application Response. Add `--transport-only` to send without requiring that
+response; the option name is retained for compatibility with the earlier transport
+layer.
+
 All examples use this Application Test ID:
 
 ```text

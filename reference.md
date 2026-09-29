@@ -39,7 +39,8 @@ CompiledTestIR                        src/hilrig/compiler.py
     |                    \
     |                     +----------> JSON and Excel exports
     v
-FixedIOProtocolAdapter                src/hilrig/protocol/application.py
+VariableIOProtocolAdapter (default)  src/hilrig/protocol/application.py
+or FixedIOProtocolAdapter (legacy)
     |
     v
 UploadPlan and Application messages
@@ -47,7 +48,7 @@ UploadPlan and Application messages
     v
 FixedIOProtocolConnection             src/hilrig/protocol/connection.py
     |
-    +---- Transport over USB CDC ----> HIL-RIG
+    +---- direct length-prefixed USB CDC ----> HIL-RIG
     |
     <---- decoded results and errors --+
     |
@@ -124,8 +125,8 @@ evaluator work. Protocol modules import them lazily and raise a clear
 | `src/hilrig/models/identifiers.py` | Logical test IDs and per-upload Application Test IDs. | Working on run identity or retry behaviour. |
 | `src/hilrig/exporters/json_ir.py` | RIG-facing JSON representation. | Changing machine-readable test output. |
 | `src/hilrig/exporters/excel.py` | Four-sheet human review workbook. | Changing the review view. |
-| `src/hilrig/protocol/application.py` | Converts compiled fixed I/O into public protocol values and upload operations. | Mapping model data onto the Application protocol. |
-| `src/hilrig/protocol/connection.py` | Services Transport and enforces the response-gated upload/run state machine. | Changing live USB workflow, correlation, retries, or control commands. |
+| `src/hilrig/protocol/application.py` | Converts compiled fixed and communication I/O into variable-family or legacy protocol values and upload operations. | Mapping model data onto the Application protocol. |
+| `src/hilrig/protocol/connection.py` | Services direct USB framing and enforces the upload/run state machine. | Changing live USB workflow, framing, correlation, or control commands. |
 | `src/hilrig/protocol/serial.py` | Base-description COM discovery and pySerial setup. | Changing USB CDC discovery or serial settings. |
 | `src/hilrig/protocol/manual.py` | Validates standalone JSON and creates one protocol message. | Extending terminal manual-message support. |
 | `src/hilrig/results/models.py` | Typed, protocol-neutral incoming records and capture metadata. | Adding data received from a run. |
@@ -138,7 +139,7 @@ evaluator work. Protocol modules import them lazily and raise a clear
 | `src/hilrig/terminal.py` | The installed `hil-rig` command shell and command parsing. | Adding or changing a terminal command. |
 | `examples/` | Small test definitions, offline capture/evaluation demos, and manual messages. | Looking for a runnable usage example. |
 | `tests/` | Hardware-free unit and integration tests. | Finding the expected behaviour of a subsystem. |
-| `tests/protocol_fakes.py` | Fake public protocol values, codec, Transport, and serial helpers. | Testing protocol work without a RIG. |
+| `tests/protocol_fakes.py` | Fake public protocol values, codec, compatibility Transport, and serial helpers. | Testing protocol work without a RIG. |
 | `pyproject.toml` | Packaging, Python support, command entry point, pytest, coverage, and Ruff settings. | Changing dependencies or development tools. |
 | `.github/workflows/ci.yml` | Python 3.12/3.13 tests, lint, format check, and package build. | Changing continuous integration. |
 
@@ -173,7 +174,7 @@ channel they mean.
   before adding instructions or assertions.
 - Supply exactly one time unit for each point or range.
 - Times must map to a whole tick. The API rejects values that would need rounding.
-- Ranges include both their first and last tick.
+- Ranges are half-open: they include `from_tick` and exclude `until_tick`.
 - Instruction IDs and assertion IDs are separate zero-based sequences.
 - A successful `compile()` freezes the `Test`; later mutation raises
   `FrozenTestError`.
@@ -193,14 +194,16 @@ have been changed directly or incorrectly.
 | PWM output | 0-1 | Voltage/frequency/duty/enable configuration and updates | Configuration and sparse state upload |
 | Analogue input | 0-1 | Usage declaration and voltage assertions | Configuration and fixed results |
 | Analogue output | 0-5 | Initial voltage and voltage updates | Configuration and sparse state upload |
-| I2C | 0-1 | Master read/write and slave response preload | Retained in compiled IR; not sent by the normal runner yet |
-| SPI | 0-1 | Master transfer; slave can be configured only | Retained in compiled IR; not sent by the normal runner yet |
-| UART | 0-1 | Byte or text write | Retained in compiled IR; not sent by the normal runner yet |
+| I2C | 0-1 | Master read/write, slave response preload, receive assertions | Not supported by the variable family; the current RIG hardware path is unavailable |
+| SPI | 0-1 | Master transfer, slave configuration, receive assertions | Variable-family configuration, updates, and captured results |
+| UART | 0-1 | Byte/text write and receive assertions | Variable-family configuration, updates, and captured results |
+| CAN | 0-1 | Standard 11-bit transmission and receive assertions | Variable-family configuration, updates, and captured results |
 
-The capture model already has a `CommunicationResult` for raw I2C, SPI, and UART data,
-but the normal protocol adapter does not yet emit or receive variable communication
-messages. Manual terminal mode is a separate firmware-debug path and can send the
-standalone Application message types supported by `protocol/manual.py`.
+The default variable adapter emits UART, SPI, and CAN operations and ingests their raw
+captured payloads from `VariableTestResult`. Communication assertions are evaluated
+against those stored payloads. Manual terminal mode is a separate firmware-debug path
+and can send the standalone Application message types supported by
+`protocol/manual.py`.
 
 ## Compilation and exported definitions
 
@@ -252,12 +255,16 @@ can be traced to the exact attempt that produced them.
 
 ## Protocol and live connection
 
-`FixedIOProtocolAdapter` handles translation, while
-`FixedIOProtocolConnection` handles live state and I/O.
+`VariableIOProtocolAdapter` handles the default variable-family translation,
+`FixedIOProtocolAdapter` handles the legacy fixed family, and
+`FixedIOProtocolConnection` handles live state and I/O for either family. The
+connection class retains its historical name for API compatibility.
 
-The adapter creates complete fixed-channel arrays. Unconfigured channels use disabled
-protocol records. Instructions are sparse: it sends a complete fixed output state only
-at ticks where supported state changes. It retains output state between those ticks.
+Both adapters create complete configuration arrays. Unconfigured channels use disabled
+protocol records. Instructions are sparse and retain fixed-output state between update
+ticks. The variable adapter places fixed changes and UART, SPI, or CAN traffic into
+`UpdateInstruction` logical operations; the legacy adapter emits complete fixed output
+states and no communication traffic.
 
 Notable fixed-output rules are:
 
@@ -268,22 +275,24 @@ Notable fixed-output rules are:
 - A disabled PWM is sent as period/duty `0/0`, while its requested values are retained
   so a later enable restores them.
 
-The adapter groups messages into semantic `UploadOperation` values: configuration,
-each sparse tick, and possibly START. Grouping by operation means a future tick can
-contain several wire messages without changing terminal stepping.
+The adapters group messages into semantic `UploadOperation` values: configuration,
+each sparse tick, finalization, and possibly START. The variable family deliberately
+assigns no response correlation to tick updates; finalization provides the whole-upload
+acceptance boundary.
 
 The connection is a non-blocking service loop. A caller repeatedly calls `service()`;
-each pass reads serial data, advances Transport, handles decoded messages, writes as
-much queued output as possible, and returns a `ProtocolServiceReport`.
+each pass reads serial data, extracts complete messages using a two-byte little-endian
+payload length, handles decoded messages, writes as much queued output as possible,
+and returns a `ProtocolServiceReport`.
 
-Every operation waits for both reliable Transport delivery and its correctly correlated
-Application Response. Configuration, tick, START, ABORT, and RESET_APPLICATION are not
-assumed to have succeeded merely because bytes were written. A timeout, rejection,
-correlation mismatch, delivery failure, or session reset fails the workflow safely.
+Configuration, finalization, START, ABORT, and RESET_APPLICATION wait for correctly
+correlated Application Responses. Variable-family tick updates do not have per-tick
+responses. A response timeout, rejection, correlation mismatch, serial error, or wrong
+result family fails the workflow safely.
 
-Each established session first requests System Information and checks the exact
-protocol version. Manual mode may explicitly skip that Application-level check, but it
-still establishes and services Transport.
+Each connection first requests System Information and checks the exact protocol
+version. Manual mode may explicitly skip that Application-level check, but still opens
+and services the serial connection.
 
 ## Thread ownership
 
@@ -441,8 +450,9 @@ extension point.
 Keep message construction in `protocol/application.py` and connection state in
 `protocol/connection.py`. Preserve these rules:
 
-- one active reliable Application operation at a time;
-- Transport delivery and semantic response are separate completion conditions;
+- one active Application operation at a time;
+- direct frames preserve partial writes and incomplete reads;
+- variable-family tick updates are streamed without per-tick responses;
 - every response is correlated to its expected scope, ID, tick, or command;
 - partial serial writes retain their offset;
 - uncertain or rejected uploads are not silently replayed with the same wire ID; and
@@ -469,8 +479,9 @@ Keep parsing and display in `terminal.py`. Put long-running work and state chang
 | `test_assertion_snapshots.py` | SQLite persistence of compiled assertions |
 | `test_captured_run.py` | Builder, transactions, finalization, queries, and exports |
 | `test_evaluator.py` | Handler dispatch, evidence gaps, verdicts, and reports |
-| `test_protocol_application.py` | Fixed-I/O lowering and semantic upload plans |
-| `test_protocol_connection.py` | Transport service, correlation, control flow, and manual mode |
+| `test_protocol_application.py` | Legacy fixed-I/O lowering and semantic upload plans |
+| `test_protocol_variable.py` | Variable updates, communication records, and family selection |
+| `test_protocol_connection.py` | Direct serial framing, correlation, control flow, and manual mode |
 | `test_protocol_serial.py` | COM discovery and serial settings |
 | `test_protocol_manual.py` | Standalone JSON Application messages |
 | `test_runner.py`, `test_terminal.py` | Threaded orchestration, artifacts, and shell commands |
@@ -506,9 +517,10 @@ When debugging an end-to-end failure, follow the same direction as the main flow
 
 ## Current limits to remember
 
-- The normal hardware path lowers fixed Digital, Analogue, and PWM I/O only.
-- I2C, SPI, and UART definitions compile but their variable protocol messages are still
-  deferred.
+- The default hardware path supports fixed I/O plus UART, SPI, and CAN through variable
+  messages; use `run --legacy` only for the fixed-only legacy family.
+- I2C definitions compile, but variable-family upload rejects them because the current
+  RIG hardware path is unavailable.
 - SPI transfer is master-only; a slave channel can be configured but cannot schedule a
   transfer.
 - There is no per-channel recording switch; the model assumes rig-wide recording.

@@ -4,23 +4,22 @@ Host-side Python library for constructing an internal model of a hardware-in-the
 test for the HIL-RIG.
 
 The current implementation covers test and peripheral configuration, stimulus
-instructions, exact user-time-to-tick conversion, digital, PWM, and analogue-input
-assertion definitions, protocol-neutral JSON and Excel intermediate representations,
-persistent captured-run storage, and host-side assertion evaluation with JSON and
-Markdown reports. The optional protocol integration lowers fixed Digital, Analogue,
-and PWM configuration/stimulus state through `hil-rig-protocol`, services its Transport
-over a USB CDC COM port, and stores decoded fixed Test Results in the captured-run
-database. Protocol v0.3.0 discovery, semantic Responses, upload finalization, Application
-Errors, START, ABORT, and RESET_APPLICATION are integrated. Variable communication
-messages remain deferred.
+instructions, exact user-time-to-tick conversion, fixed and communication assertions,
+protocol-neutral JSON and Excel intermediate representations, persistent captured-run
+storage, and host-side assertion evaluation with JSON and Markdown reports. The
+optional protocol integration lowers fixed Digital, Analogue, and PWM state plus UART,
+SPI, and CAN traffic through `hil-rig-protocol`. Application messages use direct
+length-prefixed framing over a USB CDC COM port. Protocol v0.3.0 discovery, semantic
+Responses, upload finalization, fixed and variable results, Application Errors, START,
+ABORT, and RESET_APPLICATION are integrated.
 
 ## Requirements
 
 - Python 3.12 or newer
 - Git
 
-Fixed-I/O hardware communication additionally requires `hil-rig-protocol` 0.3.0 or newer
-and `pyserial`. Until dependency packaging is finalized, install them into the active
+Hardware communication additionally requires `hil-rig-protocol` 0.3.0 or newer and
+`pyserial`. Until dependency packaging is finalized, install them into the active
 environment from the adjacent protocol checkout:
 
 ```powershell
@@ -85,8 +84,7 @@ The terminal provides these commands:
 ```text
 help
 ports
-run <path>
-run --step <path>
+run [--step] [--legacy | --family variable|legacy] <path>
 step
 continue
 status
@@ -109,7 +107,7 @@ Paths containing spaces may be quoted. For example:
 
 ```text
 HIL-RIG> run "C:\HIL-RIG Tests\motor-startup.py"
-Run queued: C:\HIL-RIG Tests\motor-startup.py
+Run (variable message family) queued: C:\HIL-RIG Tests\motor-startup.py
 
 HIL-RIG> status
 State: running
@@ -117,11 +115,14 @@ Detail: Receiving test results (412 received).
 Results: 412/1751 ticks
 ```
 
-`run` uses the strict protocol-v0.3 workflow: System Information discovery, exact
-version confirmation, correlated Application Responses for configuration and sparse
-ticks, Complete Test acceptance, START completion, and the complete ordered result
-set. `HOST_COMMAND` tests are started automatically by this automatic runner after
-upload acceptance.
+`run` defaults to the variable message family. Use `run --legacy <path>` (equivalent to
+`run --family legacy <path>`) only with firmware that expects legacy
+`TestInstruction`/`TestResult` messages. Both families use the protocol-v0.3 workflow:
+System Information discovery, exact version confirmation, configuration acceptance,
+sparse update upload, Complete Test acceptance, START completion, and the complete
+ordered result set. Variable-family tick updates are streamed without a per-tick
+Application Response. `HOST_COMMAND` tests are started automatically by this runner
+after upload acceptance.
 
 Use `run --step <path>` when debugging the upload/start sequence. Discovery and version
 confirmation still happen automatically. The terminal then pauses before each semantic
@@ -132,22 +133,23 @@ configuration -> tick <n> -> tick <n> -> ... -> START
 ```
 
 At a pause, `step` releases exactly that one operation. An operation may contain more
-than one wire message in future protocol versions; it remains one terminal step. After
-release, the worker waits for Transport delivery and the operation's correlated
-Application Response before offering the next step. After the final tick is accepted,
-the host sends `FINALIZE_TEST_UPLOAD` and waits for Complete Test acceptance
-automatically, so there is no separate operator step for it. START is always a manual
-step in stepped mode, including for tests configured with `StartMode.IMMEDIATE`.
+than one wire message in future protocol versions; it remains one terminal step.
+Response-bearing operations wait for their correlated Application Response. Variable
+tick updates have no per-tick response, so the next gate is offered after the update is
+submitted. After the final tick, the host sends `FINALIZE_TEST_UPLOAD` and waits for
+Complete Test acceptance automatically, so there is no separate operator step for it.
+START is always a manual step in stepped mode, including for tests configured with
+`StartMode.IMMEDIATE`.
 
 `continue` releases the currently paused operation and disables stepping for the rest
-of that run. It does not disable delivery checks, Application acknowledgements,
-correlation, or timeouts. Test results are received continuously after START; individual
-result messages are not stepped. `step` and `continue` report an error if no stepped run
-is currently paused. `status` shows the next operation while a run is waiting:
+of that run. It does not disable required Application acknowledgements, correlation,
+or timeouts. Test results are received continuously after START; individual result
+messages are not stepped. `step` and `continue` report an error if no stepped run is
+currently paused. `status` shows the next operation while a run is waiting:
 
 ```text
 HIL-RIG> run --step "examples\terminal_test.py"
-Stepped run queued: examples\terminal_test.py
+Stepped run (variable message family) queued: examples\terminal_test.py
 
 Paused before configuration. Enter 'step' to release it or 'continue' to finish automatically.
 HIL-RIG> step
@@ -193,17 +195,18 @@ HIL-RIG> manual connect COM=2 --skip-system-info
 
 `COM=2` opens `COM2` directly. When it is omitted, the host retains its normal behavior
 of selecting the first port whose base description is exactly `USB Serial Device`.
-`--skip-system-info` does not skip COM discovery or Transport session establishment.
+`--skip-system-info` does not skip COM discovery or opening the serial connection.
 
-Send one message and require both Transport delivery and its correlated Application
-Response:
+Send one message and require its correlated Application Response:
 
 ```text
 HIL-RIG> manual send "examples\manual_messages\instruction.json"
 ```
 
-To finish the send after reliable Transport delivery without requiring an Application
-Response, add `--transport-only`:
+To send the framed message without requiring an Application Response, add
+`--transport-only`. The option name is retained for command-line compatibility even
+though the current connection uses direct USB framing rather than the protocol
+Transport layer:
 
 ```text
 HIL-RIG> manual send "examples\manual_messages\instruction.json" --transport-only
@@ -216,8 +219,8 @@ Test Response:
 HIL-RIG> manual finalize 00112233445566778899aabbccddeeff
 ```
 
-Inbound messages—including responses received after a Transport-only send—are retained
-in a bounded terminal inbox:
+Inbound messages—including responses received after a `--transport-only` send—are
+retained in a bounded terminal inbox:
 
 ```text
 HIL-RIG> manual inbox
@@ -639,32 +642,36 @@ minimum and maximum bounds, and then narrows the highest-pass/lowest-fail bounda
 `burst_sweep_points()` applies relative headroom below the discovered maximum and
 generates points with different burst intervals.
 
-See `examples/loopback_utilization_point.py` for an independently runnable 10% point
-that applies deterministic UART, SPI, and CAN traffic to an ordinary `Test`.
+See `examples/loopback_utilization_point.py` for an independently runnable,
+configurable point that applies deterministic UART, SPI, and CAN traffic to an ordinary
+`Test`. On 2026-09-29, the `92% every 1 ticks` profile passed on the hardware rig at
+1 kHz. That result is a hardware validation checkpoint, not part of the deterministic
+CI suite; the example's current defaults may be adjusted for later runs.
 
-`IncomingResultAdapter` implements the fixed-result end of this flow:
+`IncomingResultAdapter` implements the result end of this flow:
 
 ```text
-USB bytes -> transport messages -> application messages -> typed builder records
+USB bytes -> 2-byte length framing -> application messages -> typed builder records
 ```
 
-The adapter maps every decoded protocol `TestResult` to one `TickResult`, rejects a
-wire Test ID that differs from `builder.application_test_id`, converts PWM records to
-nanoseconds/permyriad, and queues the result for SQLite. `EXECUTION_PROBLEM` values are
-stored as SQL `NULL` rather than accepting the protocol's placeholder zeroes as real
-measurements. The capture database retains both the wire ID and immutable logical
-`test_id`.
+The adapter maps each decoded `TestResult` or `VariableTestResult` to one `TickResult`,
+stores UART, SPI, and CAN captured records as `CommunicationResult` values, rejects a
+wire Test ID that differs from `builder.application_test_id`, and queues the result for
+SQLite. `EXECUTION_PROBLEM` fixed values are stored as SQL `NULL` rather than accepting
+placeholder zeroes as real measurements. The capture database retains both the wire ID
+and immutable logical `test_id`.
 
-## Fixed-I/O protocol and USB CDC connection
+## Application protocol and USB CDC connection
 
-`FixedIOProtocolAdapter` turns a `CompiledTestIR` and `UploadAttempt` into an
-`UploadPlan` of semantic `UploadOperation` objects and the public `hil-rig-protocol`
-values. Each operation owns all its encoded messages and its expected response
-correlation. Configuration arrays are always complete; unconfigured
-channels use canonical disabled records. Communication peripheral configuration and
-instructions stay in the host IR but are deliberately not emitted yet.
+`VariableIOProtocolAdapter` is the default. It turns a `CompiledTestIR` and
+`UploadAttempt` into an `UploadPlan` of semantic `UploadOperation` objects using
+`UpdateInstruction` messages. It carries fixed outputs and UART, SPI, and CAN traffic;
+I2C is currently rejected because the RIG hardware path is unavailable.
+`FixedIOProtocolAdapter` remains available for the legacy
+`TestInstruction`/`TestResult` family. Both adapters emit complete configuration arrays,
+using canonical disabled records for unconfigured channels.
 
-Stimulus messages are sparse. The adapter starts from configured Digital/PWM state and
+Stimulus messages are sparse. Each adapter starts from configured Digital/PWM state and
 the initial Analogue voltage, applies all fixed-output changes at the next instruction
 tick, and emits one complete fixed state for that tick. It does not iterate through
 unchanged ticks. Because the protocol configuration has no initial Analogue value, any
@@ -711,14 +718,14 @@ matches the port's reported device. No match is an error. It opens that port as
 and with DTR/RTS disabled. The baud/line coding is explicit even if the direct USB CDC
 firmware ignores it.
 
-`service()` owns the byte-stream details: it retains any Transport receive suffix,
-drains bounded events and Application data, preserves partial serial-write offsets, and
-commits a Transport output only after pySerial accepts every byte. Each new Transport
-session first exchanges System Information and requires an exact protocol-version
-match. Configuration and sparse tick operations then wait for both Transport delivery
-and their correlated Application Response before the next operation is submitted.
-After the final sparse tick is accepted, the connection sends `FINALIZE_TEST_UPLOAD`
-with the same Application Test ID and waits for the firmware's Complete Test Response.
+`service()` owns the byte-stream details. Every Application message is prefixed with a
+two-byte little-endian payload length. The connection retains incomplete incoming
+frames, preserves partial serial-write offsets, decodes complete messages, and first
+exchanges System Information with an exact protocol-version check. Configuration,
+finalization, START, ABORT, and RESET_APPLICATION wait for their correlated responses.
+Variable-family tick updates are streamed without per-tick responses. After the final
+update, the connection sends `FINALIZE_TEST_UPLOAD` with the same Application Test ID
+and waits for the firmware's Complete Test Response.
 
 By default, `IMMEDIATE` automatically queues `START`; `HOST_COMMAND` exposes
 `connection.start()`. Passing `advance_mode=UploadAdvanceMode.OPERATOR_GATED` to
@@ -727,10 +734,9 @@ By default, `IMMEDIATE` automatically queues `START`; `HOST_COMMAND` exposes
 `connection.abort()` and `connection.reset_application()` send the corresponding
 response-gated controls. `EXTERNAL_TRIGGER` remains representable in the compiled IR
 but intentionally performs no protocol action. Responses are correlated by scope,
-Application Test ID, tick and command. A rejection, mismatch, timeout, delivery
-failure, or Transport session reset fails the workflow rather than guessing that an
-operation succeeded. The default connection enables Transport retransmission with a
-250 ms timeout and three retries; callers can supply a different `TransportConfig`.
+Application Test ID, tick, and command. A rejection, mismatch, response timeout, serial
+error, or incompatible message family fails the workflow rather than guessing that an
+operation succeeded.
 
 Application Error messages associated with the active run are converted to
 `ApplicationErrorRecord` and queued into the same SQLite writer as results. Their
@@ -739,12 +745,12 @@ text by the current schema), and diagnostic bytes are preserved. Errors do not r
 the required fixed Test Results. The connection considers result transfer complete
 only after receiving the expected ordered result ticks `0..N-1`.
 
-If configuration, a tick, or whole-test validation is rejected, that upload ID is
-retired and the caller can restart immediately with `attempt.restart()`. A builder for
+If configuration or whole-test validation is rejected, that upload ID is retired and
+the caller can restart immediately with `attempt.restart()`. A builder for
 the abandoned attempt must first be finalized, then a builder created for the fresh
 attempt can be attached with `connection.bind_result_builder(new_builder,
 replace=True)`. Reusing the retired wire ID is rejected locally. A rejected START leaves
-the accepted upload ready for an explicit retry; uncertain Transport failures and
+the accepted upload ready for an explicit retry; uncertain serial failures and
 `FAILED` control outcomes still require ABORT, RESET_APPLICATION, or reconnection.
 
 ## Evaluate captured assertions
@@ -876,7 +882,7 @@ python -m ruff format .
 |   |-- exporters/                 JSON machine IR and human-readable Excel export
 |   |-- evaluation/                Assertion dispatch, handlers, and report export
 |   |-- exceptions.py              Library-specific exception hierarchy
-|   |-- protocol/                  Application lowering and USB CDC Transport service
+|   |-- protocol/                  Application lowering and direct USB CDC framing
 |   |-- results/                   Result mapping, SQLite storage, and query facade
 |   `-- models/                    Internal configuration/instruction/assertion data
 |-- tests/                         Unit tests

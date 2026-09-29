@@ -198,7 +198,7 @@ class _ManualConnection:
                 application_response=None,
                 success=True,
                 detail=(
-                    "Transport delivery confirmed; Application response was not required."
+                    "Application message submitted; a response was not required."
                     if transport_only
                     else "Application response accepted."
                 ),

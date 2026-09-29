@@ -508,7 +508,7 @@ class ProtocolWorker:
             if not isinstance(actual_device, str) or not actual_device:
                 actual_device = command.serial_settings.device or "automatic"
             self._set_manual_snapshot(
-                detail="Establishing the Transport session.",
+                detail="Opening the serial connection.",
                 device=actual_device,
             )
 
@@ -524,7 +524,7 @@ class ProtocolWorker:
             if not requested_disconnect:
                 info = connection.session_info
                 detail = (
-                    "Manual Transport session ready; System Information was skipped."
+                    "Manual serial connection ready; System Information was skipped."
                     if command.skip_system_info
                     else "Manual protocol session ready."
                 )
@@ -602,7 +602,7 @@ class ProtocolWorker:
             )
             self._notify(f"Manual message was not sent: {type(error).__name__}: {error}")
             return
-        mode = "Transport delivery only" if command.transport_only else "Application response"
+        mode = "no response required" if command.transport_only else "Application response"
         self._set_manual_snapshot(
             state=ManualSessionState.SENDING,
             detail=f"Sending {message.label}; waiting for {mode.lower()}.",

@@ -475,7 +475,7 @@ class HilRigShell:
         if not self.worker.manual_send(path, transport_only=transport_only):
             self._write_line("The manual session is not ready for another message.")
             return
-        mode = "transport only" if transport_only else "Application response required"
+        mode = "no response required" if transport_only else "Application response required"
         self._write_line(f"Manual send queued: {path} ({mode}).")
 
     def _manual_finalize(self, tokens: list[str]) -> None:
