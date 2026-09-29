@@ -110,32 +110,52 @@ def write_evaluation_report_json(
 
 
 def render_evaluation_report_markdown(report: EvaluationReport) -> str:
-    """Render a concise human-readable report with per-assertion evidence."""
+    """Render an operator-focused report while retaining full evidence in JSON/SQLite."""
     lines = [
         f"# HIL-RIG Test Report: {report.test_name}",
         "",
         f"**Overall verdict:** `{report.verdict.value.upper()}`  ",
         f"**Capture status:** `{report.capture_status.value.upper()}`  ",
-        f"**Test ID:** `{report.test_id_hex}`  ",
-        f"**Application Test ID:** `{report.application_test_id_hex}`  ",
-        f"**Run ID:** `{report.run_id_hex}`  ",
-        f"**Capture database:** `{report.capture_database}`  ",
-        f"**Evaluated at:** `{report.evaluated_at}`",
+        f"**Assertions:** {report.passed_count} passed, {report.failed_count} failed, "
+        f"{report.inconclusive_count} inconclusive",
         "",
-        "## Summary",
-        "",
-        f"- Expected fixed ticks: {report.expected_tick_count}",
-        f"- Received fixed ticks: {report.received_tick_count}",
-        f"- Assertion set: `{report.assertion_set_id}`",
-        f"- Compiled IR version: `{report.compiled_ir_version}`",
-        f"- Passed: {report.passed_count}",
-        f"- Failed: {report.failed_count}",
-        f"- Inconclusive: {report.inconclusive_count}",
-        "",
-        "## Assertion groups",
+        "## Failures",
         "",
     ]
+    failures = tuple(
+        result for result in report.assertion_results if result.verdict.value == "fail"
+    )
+    if failures:
+        lines.extend(
+            [
+                "| Group | Subject | Tick/window | Reason |",
+                "|---|---|---|---|",
+            ]
+        )
+        lines.extend(
+            f"| {_cell(result.group_name)} | {_cell(result.subject_name)} | "
+            f"{_tick_window(result.evaluated_from_tick, result.evaluated_until_tick)} | "
+            f"{_cell(_compact_text(result.message))} |"
+            for result in failures
+        )
+    else:
+        lines.append("No failed assertions.")
+
+    lines.extend(["", "## Group overview", ""])
     if report.assertion_groups:
+        lines.extend(
+            [
+                "| Group | Verdict | Commands | Payload | Assertions |",
+                "|---|---|---:|---:|---:|",
+            ]
+        )
+        lines.extend(
+            f"| {_cell(group.name)} | {group.verdict.value.upper()} | "
+            f"{len(group.stimuli)} | {_format_byte_count(_group_payload_bytes(group.stimuli))} | "
+            f"{len(group.assertion_results)} |"
+            for group in report.assertion_groups
+        )
+        lines.extend(["", "## Group details", ""])
         for group in report.assertion_groups:
             lines.extend(
                 [
@@ -148,63 +168,96 @@ def render_evaluation_report_markdown(report: EvaluationReport) -> str:
                     [
                         "**Commanded stimuli**",
                         "",
-                        "| Instruction | Time | Statement |",
-                        "|---:|---|---|",
+                        "| Subject | Operation | Commands | Active ticks | Tick range | "
+                        "Payload | Avg/active tick | Max/active tick |",
+                        "|---|---|---:|---:|---|---:|---:|---:|",
                     ]
                 )
                 lines.extend(
-                    f"| {stimulus.instruction_id} | "
-                    f"{_stimulus_time(stimulus.tick, stimulus.time_ns)} | "
-                    f"{_cell(stimulus.message)} |"
-                    for stimulus in group.stimuli
+                    _stimulus_summary_row(summary)
+                    for summary in _stimulus_summaries(group.stimuli)
                 )
+                examples = _representative_stimuli(group.stimuli)
+                lines.extend(["", "Examples:"])
+                lines.extend(f"- {_compact_text(item.message)}" for item in examples)
+                if len(group.stimuli) > len(examples):
+                    lines.append(
+                        f"- {len(group.stimuli) - len(examples)} additional commands are "
+                        "retained in `evaluation-report.json` and `captured-run.sqlite3`."
+                    )
                 lines.append("")
-            lines.extend(
-                [
-                    "**Assertions**",
-                    "",
-                    "| ID | Verdict | Subject | Assertion | Tick/window | Summary |",
-                    "|---:|---|---|---|---|---|",
-                ]
-            )
-            lines.extend(
-                "| "
-                f"{result.assertion_id} | {result.verdict.value.upper()} | "
-                f"{_cell(result.subject_name)} | {_cell(result.assertion)} | "
-                f"{_tick_window(result.evaluated_from_tick, result.evaluated_until_tick)} | "
-                f"{_cell(result.message)} |"
-                for result in group.assertion_results
-            )
+            if group.assertion_results:
+                lines.extend(
+                    [
+                        "**Assertions**",
+                        "",
+                        "| ID | Verdict | Subject | Assertion | Tick/window | Expected | Summary |",
+                        "|---:|---|---|---|---|---|---|",
+                    ]
+                )
+                lines.extend(
+                    "| "
+                    f"{result.assertion_id} | {result.verdict.value.upper()} | "
+                    f"{_cell(result.subject_name)} | {_cell(result.assertion)} | "
+                    f"{_tick_window(result.evaluated_from_tick, result.evaluated_until_tick)} | "
+                    f"{_cell(_compact_text(_format_fields(result.expected)))} | "
+                    f"{_cell(_compact_text(result.message))} |"
+                    for result in group.assertion_results
+                )
+            else:
+                lines.append("No assertions belong to this group.")
             lines.append("")
     else:
-        lines.append("No assertions were evaluated.")
+        lines.append("No assertion groups were evaluated.")
 
-    lines.extend(["", "## Assertion details"])
-    for result in report.assertion_results:
-        lines.extend(
-            [
-                "",
-                f"### Assertion {result.assertion_id}: {result.verdict.value.upper()}",
-                "",
-                f"- Group: `{result.group_name}`",
-                f"- Subject: `{result.subject_name}`",
-                f"- Definition: `{result.peripheral}[{result.channel}].{result.assertion}`",
-                "- Tick/window: "
-                f"`{_tick_window(result.evaluated_from_tick, result.evaluated_until_tick)}`",
-                f"- Expected: {_format_fields(result.expected)}",
-                f"- Observed: {_format_fields(result.observed)}",
-                f"- Valid samples: {result.valid_sample_count}",
-                f"- Missing samples: {result.missing_sample_count}",
-                f"- Invalid samples: {result.invalid_sample_count}",
-                f"- Violations: {result.violation_count}",
-                f"- First failure tick: "
-                f"{'-' if result.first_failure_tick is None else result.first_failure_tick}",
-                "",
-                result.message,
-            ]
-        )
+    issues = tuple(
+        result for result in report.assertion_results if result.verdict.value != "pass"
+    )
+    if issues:
+        lines.extend(["", "## Assertion evidence"])
+        for result in issues:
+            lines.extend(
+                [
+                    "",
+                    f"### Assertion {result.assertion_id}: {result.verdict.value.upper()}",
+                    "",
+                    f"- Group: `{result.group_name}`",
+                    f"- Subject: `{result.subject_name}`",
+                    f"- Definition: `{result.peripheral}[{result.channel}].{result.assertion}`",
+                    "- Tick/window: "
+                    f"`{_tick_window(result.evaluated_from_tick, result.evaluated_until_tick)}`",
+                    f"- Expected: {_format_fields(result.expected)}",
+                    f"- Observed: {_format_fields(result.observed)}",
+                    f"- Valid samples: {result.valid_sample_count}",
+                    f"- Missing samples: {result.missing_sample_count}",
+                    f"- Invalid samples: {result.invalid_sample_count}",
+                    f"- Violations: {result.violation_count}",
+                    f"- First failure tick: "
+                    f"{'-' if result.first_failure_tick is None else result.first_failure_tick}",
+                    "",
+                    result.message,
+                ]
+            )
 
-    lines.extend(["", "## Warnings", ""])
+    lines.extend(
+        [
+            "",
+            "## Run details",
+            "",
+            f"- **Test ID:** `{report.test_id_hex}`",
+            f"- **Application Test ID:** `{report.application_test_id_hex}`",
+            f"- **Run ID:** `{report.run_id_hex}`",
+            f"- Capture database: `{report.capture_database}`",
+            f"- Evaluated at: `{report.evaluated_at}`",
+            f"- Fixed ticks: {report.received_tick_count} received / "
+            f"{report.expected_tick_count} expected",
+            f"- Assertion set: `{report.assertion_set_id}`",
+            f"- Compiled IR version: `{report.compiled_ir_version}`",
+            "",
+            "## Warnings",
+            "",
+        ]
+    )
     if report.warnings:
         lines.extend(f"- {warning}" for warning in report.warnings)
     else:
@@ -212,12 +265,78 @@ def render_evaluation_report_markdown(report: EvaluationReport) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _stimulus_time(tick: int, time_ns: int) -> str:
-    if time_ns % 1_000_000 == 0:
-        return f"tick {tick} ({time_ns // 1_000_000} ms)"
-    if time_ns % 1_000 == 0:
-        return f"tick {tick} ({time_ns // 1_000} µs)"
-    return f"tick {tick} ({time_ns} ns)"
+def _stimulus_summaries(stimuli) -> tuple[dict[str, object], ...]:
+    grouped: dict[tuple[str, str], dict[str, object]] = {}
+    for stimulus in stimuli:
+        key = (stimulus.subject_name, stimulus.operation)
+        summary = grouped.setdefault(
+            key,
+            {
+                "subject": stimulus.subject_name,
+                "operation": stimulus.operation,
+                "commands": 0,
+                "first_tick": stimulus.tick,
+                "last_tick": stimulus.tick,
+                "bytes_by_tick": {},
+            },
+        )
+        summary["commands"] = int(summary["commands"]) + 1
+        summary["last_tick"] = stimulus.tick
+        payload_bytes = _stimulus_payload_bytes(stimulus.arguments)
+        bytes_by_tick = summary["bytes_by_tick"]
+        assert isinstance(bytes_by_tick, dict)
+        bytes_by_tick[stimulus.tick] = bytes_by_tick.get(stimulus.tick, 0) + payload_bytes
+    return tuple(grouped.values())
+
+
+def _stimulus_summary_row(summary: dict[str, object]) -> str:
+    bytes_by_tick = summary["bytes_by_tick"]
+    assert isinstance(bytes_by_tick, dict)
+    payload_bytes = sum(bytes_by_tick.values())
+    active_ticks = len(bytes_by_tick)
+    average = payload_bytes / active_ticks if active_ticks else 0
+    maximum = max(bytes_by_tick.values(), default=0)
+    first_tick = int(summary["first_tick"])
+    last_tick = int(summary["last_tick"])
+    tick_range = str(first_tick) if first_tick == last_tick else f"{first_tick}-{last_tick}"
+    return (
+        f"| {_cell(str(summary['subject']))} | {_cell(str(summary['operation']))} | "
+        f"{summary['commands']} | {active_ticks} | {tick_range} | "
+        f"{_format_byte_count(payload_bytes)} | {average:.2f} B | {maximum} B |"
+    )
+
+
+def _representative_stimuli(stimuli):
+    if len(stimuli) <= 2:
+        return tuple(stimuli)
+    return (stimuli[0], stimuli[-1])
+
+
+def _group_payload_bytes(stimuli) -> int:
+    return sum(_stimulus_payload_bytes(item.arguments) for item in stimuli)
+
+
+def _stimulus_payload_bytes(arguments: Mapping[str, EvaluationScalar]) -> int:
+    for name in ("data", "tx_data"):
+        value = arguments.get(name)
+        if isinstance(value, str) and value.startswith("0x"):
+            return max(0, (len(value) - 2) // 2)
+    return 0
+
+
+def _format_byte_count(value: int) -> str:
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.2f} MB"
+    if value >= 1_000:
+        return f"{value / 1_000:.2f} kB"
+    return f"{value} B"
+
+
+def _compact_text(value: str, *, limit: int = 120) -> str:
+    compact = value.replace("\r", " ").replace("\n", " ").strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
 
 
 def write_evaluation_report_markdown(

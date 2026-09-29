@@ -603,6 +603,45 @@ Assertions remain absent from the RIG-facing JSON. The lower-level builder const
 remains available for tests and protocol-independent use; it creates an empty original
 assertion set when no compiled definitions are supplied.
 
+## Loopback workload sweeps
+
+The loopback workload API treats UART, SPI, and CAN load as the same requested
+percentage of each peripheral's configured wire capacity. I2C is not included in this
+workload. UART accounts for framed bits per byte, SPI accounts for clocked bits, and CAN
+uses a configurable conservative wire-bit estimate per frame.
+
+```python
+from hilrig import LoopbackProfile, LoopbackWorkloadPoint, compile_loopback_workload
+
+profile = LoopbackProfile(
+    uart_baud_hz=460_800,
+    spi_clock_hz=5_625_000,
+    can_bitrate_hz=500_000,
+    can_wire_bits_per_frame=135,
+)
+point = LoopbackWorkloadPoint(
+    frequency_hz=1_000,
+    duration_s=1,
+    target_utilization_percent=50,
+    burst_interval_ticks=1,
+    seed=1,
+)
+workload = compile_loopback_workload(profile, point)
+```
+
+The compiled workload records actual instruction and payload counts, average and peak
+payload bytes per active tick, actual wire utilisation per peripheral, and a stable
+workload hash. Increasing `burst_interval_ticks` preserves the total average load while
+accumulating it into less frequent bursts.
+
+`UtilizationBinarySearch` repeats each point before classifying it, tests the configured
+minimum and maximum bounds, and then narrows the highest-pass/lowest-fail boundary.
+`burst_sweep_points()` applies relative headroom below the discovered maximum and
+generates points with different burst intervals.
+
+See `examples/loopback_utilization_point.py` for an independently runnable 10% point
+that applies deterministic UART, SPI, and CAN traffic to an ordinary `Test`.
+
 `IncomingResultAdapter` implements the fixed-result end of this flow:
 
 ```text

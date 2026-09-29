@@ -127,6 +127,46 @@ def test_existing_expect_api_uses_the_default_group() -> None:
     assert compiled.assertions[0].subject_name == "analogue_input[0]"
 
 
+def test_markdown_aggregates_large_stimulus_groups(tmp_path: Path) -> None:
+    test = HilRigTest("Compact report")
+    uart = (
+        test.uart(channel=0)
+        .named("UART_ch1")
+        .configure(
+            mode=UARTMode.TTL_3V3,
+            baud_hz=115_200,
+            parity=UARTParity.NONE,
+            length=UARTLengthBits.EIGHT,
+            stop=UARTStopBits.ONE,
+        )
+    )
+    with test.group("UART Workload"):
+        for tick in range(100):
+            uart.write(data=b"PING", at_tick=tick)
+        test.expect(uart).receive(b"PING", from_tick=0, until_tick=1)
+
+    compiled = test.compile()
+    builder = CapturedRunBuilder.from_compiled_test(tmp_path / "run.sqlite3", compiled)
+    for tick in range(compiled.expected_tick_count):
+        builder.add_tick_result(_tick(tick))
+    builder.add_communication_result(
+        CommunicationResult(
+            tick=0,
+            peripheral=CommunicationPeripheral.UART,
+            channel=0,
+            payload=b"PING",
+        )
+    )
+    report = evaluate_assertions(builder.finalize(status=CaptureStatus.COMPLETE))
+    markdown = report.to_markdown()
+
+    assert "## Assertion evidence" not in markdown
+
+    assert "| UART_ch1 | write | 100 | 100 | 0-99 | 400 B | 4.00 B | 4 B |" in markdown
+    assert "98 additional commands" in markdown
+    assert len(markdown.splitlines()) < 100
+
+
 def test_peripheral_names_are_unique_and_stable() -> None:
     test = HilRigTest("Named peripherals")
     first = test.uart(channel=0).named("UART_ch1")
@@ -150,9 +190,8 @@ def test_group_exception_restores_outer_state() -> None:
         )
     )
 
-    with pytest.raises(RuntimeError, match="boom"):
-        with test.group("Failing group"):
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError, match="boom"), test.group("Failing group"):
+        raise RuntimeError("boom")
 
     uart.write(data=b"AFTER", at_tick=0)
     compiled = test.compile()
@@ -225,4 +264,3 @@ def test_mixed_grouped_and_ungrouped_stimuli_report(tmp_path: Path) -> None:
     assert report.assertion_groups[0].verdict is EvaluationVerdict.PASS
     assert len(report.assertion_groups[0].stimuli) == 1
     assert report.assertion_groups[0].stimuli[0].message == "UART_ch1 sent 0x50494e47 at tick 1."
-
