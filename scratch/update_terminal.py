@@ -57,10 +57,13 @@ old_do_run = """    def do_run(self, argument: str) -> None:
         self._write_line(f"{mode} queued: {path}")"""
 
 new_do_run = """    def do_run(self, argument: str) -> None:
-        \"\"\"run [--step] [--legacy | --family variable|legacy] <path> -- Execute a Python test definition.\"\"\"
+        \"\"\"Execute a test definition with optional stepping and protocol family.\"\"\"
         parsed = _run_argument(argument)
         if parsed is None:
-            self._write_line('Usage: run [--step] [--legacy | --family variable|legacy] "path to test.py"')
+            self._write_line(
+                'Usage: run [--step] [--legacy | --family variable|legacy] '
+                '"path to test.py"'
+            )
             return
         path, stepped, family = parsed
         if not self.worker.submit(path, stepped=stepped, protocol_family=family):
@@ -161,12 +164,14 @@ new_format_status = """    if snapshot.protocol_state is not None:
 content = content.replace(old_format_status, new_format_status)
 
 # 6. do_help
-old_help = """            "  run <path>         Load and automatically execute a test-definition file.\\n"
+old_help = """            "  run <path>         Load and automatically execute a "
+            "test-definition file.\\n"
             "  run --step <path>  Pause before configuration, each tick, and START.\\n\""""
 
 new_help = """            "  run [--step] [--legacy] <path>\\n"
             "                     Load and automatically execute a test-definition file.\\n"
-            "                     (--legacy uses fixed TestInstruction/TestResult, default is variable)\\n"
+            "                     (--legacy uses fixed TestInstruction/TestResult; "
+            "default is variable)\\n"
             "  run --step <path>  Pause before configuration, each tick, and START.\\n\""""
 
 content = content.replace(old_help, new_help)

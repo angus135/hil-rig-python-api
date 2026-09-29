@@ -348,9 +348,7 @@ def _integer(value: object, name: str, *, minimum: int, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ManualMessageDefinitionError(f"{name} must be an integer")
     if not minimum <= value <= maximum:
-        raise ManualMessageDefinitionError(
-            f"{name} must be between {minimum} and {maximum}"
-        )
+        raise ManualMessageDefinitionError(f"{name} must be between {minimum} and {maximum}")
     return value
 
 

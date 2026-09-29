@@ -43,7 +43,9 @@ def test_duplicate_instruction_on_same_channel_and_tick_raises_validation_error(
     output.low(at_tick=100)
     output.toggle(at_tick=100)
 
-    with pytest.raises(ValidationError, match="Multiple stimulus instructions scheduled on channel digital_output"):
+    with pytest.raises(
+        ValidationError, match="Multiple stimulus instructions scheduled on channel digital_output"
+    ):
         test.compile()
 
 

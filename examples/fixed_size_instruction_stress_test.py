@@ -26,8 +26,9 @@ from hilrig import (
     UARTStopBits,
 )
 
-
-STRESS_DURATION_SECONDS = 1  # Set to 1-2 seconds (e.g. 1s = 10,000 ticks, 2s = 20,000 ticks at 10 kHz)
+STRESS_DURATION_SECONDS = (
+    1  # Set to 1-2 seconds (e.g. 1s = 10,000 ticks, 2s = 20,000 ticks at 10 kHz)
+)
 EXECUTION_FREQUENCY_HZ = 10_000
 BREAKING_POINT_TICKS = STRESS_DURATION_SECONDS * EXECUTION_FREQUENCY_HZ
 TARGET_UTILIZATION_PERCENT = 25.0
@@ -173,6 +174,15 @@ if __name__ == "__main__":
     can_frames_per_second = EXECUTION_FREQUENCY_HZ / can_interval
     can_bits_per_second = can_frames_per_second * CAN_WIRE_BITS_PER_FRAME
     print(f"Requested utilization: {TARGET_UTILIZATION_PERCENT}%")
-    print(f"UART: {uart_payload_size} bytes/tick @ {UART_BAUD_HZ/1e6:.1f} MBaud ({100 * uart_bytes_per_second * UART_BITS_PER_BYTE / UART_BAUD_HZ:.1f}% wire time)")
-    print(f"SPI: {spi_payload_size} bytes/tick @ {SPI_BAUD_HZ/1e6:.3f} MHz ({100 * spi_bytes_per_second * 8 / SPI_BAUD_HZ:.1f}% wire time)")
-    print(f"CAN: 1 frame every {can_interval} ticks ({can_frames_per_second:.1f} frames/s, {100 * can_bits_per_second / CAN_BITRATE_HZ:.1f}% wire time)")
+    print(
+        f"UART: {uart_payload_size} bytes/tick @ {UART_BAUD_HZ / 1e6:.1f} MBaud "
+        f"({100 * uart_bytes_per_second * UART_BITS_PER_BYTE / UART_BAUD_HZ:.1f}% wire time)"
+    )
+    print(
+        f"SPI: {spi_payload_size} bytes/tick @ {SPI_BAUD_HZ / 1e6:.3f} MHz "
+        f"({100 * spi_bytes_per_second * 8 / SPI_BAUD_HZ:.1f}% wire time)"
+    )
+    print(
+        f"CAN: 1 frame every {can_interval} ticks ({can_frames_per_second:.1f} frames/s, "
+        f"{100 * can_bits_per_second / CAN_BITRATE_HZ:.1f}% wire time)"
+    )

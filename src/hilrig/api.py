@@ -1741,9 +1741,7 @@ class Test:
     ):
         """Begin a host-side assertion for a supported peripheral channel."""
         group_id = (
-            DEFAULT_ASSERTION_GROUP_ID
-            if self._active_group_id is None
-            else self._active_group_id
+            DEFAULT_ASSERTION_GROUP_ID if self._active_group_id is None else self._active_group_id
         )
         return self._expect(channel, group_id=group_id)
 

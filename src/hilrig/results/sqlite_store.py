@@ -747,8 +747,7 @@ def _validate_group_references(
     for stimulus in stimuli:
         if stimulus.group_id not in group_ids:
             message = (
-                f"Stimulus {stimulus.instruction_id} references unknown group "
-                f"{stimulus.group_id}"
+                f"Stimulus {stimulus.instruction_id} references unknown group {stimulus.group_id}"
             )
             if stored:
                 raise CaptureSchemaError(message)
@@ -852,9 +851,7 @@ def _read_stimuli(
             peripheral=str(row[4]),
             channel=int(row[5]),
             operation=str(row[6]),
-            arguments=immutable_fields(
-                _decode_arguments(row[7], label=f"Stimulus {int(row[0])}")
-            ),
+            arguments=immutable_fields(_decode_arguments(row[7], label=f"Stimulus {int(row[0])}")),
         )
         for row in rows
     )
@@ -939,9 +936,7 @@ def _decode_arguments(value: object, *, label: str) -> dict[str, IRScalar]:
     arguments: dict[str, IRScalar] = {}
     for name, argument in decoded.items():
         if not isinstance(name, str) or not _is_ir_scalar(argument):
-            raise CaptureSchemaError(
-                f"{label} arguments must contain only IR scalar values"
-            )
+            raise CaptureSchemaError(f"{label} arguments must contain only IR scalar values")
         arguments[name] = argument
     return arguments
 

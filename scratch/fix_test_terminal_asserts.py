@@ -8,6 +8,7 @@ txt = txt.replace(
 )
 txt = txt.replace(
     'assert worker.submitted[-1] == (Path("C:\\\\Test Files\\\\motor.py"), False)',
-    'assert worker.submitted[-1] == (Path("C:\\\\Test Files\\\\motor.py"), False, ProtocolFamily.VARIABLE)',
+    "assert worker.submitted[-1] == "
+    '(Path("C:\\\\Test Files\\\\motor.py"), False, ProtocolFamily.VARIABLE)',
 )
 path.write_text(txt, encoding="utf-8")

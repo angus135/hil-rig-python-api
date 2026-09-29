@@ -174,8 +174,7 @@ def render_evaluation_report_markdown(report: EvaluationReport) -> str:
                     ]
                 )
                 lines.extend(
-                    _stimulus_summary_row(summary)
-                    for summary in _stimulus_summaries(group.stimuli)
+                    _stimulus_summary_row(summary) for summary in _stimulus_summaries(group.stimuli)
                 )
                 examples = _representative_stimuli(group.stimuli)
                 lines.extend(["", "Examples:"])
@@ -210,9 +209,7 @@ def render_evaluation_report_markdown(report: EvaluationReport) -> str:
     else:
         lines.append("No assertion groups were evaluated.")
 
-    issues = tuple(
-        result for result in report.assertion_results if result.verdict.value != "pass"
-    )
+    issues = tuple(result for result in report.assertion_results if result.verdict.value != "pass")
     if issues:
         lines.extend(["", "## Assertion evidence"])
         for result in issues:

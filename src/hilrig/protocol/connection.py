@@ -17,12 +17,12 @@ from hilrig.protocol.application import (
     FixedIOProtocolAdapter,
     FixedIOUploadMessages,
     ProtocolFamily,
-    VariableIOProtocolAdapter,
-    VariableIOUploadMessages,
     ResponseCorrelation,
     UploadOperation,
     UploadOperationKind,
     UploadPlan,
+    VariableIOProtocolAdapter,
+    VariableIOUploadMessages,
 )
 from hilrig.protocol.manual import ManualApplicationMessage
 from hilrig.protocol.serial import SerialConnectionSettings, open_serial_port
@@ -166,8 +166,8 @@ class FixedIOProtocolConnection:
         elif isinstance(protocol_family, str):
             try:
                 protocol_family = ProtocolFamily(protocol_family.lower())
-            except ValueError:
-                raise ValueError(f"Unknown protocol family: {protocol_family!r}")
+            except ValueError as error:
+                raise ValueError(f"Unknown protocol family: {protocol_family!r}") from error
         elif not isinstance(protocol_family, ProtocolFamily):
             raise TypeError("protocol_family must be a ProtocolFamily or str")
 
@@ -229,8 +229,8 @@ class FixedIOProtocolConnection:
         if isinstance(protocol_family, str):
             try:
                 protocol_family = ProtocolFamily(protocol_family.lower())
-            except ValueError:
-                raise ValueError(f"Unknown protocol family: {protocol_family!r}")
+            except ValueError as error:
+                raise ValueError(f"Unknown protocol family: {protocol_family!r}") from error
         elif not isinstance(protocol_family, ProtocolFamily):
             raise TypeError("protocol_family must be a ProtocolFamily or str")
 
@@ -780,25 +780,6 @@ class FixedIOProtocolConnection:
     ]:
         p = self.protocol
         events: list[object] = []
-        while False and (event := self.transport.read_event()) is not None:
-            events.append(event)
-            if event.type is p.EventType.DELIVERY_CONFIRMED:
-                self._handle_delivery_confirmed()
-            elif event.type is p.EventType.DELIVERY_FAILED:
-                self._fail_workflow()
-                raise ProtocolSessionError("Transport delivery failed")
-            elif event.type is p.EventType.PROTOCOL_ERROR:
-                self._fail_workflow()
-                raise ProtocolSessionError("Transport reported a protocol error")
-            elif event.type is p.EventType.SESSION_RESET:
-                self._invalidate_session()
-                raise ProtocolSessionError(
-                    "Transport session reset; the Application transaction was abandoned"
-                )
-            elif event.type is p.EventType.SESSION_ESTABLISHED:
-                self._session_confirmed = False
-                self._session_info = None
-                self._workflow_state = ProtocolWorkflowState.CONNECTING
 
         messages: list[object] = []
         stored_results: list[TickResult] = []
@@ -815,7 +796,8 @@ class FixedIOProtocolConnection:
             except Exception as error:
                 self._fail_workflow()
                 raise ProtocolSessionError(
-                    f"Failed to decode incoming message (length={msg_len}, hex={encoded.hex()}): {error}"
+                    f"Failed to decode incoming message (length={msg_len}, "
+                    f"hex={encoded.hex()}): {error}"
                 ) from error
             messages.append(message)
             if type(message) is p.SystemInfoResponse:
@@ -847,14 +829,16 @@ class FixedIOProtocolConnection:
                     ):
                         self._fail_workflow()
                         raise ProtocolSessionError(
-                            "Received legacy TestResult (Type 33) when variable message family was expected"
+                            "Received legacy TestResult (Type 33) when variable message family "
+                            "was expected"
                         )
                     if self.protocol_family is ProtocolFamily.LEGACY and type(message) is getattr(
                         p, "VariableTestResult", None
                     ):
                         self._fail_workflow()
                         raise ProtocolSessionError(
-                            "Received VariableTestResult (Type 34) when legacy message family was expected"
+                            "Received VariableTestResult (Type 34) when legacy message family "
+                            "was expected"
                         )
                     self._validate_result_sequence(message)
                     if self.result_adapter is not None:
@@ -1193,7 +1177,6 @@ class FixedIOProtocolConnection:
         self._activate_upload_operation(operation)
 
     def _submit_next_application_message(self) -> bool:
-        p = self.protocol
         operation = self._pending_operation
         if (
             operation is None
@@ -1338,7 +1321,6 @@ class FixedIOProtocolConnection:
         self._fail_workflow()
 
     def _service_output(self, now_ms: int) -> int:
-        p = self.protocol
         if self._pending_output is None:
             # self._pending_output = self.transport.peek_output()
             pass
@@ -1364,8 +1346,6 @@ class FixedIOProtocolConnection:
             finally:
                 self._pending_output = None
                 self._pending_output_offset = 0
-                # if commit_status not in (p.TransportStatus.OK, p.TransportStatus.NOT_READY):
-                # raise ProtocolSessionError(f"Transport output commit returned {commit_status.name}")
                 pass
         return accepted
 

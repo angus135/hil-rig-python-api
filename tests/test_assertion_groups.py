@@ -90,15 +90,12 @@ def test_named_assertion_groups_and_subject_names_survive_capture(
 
 def test_nested_groups_are_rejected_and_outer_group_is_restored() -> None:
     test = HilRigTest("No nested groups")
-    uart = (
-        test.uart(channel=0)
-        .configure(
-            mode=UARTMode.TTL_3V3,
-            baud_hz=115_200,
-            parity=UARTParity.NONE,
-            length=UARTLengthBits.EIGHT,
-            stop=UARTStopBits.ONE,
-        )
+    uart = test.uart(channel=0).configure(
+        mode=UARTMode.TTL_3V3,
+        baud_hz=115_200,
+        parity=UARTParity.NONE,
+        length=UARTLengthBits.EIGHT,
+        stop=UARTStopBits.ONE,
     )
 
     with test.group("Outer"):
@@ -179,15 +176,12 @@ def test_peripheral_names_are_unique_and_stable() -> None:
 
 def test_group_exception_restores_outer_state() -> None:
     test = HilRigTest("Exception in group")
-    uart = (
-        test.uart(channel=0)
-        .configure(
-            mode=UARTMode.TTL_3V3,
-            baud_hz=115_200,
-            parity=UARTParity.NONE,
-            length=UARTLengthBits.EIGHT,
-            stop=UARTStopBits.ONE,
-        )
+    uart = test.uart(channel=0).configure(
+        mode=UARTMode.TTL_3V3,
+        baud_hz=115_200,
+        parity=UARTParity.NONE,
+        length=UARTLengthBits.EIGHT,
+        stop=UARTStopBits.ONE,
     )
 
     with pytest.raises(RuntimeError, match="boom"), test.group("Failing group"):
@@ -200,15 +194,12 @@ def test_group_exception_restores_outer_state() -> None:
 
 def test_assertion_group_compatibility_alias() -> None:
     test = HilRigTest("Compatibility alias")
-    uart = (
-        test.uart(channel=0)
-        .configure(
-            mode=UARTMode.TTL_3V3,
-            baud_hz=115_200,
-            parity=UARTParity.NONE,
-            length=UARTLengthBits.EIGHT,
-            stop=UARTStopBits.ONE,
-        )
+    uart = test.uart(channel=0).configure(
+        mode=UARTMode.TTL_3V3,
+        baud_hz=115_200,
+        parity=UARTParity.NONE,
+        length=UARTLengthBits.EIGHT,
+        stop=UARTStopBits.ONE,
     )
     group = test.assertion_group("Legacy Group")
     group.expect(uart).receive(b"OK", from_tick=0, until_tick=1)

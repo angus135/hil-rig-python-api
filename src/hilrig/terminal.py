@@ -225,10 +225,12 @@ class HilRigShell:
         return False
 
     def do_run(self, argument: str) -> None:
-        """run [--step] [--legacy | --family variable|legacy] <path> -- Execute a Python test definition."""
+        """Execute a test definition, optionally stepped or with an explicit protocol family."""
         parsed = _run_argument(argument)
         if parsed is None:
-            self._write_line('Usage: run [--step] [--legacy | --family variable|legacy] "path to test.py"')
+            self._write_line(
+                'Usage: run [--step] [--legacy | --family variable|legacy] "path to test.py"'
+            )
             return
         path, stepped, family = parsed
         if not self.worker.submit(path, stepped=stepped, protocol_family=family):
@@ -285,7 +287,8 @@ class HilRigShell:
             "Commands:\n"
             "  run [--step] [--legacy] <path>\n"
             "                     Load and automatically execute a test-definition file.\n"
-            "                     (--legacy uses fixed TestInstruction/TestResult, default is variable)\n"
+            "                     (--legacy uses fixed TestInstruction/TestResult; "
+            "default is variable)\n"
             "  run --step <path>  Pause before configuration, each tick, and START.\n"
             "  step               Release exactly one paused operation.\n"
             "  continue           Release the gate and finish automatically.\n"
@@ -648,13 +651,7 @@ def _run_argument(argument: str) -> tuple[Path, bool, ProtocolFamily] | None:
                 return None
             family = ProtocolFamily(val)
             idx += 2
-        elif token_lower.startswith("--family="):
-            val = token.partition("=")[2].lower()
-            if val not in {"variable", "legacy"}:
-                return None
-            family = ProtocolFamily(val)
-            idx += 1
-        elif token_lower.startswith("--protocol-family="):
+        elif token_lower.startswith("--family=") or token_lower.startswith("--protocol-family="):
             val = token.partition("=")[2].lower()
             if val not in {"variable", "legacy"}:
                 return None

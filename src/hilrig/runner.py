@@ -260,8 +260,8 @@ class ProtocolWorker:
         if isinstance(protocol_family, str):
             try:
                 protocol_family = ProtocolFamily(protocol_family.lower())
-            except ValueError:
-                raise ValueError(f"Unknown protocol family: {protocol_family!r}")
+            except ValueError as error:
+                raise ValueError(f"Unknown protocol family: {protocol_family!r}") from error
         elif not isinstance(protocol_family, ProtocolFamily):
             raise TypeError("protocol_family must be a ProtocolFamily or str")
         self.start()
@@ -486,7 +486,11 @@ class ProtocolWorker:
                 if isinstance(command, _ManualConnectCommand):
                     self._execute_manual_session(command)
                 else:
-                    self._execute_run(command.path, stepped=command.stepped, protocol_family=command.protocol_family)
+                    self._execute_run(
+                        command.path,
+                        stepped=command.stepped,
+                        protocol_family=command.protocol_family,
+                    )
             finally:
                 self._idle.set()
         self._set_snapshot(state=WorkerState.STOPPED, detail="Protocol worker stopped.")
@@ -749,7 +753,10 @@ class ProtocolWorker:
                 expected_tick_count=compiled.expected_tick_count,
                 protocol_family=protocol_family.value,
             )
-            self._notify(f"Loaded {compiled.name!r}; connecting to the RIG ({protocol_family.value} family)...")
+            self._notify(
+                f"Loaded {compiled.name!r}; connecting to the RIG "
+                f"({protocol_family.value} family)..."
+            )
             self._raise_if_aborted()
 
             try:

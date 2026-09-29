@@ -6,7 +6,8 @@ txt = models_init.read_text(encoding="utf-8")
 if "from hilrig.models.protocol import ProtocolFamily" not in txt:
     txt = txt.replace(
         "from hilrig.models.identifiers import UploadAttempt",
-        "from hilrig.models.identifiers import UploadAttempt\nfrom hilrig.models.protocol import ProtocolFamily",
+        "from hilrig.models.identifiers import UploadAttempt\n"
+        "from hilrig.models.protocol import ProtocolFamily",
     )
     txt = txt.replace(
         '"PointAssertion",',

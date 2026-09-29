@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import struct
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -9,7 +10,6 @@ from importlib import import_module
 from itertools import groupby
 from types import ModuleType
 from typing import Any
-import struct
 
 from hilrig.exceptions import ProtocolDependencyError, ProtocolIntegrationError
 from hilrig.models.execution import CompiledConfiguration, CompiledInstruction, CompiledTestIR
@@ -194,15 +194,17 @@ class FixedIOProtocolAdapter:
         )
         configurations = _configuration_index(compiled_test.configurations)
         comm_peripherals = {"uart", "spi", "i2c", "can"}
-        for periph, _ in configurations.keys():
+        for periph, _ in configurations:
             if periph in comm_peripherals:
                 raise ProtocolIntegrationError(
-                    f"Test contains {periph.upper()} configuration which is not supported in the legacy fixed-I/O message family"
+                    f"Test contains {periph.upper()} configuration which is not supported in "
+                    "the legacy fixed-I/O message family"
                 )
         for inst in compiled_test.instructions:
             if inst.peripheral in comm_peripherals:
                 raise ProtocolIntegrationError(
-                    f"Test contains {inst.peripheral.upper()} instruction which is not supported in the legacy fixed-I/O message family"
+                    f"Test contains {inst.peripheral.upper()} instruction which is not supported "
+                    "in the legacy fixed-I/O message family"
                 )
         configuration = self._build_configuration(compiled_test, test_id, configurations)
         instructions = self._build_sparse_instructions(
@@ -412,7 +414,9 @@ class FixedIOProtocolAdapter:
             elif peripheral == "can":
                 bitrate = _require_positive_integer(parameters["bitrate"], "bitrate")
                 filter_id = _require_non_negative_integer(parameters["filter_id"], "filter_id")
-                filter_mask = _require_non_negative_integer(parameters["filter_mask"], "filter_mask")
+                filter_mask = _require_non_negative_integer(
+                    parameters["filter_mask"], "filter_mask"
+                )
                 can[channel] = p.CANConfig(
                     enabled=True,
                     bit_rate=bitrate,
@@ -840,7 +844,7 @@ class VariableIOProtocolAdapter:
         *,
         upload_attempt: UploadAttempt | None = None,
     ) -> UploadPlan:
-        """Build response-correlated semantic operations for one test attempt with UpdateInstruction."""
+        """Build correlated operations for one test attempt using UpdateInstruction."""
         upload = self.build_upload(compiled_test, upload_attempt=upload_attempt)
         encoded = self.encode_upload(upload)
         p = self.protocol
@@ -994,7 +998,7 @@ class VariableIOProtocolAdapter:
                     for inst in instructions_on_tick
                     if inst.peripheral == "analogue_output"
                 }
-                for (periph, chan), item in configurations.items():
+                for periph, chan in configurations:
                     if periph == "analogue_output" and chan not in tick_0_analogue_channels:
                         uv = analogue_outputs[chan]
                         if uv != 0:
@@ -1109,15 +1113,21 @@ class VariableIOProtocolAdapter:
                     can_data = _extract_bytes(arguments.get("data"))
                     frame_id = _require_non_negative_integer(arguments.get("frame_id"), "frame_id")
                     if frame_id > 0x7FF or len(can_data) == 0:
-                        raise ProtocolIntegrationError("CAN frame is outside the standard 11-bit limits")
+                        raise ProtocolIntegrationError(
+                            "CAN frame is outside the standard 11-bit limits"
+                        )
                     if len(can_data) <= 8:
-                        can_payload = struct.pack("<HB8sB", frame_id, len(can_data), can_data.ljust(8, b"\x00"), 0)
+                        can_payload = struct.pack(
+                            "<HB8sB", frame_id, len(can_data), can_data.ljust(8, b"\x00"), 0
+                        )
                     else:
                         frames = []
                         for offset in range(0, len(can_data), 8):
                             chunk = can_data[offset : offset + 8]
                             frames.append(
-                                struct.pack("<HB8sB", frame_id, len(chunk), chunk.ljust(8, b"\x00"), 0)
+                                struct.pack(
+                                    "<HB8sB", frame_id, len(chunk), chunk.ljust(8, b"\x00"), 0
+                                )
                             )
                         can_payload = b"".join(frames)
                     operations.append(
@@ -1145,7 +1155,8 @@ class VariableIOProtocolAdapter:
                     op_key = (op.peripheral_type, op.channel)
                     if op_key in seen_ops:
                         raise ProtocolIntegrationError(
-                            f"Duplicate logical operation scheduled on tick {tick} for {op.peripheral_type} channel {op.channel}"
+                            f"Duplicate logical operation scheduled on tick {tick} for "
+                            f"{op.peripheral_type} channel {op.channel}"
                         )
                     seen_ops.add(op_key)
                 messages.append(

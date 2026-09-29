@@ -41,9 +41,7 @@ class AssertionEvaluator:
             _stimulus_record(
                 stimulus,
                 group_name=(
-                    None
-                    if stimulus.group_id is None
-                    else group_names.get(stimulus.group_id, "")
+                    None if stimulus.group_id is None else group_names.get(stimulus.group_id, "")
                 ),
                 tick_period_ns=metadata.tick_period_ns,
             )

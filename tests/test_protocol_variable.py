@@ -1,30 +1,34 @@
-from pathlib import Path
 import struct
+from pathlib import Path
 
+import pytest
 from protocol_fakes import (
+    AnalogInputValue,
     BusRole,
     CapturedRecord,
     ControlCommand,
-    ExecutionControl,
+    DigitalInputValue,
     FakeProtocol,
-    FinalizeTestUpload,
-    GlobalControl,
-    GlobalControlCommand,
-    LogicalOperation,
     PeripheralType,
-    PeripheralVoltage,
+    PWMInputValue,
     ResultCondition,
-    SystemInfoRequest,
     SPIBitOrder,
     SPIClockPhase,
     SPIClockPolarity,
     SPIDataWidth,
     UARTElectricalMode,
-    UARTParity as ProtocolUARTParity,
-    UARTStopBits as ProtocolUARTStopBits,
     UARTWordLength,
     UpdateInstruction,
     VariableTestResult,
+)
+from protocol_fakes import (
+    TestResult as LegacyTestResult,
+)
+from protocol_fakes import (
+    UARTParity as ProtocolUARTParity,
+)
+from protocol_fakes import (
+    UARTStopBits as ProtocolUARTStopBits,
 )
 
 from hilrig import (
@@ -35,7 +39,6 @@ from hilrig import (
     FrequencyMode,
     IncomingResultAdapter,
     LogicVoltage,
-    PwmInput,
     SPIBaud,
     SPIFirst,
     SPIMode,
@@ -52,6 +55,8 @@ from hilrig import (
     VariableIOProtocolAdapter,
 )
 from hilrig import Test as HilRigTest
+from hilrig.exceptions import ProtocolIntegrationError, ProtocolSessionError
+from hilrig.protocol import FixedIOProtocolAdapter, ProtocolFamily
 
 
 def _compiled_variable_io_test():
@@ -332,7 +337,8 @@ def test_incoming_result_adapter_handles_can_and_execution_problem(tmp_path: Pat
     adapter = IncomingResultAdapter(builder, protocol_module=FakeProtocol)
     test_id = FakeProtocol.TestId(attempt.application_test_id.to_bytes(16, "big"))
 
-    # CAN 12-byte canonical packet: id=0x123 (2B LE), dlc=4 (1B), data=b"1234" (8B padded), reserved=0 (1B)
+    # CAN 12-byte canonical packet: id=0x123 (2B LE), dlc=4 (1B),
+    # data=b"1234" (8B padded), reserved=0 (1B).
     can_frame = struct.pack("<HB8sB", 0x123, 4, b"1234\x00\x00\x00\x00", 0)
     can_msg = VariableTestResult(
         test_id=test_id,
@@ -369,17 +375,6 @@ def test_incoming_result_adapter_handles_can_and_execution_problem(tmp_path: Pat
     comm = list(run.iter_communications(peripheral=CommunicationPeripheral.CAN))
     assert len(comm) == 1
     assert comm[0].payload == can_frame
-
-
-import pytest
-from hilrig.exceptions import ProtocolIntegrationError, ProtocolSessionError
-from hilrig.protocol import FixedIOProtocolAdapter, ProtocolFamily
-from protocol_fakes import (
-    AnalogInputValue,
-    DigitalInputValue,
-    PWMInputValue,
-    TestResult as LegacyTestResult,
-)
 
 
 def test_incoming_result_adapter_enforces_expected_protocol_family(tmp_path: Path) -> None:
@@ -493,8 +488,8 @@ def test_variable_adapter_encodes_multi_frame_can_in_single_instruction() -> Non
 
 
 def test_loopback_workload_points_encode_cleanly_at_high_utilisations() -> None:
-    from hilrig import LoopbackProfile, LoopbackWorkloadPoint
-    from examples.loopback_utilization_point import PROFILE, build_test_for_point
+    from examples.loopback_utilization_point import build_test_for_point
+    from hilrig import LoopbackWorkloadPoint
 
     adapter = VariableIOProtocolAdapter()
     for pct in [20.0, 25.0, 27.0, 28.0, 29.0, 30.0, 35.0]:
@@ -509,4 +504,3 @@ def test_loopback_workload_points_encode_cleanly_at_high_utilisations() -> None:
         compiled = test.compile()
         plan = adapter.build_upload_plan(compiled)
         assert len(plan.operations) > 0
-

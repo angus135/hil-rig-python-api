@@ -59,7 +59,6 @@ from hilrig.models.execution import (
     TimeSlot,
 )
 from hilrig.models.identifiers import UploadAttempt
-from hilrig.models.protocol import ProtocolFamily
 from hilrig.models.instructions import (
     AnalogueOutputInstruction,
     DigitalOutputAction,
@@ -76,6 +75,7 @@ from hilrig.models.instructions import (
     SPITransferInstruction,
     UARTWriteInstruction,
 )
+from hilrig.models.protocol import ProtocolFamily
 
 __all__ = [
     "AnalogueInputConfiguration",

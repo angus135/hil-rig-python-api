@@ -210,7 +210,6 @@ class I2CConfiguration:
     own_address: int | None = None
 
 
-
 @dataclass(frozen=True, slots=True)
 class SPIConfiguration:
     """Static configuration for an SPI channel."""

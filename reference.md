@@ -378,8 +378,7 @@ The installed `hil-rig` command is defined by the `project.scripts` entry in
 A loadable test file must contain:
 
 ```python
-def build_test() -> Test:
-    ...
+def build_test() -> Test: ...
 ```
 
 The file is trusted Python code. `runner.load_test_definition()` executes its top-level

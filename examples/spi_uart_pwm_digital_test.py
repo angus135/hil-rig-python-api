@@ -149,19 +149,19 @@ def build_test() -> Test:
     )
 
     # Schedule SPI transfers & expect matching loopback receipts
-    spi_pkt1 = b"\xAA\x55\x01\x02"
+    spi_pkt1 = b"\xaa\x55\x01\x02"
     spi1.transfer(tx_data=spi_pkt1, rx_length=4, at_ms=100)
     test.expect(spi1).receive(spi_pkt1, from_ms=100, until_ms=250)
 
-    spi_pkt2 = b"\xDE\xAD\xBE\xEF\xCA\xFE"
+    spi_pkt2 = b"\xde\xad\xbe\xef\xca\xfe"
     spi1.transfer(tx_data=spi_pkt2, rx_length=6, at_ms=300)
     test.expect(spi1).receive(spi_pkt2, from_ms=300, until_ms=450)
 
-    spi_pkt3 = b"\x00\xFF\x11\x22\x33\x44\x55\x66"
+    spi_pkt3 = b"\x00\xff\x11\x22\x33\x44\x55\x66"
     spi1.transfer(tx_data=spi_pkt3, rx_length=8, at_ms=600)
     test.expect(spi1).receive(spi_pkt3, from_ms=600, until_ms=750)
 
-    spi_pkt4 = b"\x5A\xA5"
+    spi_pkt4 = b"\x5a\xa5"
     spi1.transfer(tx_data=spi_pkt4, rx_length=2, at_ms=850)
     test.expect(spi1).receive(spi_pkt4, from_ms=850, until_ms=990)
 
@@ -186,7 +186,7 @@ def build_test() -> Test:
     uart2.write_text(data=uart_msg2, encoding="ascii", at_ms=200)
     test.expect(uart2).receive_text(uart_msg2, encoding="ascii", from_ms=200, until_ms=300)
 
-    uart_msg3 = b"\x55\xAA\x12\x34\x56\x78"
+    uart_msg3 = b"\x55\xaa\x12\x34\x56\x78"
     uart2.write(data=uart_msg3, at_ms=450)
     test.expect(uart2).receive(uart_msg3, from_ms=450, until_ms=550)
 
@@ -210,7 +210,10 @@ if __name__ == "__main__":
     print(f"Test Name:           {compiled.name}")
     print(f"Test ID:             0x{compiled.test_id:032x}")
     print(f"Frequency:           {compiled.frequency_hz} Hz ({compiled.frequency_mode})")
-    print(f"Expected Ticks:      {compiled.expected_tick_count} ticks ({compiled.expected_tick_count / compiled.frequency_hz:.2f} s)")
+    print(
+        f"Expected Ticks:      {compiled.expected_tick_count} ticks "
+        f"({compiled.expected_tick_count / compiled.frequency_hz:.2f} s)"
+    )
     print(f"Instructions:        {len(compiled.instructions)}")
     print(f"Assertions:          {len(compiled.assertions)}")
     print("=================================================================")

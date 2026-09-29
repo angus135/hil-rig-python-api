@@ -189,7 +189,11 @@ def test_terminal_aliases_and_toolbar() -> None:
     shell.onecmd("c")
     should_quit = shell.onecmd("q")
 
-    assert worker.submitted[-1] == (Path("C:\\Test Files\\motor.py"), False, ProtocolFamily.VARIABLE)
+    assert worker.submitted[-1] == (
+        Path("C:\\Test Files\\motor.py"),
+        False,
+        ProtocolFamily.VARIABLE,
+    )
     assert should_quit
     toolbar_text = shell._bottom_toolbar()
     assert "RUNNING" in toolbar_text

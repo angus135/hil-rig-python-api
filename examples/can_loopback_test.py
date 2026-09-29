@@ -7,7 +7,6 @@ HIL-RIG variable-message workflow.
 
 from hilrig import FrequencyMode, StartMode, Test
 
-
 CAN_FRAME_COUNT = 128
 CAN_PAYLOAD_SIZE = 8
 

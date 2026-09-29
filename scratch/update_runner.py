@@ -106,7 +106,8 @@ content = content.replace(old_submit, new_submit)
 # 5. _worker_loop
 content = content.replace(
     "self._execute_run(command.path, stepped=command.stepped)",
-    "self._execute_run(command.path, stepped=command.stepped, protocol_family=command.protocol_family)",
+    "self._execute_run(command.path, stepped=command.stepped, "
+    "protocol_family=command.protocol_family)",
 )
 
 # 6. _execute_run
@@ -183,7 +184,10 @@ new_execute = """    def _execute_run(
                 expected_tick_count=compiled.expected_tick_count,
                 protocol_family=protocol_family.value,
             )
-            self._notify(f"Loaded {compiled.name!r}; connecting to the RIG ({protocol_family.value} family)...")
+            self._notify(
+                f"Loaded {compiled.name!r}; connecting to the RIG "
+                f"({protocol_family.value} family)..."
+            )
             self._raise_if_aborted()
 
             try:

@@ -6,7 +6,9 @@ content = test_terminal_path.read_text(encoding="utf-8")
 # Update imports
 content = content.replace(
     "from hilrig.runner import ManualSessionSnapshot, ManualSessionState, RunSnapshot, WorkerState",
-    "from hilrig.protocol import ProtocolFamily\nfrom hilrig.runner import ManualSessionSnapshot, ManualSessionState, RunSnapshot, WorkerState",
+    "from hilrig.protocol import ProtocolFamily\n"
+    "from hilrig.runner import ManualSessionSnapshot, ManualSessionState, "
+    "RunSnapshot, WorkerState",
 )
 
 # Update _StubWorker.submit
@@ -41,7 +43,10 @@ content = content.replace(old_min, new_min)
 
 # Update usage string in test_terminal_rejects_missing_arguments_and_unknown_commands
 old_usage = "assert 'Usage: run [--step] \"path to test.py\"' in rendered"
-new_usage = "assert 'Usage: run [--step] [--legacy | --family variable|legacy] \"path to test.py\"' in rendered"
+new_usage = (
+    "assert 'Usage: run [--step] [--legacy | --family variable|legacy] "
+    '"path to test.py"\' in rendered'
+)
 content = content.replace(old_usage, new_usage)
 
 # Add new test for legacy and family options

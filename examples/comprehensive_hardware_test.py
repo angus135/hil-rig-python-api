@@ -21,6 +21,7 @@ Hardware Wiring Guide:
 """
 
 from random import Random
+
 from hilrig import (
     DigitalState,
     FrequencyMode,
@@ -32,7 +33,9 @@ from hilrig import (
 
 def build_test() -> Test:
     """Construct and return the extreme-boundary multi-peripheral hardware test."""
-    test = Test(name="10kHz 5s Extreme-Boundary Stress Test (3xDI/DO, Extreme PWM 1%-99% @ 1MHz, 2xAI)")
+    test = Test(
+        name="10kHz 5s Extreme-Boundary Stress Test (3xDI/DO, Extreme PWM 1%-99% @ 1MHz, 2xAI)"
+    )
     test.configure(
         frequency_mode=FrequencyMode.HZ_10K,
         start_mode=StartMode.IMMEDIATE,
@@ -42,8 +45,7 @@ def build_test() -> Test:
     # 1. Digital Channels 0, 1, 2 Configuration & Stimulus Patterns
     # =========================================================================
     digital_inputs = [
-        test.digital_input(channel=ch).configure(voltage=LogicVoltage.V3_3)
-        for ch in (0, 1, 2)
+        test.digital_input(channel=ch).configure(voltage=LogicVoltage.V3_3) for ch in (0, 1, 2)
     ]
 
     # --- Channel 0: 50 Hz Periodic Square Wave ---
@@ -55,14 +57,10 @@ def build_test() -> Test:
         t_low = cycle * 2000 + 2000
         if t_high < 40000:
             dout0.high(at_tick=t_high)
-            test.expect(digital_inputs[0]).remain_high(
-                from_tick=t_high + 50, until_tick=t_low - 50
-            )
+            test.expect(digital_inputs[0]).remain_high(from_tick=t_high + 50, until_tick=t_low - 50)
         if t_low < 40000:
             dout0.low(at_tick=t_low)
-            test.expect(digital_inputs[0]).remain_low(
-                from_tick=t_low + 50, until_tick=t_low + 950
-            )
+            test.expect(digital_inputs[0]).remain_low(from_tick=t_low + 50, until_tick=t_low + 950)
     test.expect(digital_inputs[0]).remain_low(from_tick=0, until_tick=950)
 
     # --- Channel 1: Multi-rate Pulse Bursts (starting with HIGH initial state) ---
@@ -120,14 +118,28 @@ def build_test() -> Test:
     # 8 extreme stages across 4.0 seconds (each stage = 500 ms / 5,000 ticks)
     pwm_stages = [
         # (freq_hz, duty, start_s, end_s, freq_tolerance_hz, duty_tolerance)
-        (50,        0.01, 0.0, 0.5, 2,      0.005),  # 50 Hz @ 1% duty (200 us pulse every 20 ms)
-        (50,        0.99, 0.5, 1.0, 2,      0.005),  # 50 Hz @ 99% duty (200 us notch every 20 ms)
-        (10_000,    0.02, 1.0, 1.5, 300,    0.008),  # 10 kHz @ 2% duty (2 us pulse every 100 us)
-        (100_000,   0.02, 1.5, 2.0, 3_000,  0.010),  # 100 kHz @ 2% duty (200 ns pulse every 10 us)
-        (100_000,   0.98, 2.0, 2.5, 3_000,  0.010),  # 100 kHz @ 98% duty (200 ns notch every 10 us)
-        (500_000,   0.05, 2.5, 3.0, 20_000, 0.020),  # 500 kHz @ 5% duty (100 ns pulse every 2 us)
-        (1_000_000, 0.05, 3.0, 3.5, 50_000, 0.030),  # 1 MHz @ 5% duty (50 ns pulse every 1 us) - EXTREME
-        (1_000_000, 0.95, 3.5, 4.0, 50_000, 0.030),  # 1 MHz @ 95% duty (50 ns notch every 1 us) - EXTREME
+        (50, 0.01, 0.0, 0.5, 2, 0.005),  # 50 Hz @ 1% duty (200 us pulse every 20 ms)
+        (50, 0.99, 0.5, 1.0, 2, 0.005),  # 50 Hz @ 99% duty (200 us notch every 20 ms)
+        (10_000, 0.02, 1.0, 1.5, 300, 0.008),  # 10 kHz @ 2% duty (2 us pulse every 100 us)
+        (100_000, 0.02, 1.5, 2.0, 3_000, 0.010),  # 100 kHz @ 2% duty (200 ns pulse every 10 us)
+        (100_000, 0.98, 2.0, 2.5, 3_000, 0.010),  # 100 kHz @ 98% duty (200 ns notch every 10 us)
+        (500_000, 0.05, 2.5, 3.0, 20_000, 0.020),  # 500 kHz @ 5% duty (100 ns pulse every 2 us)
+        (
+            1_000_000,
+            0.05,
+            3.0,
+            3.5,
+            50_000,
+            0.030,
+        ),  # 1 MHz @ 5% duty (50 ns pulse every 1 us) - EXTREME
+        (
+            1_000_000,
+            0.95,
+            3.5,
+            4.0,
+            50_000,
+            0.030,
+        ),  # 1 MHz @ 95% duty (50 ns notch every 1 us) - EXTREME
     ]
 
     initial_stage = pwm_stages[0]
@@ -179,6 +191,9 @@ if __name__ == "__main__":
     print("Test compiled successfully!")
     print(f"Test ID:             0x{compiled.test_id:032x}")
     print(f"Frequency:           {compiled.frequency_hz} Hz ({compiled.frequency_mode})")
-    print(f"Expected Tick Count: {compiled.expected_tick_count} ticks ({compiled.expected_tick_count / compiled.frequency_hz:.2f} seconds)")
+    print(
+        f"Expected Tick Count: {compiled.expected_tick_count} ticks "
+        f"({compiled.expected_tick_count / compiled.frequency_hz:.2f} seconds)"
+    )
     print(f"Instruction Count:   {len(compiled.instructions)}")
     print(f"Assertion Count:     {len(compiled.assertions)}")

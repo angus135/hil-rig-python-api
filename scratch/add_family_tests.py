@@ -39,13 +39,18 @@ def test_incoming_result_adapter_enforces_expected_protocol_family(tmp_path: Pat
         tick_number=0,
         digital_inputs=tuple(DigitalInputValue(high=False) for _ in range(10)),
         analog_inputs=tuple(AnalogInputValue(microvolts=0) for _ in range(6)),
-        pwm_inputs=tuple(PWMInputValue(period_nanoseconds=0, duty_cycle_permyriad=0) for _ in range(2)),
+        pwm_inputs=tuple(
+            PWMInputValue(period_nanoseconds=0, duty_cycle_permyriad=0) for _ in range(2)
+        ),
         condition=ResultCondition.OK,
         problem_detail=0,
     )
 
     # Legacy message sent to Variable adapter must fail with explicit fault
-    with pytest.raises(ProtocolSessionError, match="Received legacy TestResult.*variable message family was expected"):
+    with pytest.raises(
+        ProtocolSessionError,
+        match="Received legacy TestResult.*variable message family was expected",
+    ):
         var_adapter.ingest_application_message(legacy_msg)
 
     # Adapter expecting LEGACY
@@ -68,7 +73,10 @@ def test_incoming_result_adapter_enforces_expected_protocol_family(tmp_path: Pat
     )
 
     # Variable message sent to Legacy adapter must fail with explicit fault
-    with pytest.raises(ProtocolSessionError, match="Received VariableTestResult.*legacy message family was expected"):
+    with pytest.raises(
+        ProtocolSessionError,
+        match="Received VariableTestResult.*legacy message family was expected",
+    ):
         leg_adapter.ingest_application_message(var_msg)
 
 
@@ -86,7 +94,10 @@ def test_legacy_fixed_adapter_rejects_communication_peripherals() -> None:
     compiled = test.compile()
 
     legacy_adapter = FixedIOProtocolAdapter(protocol_module=FakeProtocol)
-    with pytest.raises(ProtocolIntegrationError, match="not supported in the legacy fixed-I/O message family"):
+    with pytest.raises(
+        ProtocolIntegrationError,
+        match="not supported in the legacy fixed-I/O message family",
+    ):
         legacy_adapter.build_upload(compiled)
 """
 

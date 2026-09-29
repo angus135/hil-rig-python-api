@@ -462,9 +462,7 @@ def _workload_hash(profile: LoopbackProfile, point: LoopbackWorkloadPoint) -> st
         "profile": profile.to_dict(),
         "point": {
             **point.to_dict(),
-            "target_utilization_percent": _canonical_decimal(
-                point.target_utilization_percent
-            ),
+            "target_utilization_percent": _canonical_decimal(point.target_utilization_percent),
         },
     }
     encoded = json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")

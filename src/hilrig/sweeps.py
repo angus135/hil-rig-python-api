@@ -115,8 +115,7 @@ class UtilizationBinarySearch:
         )
         if requested != self._current:
             raise ValueError(
-                f"Expected a result for {float(self._current):g}%, "
-                f"received {float(requested):g}%"
+                f"Expected a result for {float(self._current):g}%, received {float(requested):g}%"
             )
         outcomes = self._outcomes.setdefault(self._current, [])
         if len(outcomes) >= self._repeats:
@@ -135,12 +134,8 @@ class UtilizationBinarySearch:
             for percentage, outcomes in sorted(self._outcomes.items())
         )
         return UtilizationSearchResult(
-            highest_passing_percent=(
-                None if self._lower_pass is None else float(self._lower_pass)
-            ),
-            lowest_failing_percent=(
-                None if self._upper_fail is None else float(self._upper_fail)
-            ),
+            highest_passing_percent=(None if self._lower_pass is None else float(self._lower_pass)),
+            lowest_failing_percent=(None if self._upper_fail is None else float(self._upper_fail)),
             observations=observations,
         )
 

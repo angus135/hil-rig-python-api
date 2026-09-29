@@ -44,8 +44,8 @@ class IncomingResultAdapter:
         if isinstance(expected_family, str):
             try:
                 expected_family = ProtocolFamily(expected_family.lower())
-            except ValueError:
-                raise ValueError(f"Unknown protocol family: {expected_family!r}")
+            except ValueError as error:
+                raise ValueError(f"Unknown protocol family: {expected_family!r}") from error
         elif expected_family is not None and not isinstance(expected_family, ProtocolFamily):
             raise TypeError("expected_family must be a ProtocolFamily, str, or None")
         self.expected_family = expected_family
@@ -68,13 +68,13 @@ class IncomingResultAdapter:
         p = self.protocol
         is_fixed = hasattr(p, "TestResult") and type(application_message) is p.TestResult
         is_variable = (
-            hasattr(p, "VariableTestResult")
-            and type(application_message) is p.VariableTestResult
+            hasattr(p, "VariableTestResult") and type(application_message) is p.VariableTestResult
         )
 
         if not is_fixed and not is_variable:
             raise ProtocolSessionError(
-                f"Expected TestResult or VariableTestResult, received {type(application_message).__name__}"
+                "Expected TestResult or VariableTestResult, received "
+                f"{type(application_message).__name__}"
             )
 
         if self.expected_family is ProtocolFamily.VARIABLE and is_fixed:
@@ -112,7 +112,9 @@ class IncomingResultAdapter:
             else:
                 result = TickResult(
                     tick=application_message.tick_number,
-                    digital_inputs=tuple(value.high for value in application_message.digital_inputs),
+                    digital_inputs=tuple(
+                        value.high for value in application_message.digital_inputs
+                    ),
                     analogue_inputs_uv=tuple(
                         value.microvolts for value in application_message.analog_inputs
                     ),
