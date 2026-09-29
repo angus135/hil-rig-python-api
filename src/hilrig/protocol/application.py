@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+from collections.abc import Iterator
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -18,6 +19,9 @@ from hilrig.models.identifiers import (
     application_test_id_from_bytes,
     application_test_id_to_bytes,
 )
+
+FLAG_COMPLETE_TICK = 0x00
+FLAG_HAS_MORE_CHUNKS = 0x01
 
 _UINT32_MAX = (1 << 32) - 1
 _FIXED_OUTPUT_PERIPHERALS = frozenset({"digital_output", "analogue_output", "pwm_output"})
@@ -768,6 +772,47 @@ class VariableIOUploadMessages:
         return (self.configuration, *self.instructions)
 
 
+def chunk_update_instruction(
+    test_id: Any,
+    tick_number: int,
+    operations: tuple[Any, ...],
+    max_ops_per_chunk: int = 4,
+    *,
+    instruction_factory: Any | None = None,
+) -> Iterator[Any]:
+    """Splits a high-volume tick into chunked UpdateInstruction messages."""
+    if (
+        not isinstance(max_ops_per_chunk, int)
+        or isinstance(max_ops_per_chunk, bool)
+        or max_ops_per_chunk <= 0
+    ):
+        raise ValueError("max_ops_per_chunk must be a positive integer")
+
+    if instruction_factory is None:
+        p = _load_protocol_module()
+        instruction_factory = p.UpdateInstruction
+
+    if not operations:
+        yield instruction_factory(
+            test_id=test_id,
+            tick_number=tick_number,
+            flags=FLAG_COMPLETE_TICK,
+            operations=(),
+        )
+        return
+    total = len(operations)
+    for i in range(0, total, max_ops_per_chunk):
+        chunk_ops = operations[i : i + max_ops_per_chunk]
+        is_last = (i + max_ops_per_chunk) >= total
+
+        yield instruction_factory(
+            test_id=test_id,
+            tick_number=tick_number,
+            flags=FLAG_COMPLETE_TICK if is_last else FLAG_HAS_MORE_CHUNKS,
+            operations=tuple(chunk_ops),
+        )
+
+
 class VariableIOProtocolAdapter:
     """Build and encode sparse variable UpdateInstruction messages and test control."""
 
@@ -776,7 +821,15 @@ class VariableIOProtocolAdapter:
         *,
         protocol_module: ModuleType | Any | None = None,
         application_config: object | None = None,
+        max_ops_per_chunk: int = 4,
     ) -> None:
+        if (
+            not isinstance(max_ops_per_chunk, int)
+            or isinstance(max_ops_per_chunk, bool)
+            or max_ops_per_chunk <= 0
+        ):
+            raise ValueError("max_ops_per_chunk must be a positive integer")
+        self.max_ops_per_chunk = max_ops_per_chunk
         self.protocol = protocol_module or _load_protocol_module()
         missing = tuple(name for name in _CONTROL_FLOW_API if not hasattr(self.protocol, name))
         if missing:
@@ -1159,12 +1212,13 @@ class VariableIOProtocolAdapter:
                             f"{op.peripheral_type} channel {op.channel}"
                         )
                     seen_ops.add(op_key)
-                messages.append(
-                    p.UpdateInstruction(
+                messages.extend(
+                    chunk_update_instruction(
                         test_id=test_id,
                         tick_number=tick,
-                        flags=0,
                         operations=tuple(operations),
+                        max_ops_per_chunk=self.max_ops_per_chunk,
+                        instruction_factory=p.UpdateInstruction,
                     )
                 )
 
@@ -1172,6 +1226,8 @@ class VariableIOProtocolAdapter:
 
 
 __all__ = [
+    "FLAG_COMPLETE_TICK",
+    "FLAG_HAS_MORE_CHUNKS",
     "FixedIOProtocolAdapter",
     "FixedIOUploadMessages",
     "ProtocolFamily",
@@ -1183,4 +1239,5 @@ __all__ = [
     "VariableIOUploadMessages",
     "application_test_id_from_bytes",
     "application_test_id_to_bytes",
+    "chunk_update_instruction",
 ]

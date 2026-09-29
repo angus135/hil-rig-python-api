@@ -1,7 +1,5 @@
-"""Translate decoded protocol result messages into the captured-run IR."""
-
-from __future__ import annotations
-
+from collections.abc import Iterator
+from dataclasses import dataclass
 from importlib import import_module
 from types import ModuleType
 from typing import Any
@@ -29,6 +27,38 @@ def _load_protocol_module() -> ModuleType:
         ) from error
 
 
+@dataclass
+class AggregatedTickResult:
+    tick_number: int
+    records: list[Any]
+    condition: Any = 0
+    problem_detail: int = 0
+
+
+def aggregate_variable_results(
+    incoming_results: Iterator[Any],
+) -> Iterator[AggregatedTickResult]:
+    """Reassembles multi-chunk VariableTestResults into single tick results."""
+    current_tick: AggregatedTickResult | None = None
+    for msg in incoming_results:
+        if current_tick is None or current_tick.tick_number != msg.tick_number:
+            current_tick = AggregatedTickResult(
+                tick_number=msg.tick_number,
+                records=list(msg.records),
+                condition=msg.condition,
+                problem_detail=msg.problem_detail,
+            )
+        else:
+            current_tick.records.extend(msg.records)
+            is_not_ok = getattr(msg.condition, "value", msg.condition) != 0
+            if is_not_ok or msg.problem_detail != 0:
+                current_tick.condition = msg.condition
+                current_tick.problem_detail = msg.problem_detail
+        if getattr(msg, "flags", 0) == 0:  # FLAG_COMPLETE_TICK
+            yield current_tick
+            current_tick = None
+
+
 class IncomingResultAdapter:
     """Convert fixed and variable Application Test Results and queue them for SQLite storage."""
 
@@ -54,6 +84,9 @@ class IncomingResultAdapter:
         self._latched_digital_inputs = [False] * 10
         self._latched_analogue_inputs = [0] * 2
         self._latched_pwm_inputs = [PWMMeasurement(period_ns=0, duty_permyriad=0)] * 2
+        self._current_chunk_tick: int | None = None
+        self._current_chunk_condition: TickCondition = TickCondition.OK
+        self._current_chunk_problem_detail: int = 0
 
     def receive_usb_bytes(self, data: bytes) -> None:
         """Reject framed bytes; the serial connection owns deframing."""
@@ -63,7 +96,7 @@ class IncomingResultAdapter:
             "Raw USB bytes must be supplied to FixedIOProtocolConnection.service()"
         )
 
-    def ingest_application_message(self, application_message: object) -> TickResult:
+    def ingest_application_message(self, application_message: object) -> TickResult | None:
         """Validate and persist one decoded Test Result or Variable Test Result message."""
         p = self.protocol
         is_fixed = hasattr(p, "TestResult") and type(application_message) is p.TestResult
@@ -132,13 +165,16 @@ class IncomingResultAdapter:
             return result
 
         tick = application_message.tick_number
-        if condition is TickCondition.EXECUTION_PROBLEM:
-            result = TickResult.execution_problem(
-                tick=tick,
-                problem_detail=application_message.problem_detail,
-            )
-            self.builder.add_tick_result(result)
-            return result
+        flags = getattr(application_message, "flags", 0)
+
+        if self._current_chunk_tick is None or self._current_chunk_tick != tick:
+            self._current_chunk_tick = tick
+            self._current_chunk_condition = condition
+            self._current_chunk_problem_detail = application_message.problem_detail
+        else:
+            if condition is not TickCondition.OK or application_message.problem_detail != 0:
+                self._current_chunk_condition = condition
+                self._current_chunk_problem_detail = application_message.problem_detail
 
         for record in application_message.records:
             periph_type = record.peripheral_type
@@ -194,14 +230,27 @@ class IncomingResultAdapter:
                         )
                     )
 
-        result = TickResult(
-            tick=tick,
-            digital_inputs=tuple(self._latched_digital_inputs),
-            analogue_inputs_uv=tuple(self._latched_analogue_inputs),
-            pwm_inputs=tuple(self._latched_pwm_inputs),
-            condition=condition,
-            problem_detail=application_message.problem_detail,
-        )
+        if flags != 0:
+            return None
+
+        if self._current_chunk_condition is TickCondition.EXECUTION_PROBLEM:
+            result = TickResult.execution_problem(
+                tick=tick,
+                problem_detail=self._current_chunk_problem_detail,
+            )
+        else:
+            result = TickResult(
+                tick=tick,
+                digital_inputs=tuple(self._latched_digital_inputs),
+                analogue_inputs_uv=tuple(self._latched_analogue_inputs),
+                pwm_inputs=tuple(self._latched_pwm_inputs),
+                condition=self._current_chunk_condition,
+                problem_detail=self._current_chunk_problem_detail,
+            )
+
+        self._current_chunk_tick = None
+        self._current_chunk_condition = TickCondition.OK
+        self._current_chunk_problem_detail = 0
         self.builder.add_tick_result(result)
         return result
 
@@ -232,4 +281,8 @@ class IncomingResultAdapter:
         return record
 
 
-__all__ = ["IncomingResultAdapter"]
+__all__ = [
+    "AggregatedTickResult",
+    "IncomingResultAdapter",
+    "aggregate_variable_results",
+]

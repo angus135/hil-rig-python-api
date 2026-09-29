@@ -1,6 +1,10 @@
 """Incoming captured-run intermediate representation."""
 
-from hilrig.results.adapter import IncomingResultAdapter
+from hilrig.results.adapter import (
+    AggregatedTickResult,
+    IncomingResultAdapter,
+    aggregate_variable_results,
+)
 from hilrig.results.builder import CapturedRunBuilder
 from hilrig.results.ir import (
     AnalogueInputSeries,
@@ -37,6 +41,7 @@ __all__ = [
     "ORIGINAL_ASSERTION_SET_ID",
     "PWM_INPUT_CHANNEL_COUNT",
     "RESULT_IR_SCHEMA_VERSION",
+    "AggregatedTickResult",
     "AnalogueInputSample",
     "AnalogueInputSeries",
     "ApplicationErrorRecord",
@@ -58,4 +63,5 @@ __all__ = [
     "PWMMeasurement",
     "TickCondition",
     "TickResult",
+    "aggregate_variable_results",
 ]

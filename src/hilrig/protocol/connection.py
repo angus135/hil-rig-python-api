@@ -842,15 +842,16 @@ class FixedIOProtocolConnection:
                         )
                     self._validate_result_sequence(message)
                     if self.result_adapter is not None:
-                        stored_results.append(
-                            self.result_adapter.ingest_application_message(message)
-                        )
-                    self._next_result_tick += 1
-                    if self._active_upload is not None and (
-                        self._next_result_tick
-                        == self._active_upload.configuration.expected_tick_count
-                    ):
-                        self._workflow_state = ProtocolWorkflowState.RESULTS_COMPLETE
+                        res = self.result_adapter.ingest_application_message(message)
+                        if res is not None:
+                            stored_results.append(res)
+                    if getattr(message, "flags", 0) == 0:
+                        self._next_result_tick += 1
+                        if self._active_upload is not None and (
+                            self._next_result_tick
+                            == self._active_upload.configuration.expected_tick_count
+                        ):
+                            self._workflow_state = ProtocolWorkflowState.RESULTS_COMPLETE
             else:
                 if not self._manual_mode:
                     self._fail_workflow()

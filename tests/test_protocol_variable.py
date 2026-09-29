@@ -1,5 +1,6 @@
 import struct
 from pathlib import Path
+from typing import Any
 
 import pytest
 from protocol_fakes import (
@@ -9,6 +10,9 @@ from protocol_fakes import (
     ControlCommand,
     DigitalInputValue,
     FakeProtocol,
+    FLAG_COMPLETE_TICK,
+    FLAG_HAS_MORE_CHUNKS,
+    LogicalOperation,
     PeripheralType,
     PWMInputValue,
     ResultCondition,
@@ -32,6 +36,7 @@ from protocol_fakes import (
 )
 
 from hilrig import (
+    AggregatedTickResult,
     CapturedRunBuilder,
     CaptureStatus,
     CommunicationPeripheral,
@@ -53,6 +58,8 @@ from hilrig import (
     UploadAttempt,
     UploadOperationKind,
     VariableIOProtocolAdapter,
+    aggregate_variable_results,
+    chunk_update_instruction,
 )
 from hilrig import Test as HilRigTest
 from hilrig.exceptions import ProtocolIntegrationError, ProtocolSessionError
@@ -504,3 +511,486 @@ def test_loopback_workload_points_encode_cleanly_at_high_utilisations() -> None:
         compiled = test.compile()
         plan = adapter.build_upload_plan(compiled)
         assert len(plan.operations) > 0
+
+
+def test_chunk_update_instruction_empty_and_splits() -> None:
+    test_id = FakeProtocol.TestId(b"\x01" * 16)
+
+    # Empty operations -> 1 chunk with flags=FLAG_COMPLETE_TICK (0) and empty ops
+    empty_chunks = list(
+        chunk_update_instruction(
+            test_id=test_id,
+            tick_number=0,
+            operations=(),
+            max_ops_per_chunk=4,
+            instruction_factory=FakeProtocol.UpdateInstruction,
+        )
+    )
+    assert len(empty_chunks) == 1
+    assert empty_chunks[0].tick_number == 0
+    assert empty_chunks[0].flags == FLAG_COMPLETE_TICK
+    assert empty_chunks[0].operations == ()
+
+    # 3 operations with max_ops_per_chunk=4 -> 1 chunk with flags=0
+    ops_3 = tuple(
+        LogicalOperation(
+            peripheral_type=PeripheralType.ANALOG_OUTPUT,
+            channel=i,
+            payload=i.to_bytes(4, "little"),
+        )
+        for i in range(3)
+    )
+    chunks_3 = list(
+        chunk_update_instruction(
+            test_id=test_id,
+            tick_number=5,
+            operations=ops_3,
+            max_ops_per_chunk=4,
+            instruction_factory=FakeProtocol.UpdateInstruction,
+        )
+    )
+    assert len(chunks_3) == 1
+    assert chunks_3[0].tick_number == 5
+    assert chunks_3[0].flags == FLAG_COMPLETE_TICK
+    assert len(chunks_3[0].operations) == 3
+
+    # 9 operations with max_ops_per_chunk=4 -> 3 chunks: [4 ops flags=1], [4 ops flags=1], [1 op flags=0]
+    ops_9 = tuple(
+        LogicalOperation(
+            peripheral_type=PeripheralType.ANALOG_OUTPUT,
+            channel=i,
+            payload=i.to_bytes(4, "little"),
+        )
+        for i in range(9)
+    )
+    chunks_9 = list(
+        chunk_update_instruction(
+            test_id=test_id,
+            tick_number=10,
+            operations=ops_9,
+            max_ops_per_chunk=4,
+            instruction_factory=FakeProtocol.UpdateInstruction,
+        )
+    )
+    assert len(chunks_9) == 3
+    assert [c.tick_number for c in chunks_9] == [10, 10, 10]
+    assert [c.flags for c in chunks_9] == [
+        FLAG_HAS_MORE_CHUNKS,
+        FLAG_HAS_MORE_CHUNKS,
+        FLAG_COMPLETE_TICK,
+    ]
+    assert [len(c.operations) for c in chunks_9] == [4, 4, 1]
+    assert chunks_9[0].operations == ops_9[0:4]
+    assert chunks_9[1].operations == ops_9[4:8]
+    assert chunks_9[2].operations == ops_9[8:9]
+
+    # Validation of max_ops_per_chunk
+    with pytest.raises(ValueError, match="max_ops_per_chunk must be a positive integer"):
+        list(
+            chunk_update_instruction(
+                test_id=test_id,
+                tick_number=0,
+                operations=(),
+                max_ops_per_chunk=0,
+                instruction_factory=FakeProtocol.UpdateInstruction,
+            )
+        )
+
+
+def test_variable_adapter_with_custom_chunking() -> None:
+    test = HilRigTest(name="Multi-chunk instruction test")
+    test.configure(frequency_mode=FrequencyMode.HZ_1K, start_mode=StartMode.IMMEDIATE)
+    ao0 = test.analogue_output(channel=0).configure(initial_voltage=0.0)
+    ao1 = test.analogue_output(channel=1).configure(initial_voltage=0.0)
+    ao2 = test.analogue_output(channel=2).configure(initial_voltage=0.0)
+    ao3 = test.analogue_output(channel=3).configure(initial_voltage=0.0)
+    ao4 = test.analogue_output(channel=4).configure(initial_voltage=0.0)
+
+    # Schedule 5 operations on tick 10
+    ao0.set_voltage(1.0, at_tick=10)
+    ao1.set_voltage(1.5, at_tick=10)
+    ao2.set_voltage(2.0, at_tick=10)
+    ao3.set_voltage(2.5, at_tick=10)
+    ao4.set_voltage(3.0, at_tick=10)
+
+    compiled = test.compile()
+    attempt = UploadAttempt(
+        definition_test_id=compiled.test_id,
+        application_test_id=0x0102030405060708090A0B0C0D0E0F10,
+    )
+
+    # Adapter with max_ops_per_chunk=2 -> 5 operations on tick 10 should produce 3 chunks (2, 2, 1)
+    adapter = VariableIOProtocolAdapter(protocol_module=FakeProtocol, max_ops_per_chunk=2)
+    upload = adapter.build_upload(compiled, upload_attempt=attempt)
+
+    instructions = upload.instructions
+    assert len(instructions) == 3
+    assert all(inst.tick_number == 10 for inst in instructions)
+    assert instructions[0].flags == FLAG_HAS_MORE_CHUNKS
+    assert len(instructions[0].operations) == 2
+    assert instructions[1].flags == FLAG_HAS_MORE_CHUNKS
+    assert len(instructions[1].operations) == 2
+    assert instructions[2].flags == FLAG_COMPLETE_TICK
+    assert len(instructions[2].operations) == 1
+
+    plan = adapter.build_upload_plan(compiled, upload_attempt=attempt)
+    tick_ops = [op for op in plan.operations if op.kind is UploadOperationKind.TICK]
+    assert len(tick_ops) == 3
+    assert all(op.tick == 10 for op in tick_ops)
+
+
+def test_aggregate_variable_results_multi_chunk() -> None:
+    test_id = FakeProtocol.TestId(b"\x02" * 16)
+    r1 = CapturedRecord(
+        peripheral_type=PeripheralType.UART,
+        channel=0,
+        data=b"chunk1_",
+    )
+    r2 = CapturedRecord(
+        peripheral_type=PeripheralType.UART,
+        channel=0,
+        data=b"chunk2_",
+    )
+    r3 = CapturedRecord(
+        peripheral_type=PeripheralType.UART,
+        channel=0,
+        data=b"chunk3",
+    )
+    r_tick1 = CapturedRecord(
+        peripheral_type=PeripheralType.SPI,
+        channel=0,
+        data=b"spi_data",
+    )
+
+    incoming = [
+        # Tick 0 in 3 chunks
+        VariableTestResult(
+            test_id=test_id,
+            tick_number=0,
+            condition=ResultCondition.OK,
+            flags=FLAG_HAS_MORE_CHUNKS,
+            records=(r1,),
+        ),
+        VariableTestResult(
+            test_id=test_id,
+            tick_number=0,
+            condition=ResultCondition.OK,
+            flags=FLAG_HAS_MORE_CHUNKS,
+            records=(r2,),
+        ),
+        VariableTestResult(
+            test_id=test_id,
+            tick_number=0,
+            condition=ResultCondition.OK,
+            flags=FLAG_COMPLETE_TICK,
+            records=(r3,),
+        ),
+        # Tick 1 in 1 chunk
+        VariableTestResult(
+            test_id=test_id,
+            tick_number=1,
+            condition=ResultCondition.OK,
+            flags=FLAG_COMPLETE_TICK,
+            records=(r_tick1,),
+        ),
+    ]
+
+    aggregated = list(aggregate_variable_results(iter(incoming)))
+    assert len(aggregated) == 2
+
+    assert aggregated[0].tick_number == 0
+    assert aggregated[0].condition is ResultCondition.OK
+    assert aggregated[0].problem_detail == 0
+    assert aggregated[0].records == [r1, r2, r3]
+
+    assert aggregated[1].tick_number == 1
+    assert aggregated[1].condition is ResultCondition.OK
+    assert aggregated[1].records == [r_tick1]
+
+
+def test_aggregate_variable_results_captures_condition_fault() -> None:
+    test_id = FakeProtocol.TestId(b"\x03" * 16)
+    r1 = CapturedRecord(
+        peripheral_type=PeripheralType.UART,
+        channel=0,
+        data=b"part1",
+    )
+    r2 = CapturedRecord(
+        peripheral_type=PeripheralType.UART,
+        channel=0,
+        data=b"part2",
+    )
+
+    incoming = [
+        # Intermediate chunk has EXECUTION_PROBLEM
+        VariableTestResult(
+            test_id=test_id,
+            tick_number=5,
+            condition=ResultCondition.EXECUTION_PROBLEM,
+            problem_detail=99,
+            flags=FLAG_HAS_MORE_CHUNKS,
+            records=(r1,),
+        ),
+        # Final chunk has OK
+        VariableTestResult(
+            test_id=test_id,
+            tick_number=5,
+            condition=ResultCondition.OK,
+            problem_detail=0,
+            flags=FLAG_COMPLETE_TICK,
+            records=(r2,),
+        ),
+    ]
+
+    aggregated = list(aggregate_variable_results(iter(incoming)))
+    assert len(aggregated) == 1
+    assert aggregated[0].tick_number == 5
+    assert aggregated[0].condition is ResultCondition.EXECUTION_PROBLEM
+    assert aggregated[0].problem_detail == 99
+    assert aggregated[0].records == [r1, r2]
+
+
+def test_incoming_result_adapter_multi_chunk_variable_test_result(tmp_path: Path) -> None:
+    compiled = _compiled_variable_io_test()
+    attempt = compiled.new_upload_attempt()
+    builder = CapturedRunBuilder.from_compiled_test(
+        tmp_path / "multi_chunk_run.sqlite3",
+        compiled,
+        upload_attempt=attempt,
+    )
+    adapter = IncomingResultAdapter(builder, protocol_module=FakeProtocol)
+    test_id = FakeProtocol.TestId(attempt.application_test_id.to_bytes(16, "big"))
+
+    # Tick 5 sent in 2 chunks:
+    # Chunk 1 (flags=1): digital input + uart packet 1
+    chunk_1 = VariableTestResult(
+        test_id=test_id,
+        tick_number=5,
+        condition=ResultCondition.OK,
+        flags=FLAG_HAS_MORE_CHUNKS,
+        records=(
+            CapturedRecord(
+                peripheral_type=PeripheralType.DIGITAL_INPUT,
+                channel=0,
+                data=(2).to_bytes(2, "little"),  # pin 1 high
+            ),
+            CapturedRecord(
+                peripheral_type=PeripheralType.UART,
+                channel=0,
+                data=b"first_part_",
+            ),
+        ),
+    )
+    # Intermediate chunk returns None
+    res1 = adapter.ingest_application_message(chunk_1)
+    assert res1 is None
+
+    # Chunk 2 (flags=0): analogue input + uart packet 2
+    chunk_2 = VariableTestResult(
+        test_id=test_id,
+        tick_number=5,
+        condition=ResultCondition.OK,
+        flags=FLAG_COMPLETE_TICK,
+        records=(
+            CapturedRecord(
+                peripheral_type=PeripheralType.ANALOG_INPUT,
+                channel=0,
+                data=(2_000_000).to_bytes(4, "little"),
+            ),
+            CapturedRecord(
+                peripheral_type=PeripheralType.UART,
+                channel=0,
+                data=b"second_part",
+            ),
+        ),
+    )
+    res2 = adapter.ingest_application_message(chunk_2)
+    assert res2 is not None
+    assert res2.tick == 5
+    assert res2.digital_inputs[1] is True
+    assert res2.analogue_inputs_uv[0] == 2_000_000
+
+    run = builder.finalize(status=CaptureStatus.INCOMPLETE)
+    comms = list(run.iter_communications(peripheral=CommunicationPeripheral.UART))
+    assert len(comms) == 2
+    assert comms[0].payload == b"first_part_"
+    assert comms[1].payload == b"second_part"
+
+
+def test_incoming_result_adapter_multi_chunk_fault_condition(tmp_path: Path) -> None:
+    compiled = _compiled_variable_io_test()
+    attempt = compiled.new_upload_attempt()
+    builder = CapturedRunBuilder.from_compiled_test(
+        tmp_path / "multi_chunk_fault.sqlite3",
+        compiled,
+        upload_attempt=attempt,
+    )
+    adapter = IncomingResultAdapter(builder, protocol_module=FakeProtocol)
+    test_id = FakeProtocol.TestId(attempt.application_test_id.to_bytes(16, "big"))
+
+    # Chunk 1 (flags=1) has EXECUTION_PROBLEM
+    chunk_1 = VariableTestResult(
+        test_id=test_id,
+        tick_number=2,
+        condition=ResultCondition.EXECUTION_PROBLEM,
+        problem_detail=123,
+        flags=FLAG_HAS_MORE_CHUNKS,
+        records=(),
+    )
+    res1 = adapter.ingest_application_message(chunk_1)
+    assert res1 is None
+
+    # Chunk 2 (flags=0) finishes the tick
+    chunk_2 = VariableTestResult(
+        test_id=test_id,
+        tick_number=2,
+        condition=ResultCondition.OK,
+        problem_detail=0,
+        flags=FLAG_COMPLETE_TICK,
+        records=(),
+    )
+    res2 = adapter.ingest_application_message(chunk_2)
+    assert res2 is not None
+    assert res2.tick == 2
+    assert res2.condition is TickCondition.EXECUTION_PROBLEM
+    assert res2.problem_detail == 123
+
+
+def _drive_fake_variable_rig_to_state(
+    connection: Any,
+    application: VariableIOProtocolAdapter,
+    target: Any = None,
+) -> None:
+    from protocol_fakes import (
+        ApplicationResponse,
+        FinalizeTestUpload,
+        ProtocolVersion,
+        ResponseOutcome,
+        ResponseScope,
+        SystemInfoRequest,
+        SystemInfoResponse,
+        TestConfiguration,
+    )
+    from hilrig.protocol import ProtocolWorkflowState
+    from test_protocol_connection import _written_messages, _queue_incoming
+
+    if target is None:
+        target = ProtocolWorkflowState.RUNNING
+
+    serial_port = connection.serial_port
+    responded = 0
+    for _ in range(500):
+        connection.service()
+        requests = _written_messages(serial_port, application)
+        while responded < len(requests):
+            request = requests[responded]
+            responded += 1
+            if type(request) is SystemInfoRequest:
+                responses = [
+                    SystemInfoResponse(
+                        protocol_version=FakeProtocol.PROTOCOL_VERSION,
+                        firmware_version=ProtocolVersion(1, 2, 3),
+                        firmware_git_hash=b"abc123",
+                    )
+                ]
+            elif type(request) is TestConfiguration:
+                responses = [
+                    ApplicationResponse(
+                        request.test_id,
+                        ResponseScope.TEST_CONFIGURATION,
+                        ResponseOutcome.ACCEPTED,
+                    )
+                ]
+            elif type(request) is UpdateInstruction:
+                responses = []
+            elif type(request) is FinalizeTestUpload:
+                responses = [
+                    ApplicationResponse(
+                        request.test_id,
+                        ResponseScope.COMPLETE_TEST,
+                        ResponseOutcome.ACCEPTED,
+                    )
+                ]
+            else:
+                responses = [
+                    ApplicationResponse(
+                        request.test_id,
+                        ResponseScope.EXECUTION_CONTROL,
+                        ResponseOutcome.COMPLETED,
+                        control_command=ControlCommand.START,
+                    )
+                ]
+            _queue_incoming(serial_port, application, *responses)
+        if connection.workflow_state is target:
+            return
+    raise AssertionError(f"fake protocol workflow did not reach {target.name}")
+
+
+def test_connection_service_multi_chunk_variable_test_result(tmp_path: Path) -> None:
+    from protocol_fakes import FakeSerial, FakeTransport
+    from hilrig.protocol import FixedIOProtocolConnection
+
+    compiled = _compiled_variable_io_test()
+    attempt = compiled.new_upload_attempt()
+    builder = CapturedRunBuilder.from_compiled_test(
+        tmp_path / "conn_multi_chunk.sqlite3",
+        compiled,
+        upload_attempt=attempt,
+    )
+    application = VariableIOProtocolAdapter(protocol_module=FakeProtocol)
+    transport = FakeTransport()
+    result_adapter = IncomingResultAdapter(builder, protocol_module=FakeProtocol)
+    serial_port = FakeSerial()
+    connection = FixedIOProtocolConnection(
+        serial_port=serial_port,
+        application=application,
+        transport=transport,
+        result_adapter=result_adapter,
+    )
+
+    # Establish session & queue upload
+    connection.queue_upload(compiled, upload_attempt=attempt)
+
+    # Drive to RUNNING
+    from test_protocol_connection import _queue_incoming
+    _drive_fake_variable_rig_to_state(connection, application)
+
+    test_id = FakeProtocol.TestId(attempt.application_test_id.to_bytes(16, "big"))
+
+    # Send tick 0 in 2 chunks
+    chunk_0_1 = VariableTestResult(
+        test_id=test_id,
+        tick_number=0,
+        condition=ResultCondition.OK,
+        flags=FLAG_HAS_MORE_CHUNKS,
+        records=(
+            CapturedRecord(
+                peripheral_type=PeripheralType.DIGITAL_INPUT,
+                channel=0,
+                data=(1).to_bytes(2, "little"),
+            ),
+        ),
+    )
+    chunk_0_2 = VariableTestResult(
+        test_id=test_id,
+        tick_number=0,
+        condition=ResultCondition.OK,
+        flags=FLAG_COMPLETE_TICK,
+        records=(
+            CapturedRecord(
+                peripheral_type=PeripheralType.UART,
+                channel=0,
+                data=b"tick0_data",
+            ),
+        ),
+    )
+
+    _queue_incoming(serial_port, application, chunk_0_1)
+    report1 = connection.service()
+    assert len(report1.stored_tick_results) == 0  # Intermediate chunk doesn't finalize tick
+
+    _queue_incoming(serial_port, application, chunk_0_2)
+    report2 = connection.service()
+    assert len(report2.stored_tick_results) == 1
+    assert report2.stored_tick_results[0].tick == 0
+    assert report2.stored_tick_results[0].digital_inputs[0] is True

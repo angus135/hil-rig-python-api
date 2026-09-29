@@ -6,6 +6,9 @@ from collections import deque
 from dataclasses import dataclass, field
 from enum import IntEnum
 
+FLAG_COMPLETE_TICK = 0x00
+FLAG_HAS_MORE_CHUNKS = 0x01
+
 
 class PeripheralVoltage(IntEnum):
     INVALID = 0
@@ -472,6 +475,8 @@ class TransportSnapshot:
 
 
 class FakeProtocol:
+    FLAG_COMPLETE_TICK = FLAG_COMPLETE_TICK
+    FLAG_HAS_MORE_CHUNKS = FLAG_HAS_MORE_CHUNKS
     PROTOCOL_VERSION = PROTOCOL_VERSION
     ApplicationCodec = ApplicationCodec
     ApplicationConfig = ApplicationConfig

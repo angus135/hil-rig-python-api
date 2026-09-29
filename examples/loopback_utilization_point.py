@@ -44,7 +44,7 @@ PROFILE = LoopbackProfile(
 DEFAULT_POINT = LoopbackWorkloadPoint(
     frequency_hz=100,
     duration_s=1,
-    target_utilization_percent=80.0,
+    target_utilization_percent=60.0,
     burst_interval_ticks=1,
     seed=1,
 )

@@ -1,6 +1,8 @@
 """Application protocol and direct serial integration for the HIL-RIG host API."""
 
 from hilrig.protocol.application import (
+    FLAG_COMPLETE_TICK,
+    FLAG_HAS_MORE_CHUNKS,
     FixedIOProtocolAdapter,
     FixedIOUploadMessages,
     ProtocolFamily,
@@ -12,6 +14,7 @@ from hilrig.protocol.application import (
     VariableIOUploadMessages,
     application_test_id_from_bytes,
     application_test_id_to_bytes,
+    chunk_update_instruction,
 )
 from hilrig.protocol.connection import (
     FixedIOProtocolConnection,
@@ -34,6 +37,8 @@ from hilrig.protocol.serial import (
 )
 
 __all__ = [
+    "FLAG_COMPLETE_TICK",
+    "FLAG_HAS_MORE_CHUNKS",
     "FixedIOProtocolAdapter",
     "FixedIOProtocolConnection",
     "FixedIOUploadMessages",
@@ -54,6 +59,7 @@ __all__ = [
     "VariableIOUploadMessages",
     "application_test_id_from_bytes",
     "application_test_id_to_bytes",
+    "chunk_update_instruction",
     "discover_serial_port",
     "monotonic_now_ms",
     "open_serial_port",

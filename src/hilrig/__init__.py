@@ -67,6 +67,8 @@ from hilrig.models.configuration import (
 from hilrig.models.execution import CompiledTestIR
 from hilrig.models.identifiers import UploadAttempt
 from hilrig.protocol import (
+    FLAG_COMPLETE_TICK,
+    FLAG_HAS_MORE_CHUNKS,
     FixedIOProtocolAdapter,
     FixedIOProtocolConnection,
     FixedIOUploadMessages,
@@ -85,10 +87,12 @@ from hilrig.protocol import (
     UploadPlan,
     VariableIOProtocolAdapter,
     VariableIOUploadMessages,
+    chunk_update_instruction,
     discover_serial_port,
     load_manual_message,
 )
 from hilrig.results import (
+    AggregatedTickResult,
     ApplicationErrorRecord,
     CapturedAssertionSet,
     CapturedRunBuilder,
@@ -100,6 +104,7 @@ from hilrig.results import (
     PWMMeasurement,
     TickCondition,
     TickResult,
+    aggregate_variable_results,
 )
 from hilrig.sweeps import (
     UtilizationBinarySearch,
@@ -126,6 +131,7 @@ __all__ = [
     "CAN",
     "CANExpectation",
     "CANConfiguration",
+    "AggregatedTickResult",
     "ApplicationErrorRecord",
     "AssertionGroup",
     "AssertionGroupResult",
@@ -151,6 +157,8 @@ __all__ = [
     "EvaluationError",
     "EvaluationReport",
     "EvaluationVerdict",
+    "FLAG_COMPLETE_TICK",
+    "FLAG_HAS_MORE_CHUNKS",
     "FrequencyMode",
     "FixedIOProtocolAdapter",
     "FixedIOProtocolConnection",
@@ -216,8 +224,10 @@ __all__ = [
     "ValidationError",
     "VariableIOProtocolAdapter",
     "VariableIOUploadMessages",
+    "aggregate_variable_results",
     "apply_loopback_communication_workload",
     "burst_sweep_points",
+    "chunk_update_instruction",
     "compile_loopback_workload",
     "evaluate_assertions",
     "discover_serial_port",
