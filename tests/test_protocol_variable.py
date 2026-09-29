@@ -491,7 +491,7 @@ def test_loopback_workload_points_encode_cleanly_at_high_utilisations() -> None:
     from examples.loopback_utilization_point import build_test_for_point
     from hilrig import LoopbackWorkloadPoint
 
-    adapter = VariableIOProtocolAdapter()
+    adapter = VariableIOProtocolAdapter(protocol_module=FakeProtocol)
     for pct in [20.0, 25.0, 27.0, 28.0, 29.0, 30.0, 35.0]:
         point = LoopbackWorkloadPoint(
             frequency_hz=1000,

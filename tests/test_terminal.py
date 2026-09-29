@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import sys
 from io import StringIO
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from prompt_toolkit.document import Document
@@ -248,8 +250,6 @@ def test_terminal_ports_and_reset_commands() -> None:
 
 
 def test_terminal_ports_detection(monkeypatch: pytest.MonkeyPatch) -> None:
-    from types import SimpleNamespace
-
     mock_ports = [
         SimpleNamespace(
             device="COM10",
@@ -267,9 +267,15 @@ def test_terminal_ports_detection(monkeypatch: pytest.MonkeyPatch) -> None:
         ),
     ]
 
-    import serial.tools.list_ports
-
-    monkeypatch.setattr(serial.tools.list_ports, "comports", lambda: mock_ports)
+    serial_module = ModuleType("serial")
+    tools_module = ModuleType("serial.tools")
+    list_ports_module = ModuleType("serial.tools.list_ports")
+    list_ports_module.comports = lambda: mock_ports
+    tools_module.list_ports = list_ports_module
+    serial_module.tools = tools_module
+    monkeypatch.setitem(sys.modules, "serial", serial_module)
+    monkeypatch.setitem(sys.modules, "serial.tools", tools_module)
+    monkeypatch.setitem(sys.modules, "serial.tools.list_ports", list_ports_module)
 
     output = StringIO()
     worker = _StubWorker()
