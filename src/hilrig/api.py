@@ -1304,6 +1304,7 @@ class UARTExpectation(_ExpectationBuilder):
         self,
         data: bytes,
         *,
+        allow_stream_match: bool = False,
         from_tick: int | None = None,
         until_tick: int | None = None,
         from_ms: TimeValue | None = None,
@@ -1325,6 +1326,7 @@ class UARTExpectation(_ExpectationBuilder):
                 from_tick=start,
                 until_tick=end,
                 expected_payload=payload,
+                allow_stream_match=allow_stream_match,
             )
         )
         return self
@@ -1334,6 +1336,7 @@ class UARTExpectation(_ExpectationBuilder):
         data: str,
         *,
         encoding: str = "utf-8",
+        allow_stream_match: bool = False,
         from_tick: int | None = None,
         until_tick: int | None = None,
         from_ms: TimeValue | None = None,
@@ -1347,6 +1350,7 @@ class UARTExpectation(_ExpectationBuilder):
         payload = data.encode(encoding)
         return self.receive(
             payload,
+            allow_stream_match=allow_stream_match,
             from_tick=from_tick,
             until_tick=until_tick,
             from_ms=from_ms,
@@ -1373,6 +1377,7 @@ class SPIExpectation(_ExpectationBuilder):
         self,
         data: bytes,
         *,
+        allow_stream_match: bool = False,
         from_tick: int | None = None,
         until_tick: int | None = None,
         from_ms: TimeValue | None = None,
@@ -1394,6 +1399,7 @@ class SPIExpectation(_ExpectationBuilder):
                 from_tick=start,
                 until_tick=end,
                 expected_payload=payload,
+                allow_stream_match=allow_stream_match,
             )
         )
         return self

@@ -160,6 +160,7 @@ class CommunicationReceiveAssertion(RangeAssertion):
     """Expect specific payload bytes received on a communication peripheral within a tick range."""
 
     expected_payload: bytes
+    allow_stream_match: bool = False
 
 
 @dataclass(frozen=True, slots=True)

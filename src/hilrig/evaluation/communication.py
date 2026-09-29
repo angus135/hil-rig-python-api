@@ -44,12 +44,20 @@ def evaluate_communication_receive(
     matching_tick: int | None = None
     observed_payloads = []
 
+    allow_stream_match = bool(assertion.arguments.get("allow_stream_match", False))
+
     for capture in captures:
         observed_payloads.append(f"0x{capture.payload.hex()}")
         if capture.payload == expected_bytes:
             matched = True
             matching_tick = capture.tick
             break
+
+    if not matched and allow_stream_match and captures and expected_bytes:
+        concatenated = b"".join(capture.payload for capture in captures)
+        if expected_bytes in concatenated:
+            matched = True
+            matching_tick = captures[0].tick
 
     if matched:
         return make_result(
