@@ -4,14 +4,14 @@ from typing import Any
 
 import pytest
 from protocol_fakes import (
+    FLAG_COMPLETE_TICK,
+    FLAG_HAS_MORE_CHUNKS,
     AnalogInputValue,
     BusRole,
     CapturedRecord,
     ControlCommand,
     DigitalInputValue,
     FakeProtocol,
-    FLAG_COMPLETE_TICK,
-    FLAG_HAS_MORE_CHUNKS,
     LogicalOperation,
     PeripheralType,
     PWMInputValue,
@@ -36,7 +36,6 @@ from protocol_fakes import (
 )
 
 from hilrig import (
-    AggregatedTickResult,
     CapturedRunBuilder,
     CaptureStatus,
     CommunicationPeripheral,
@@ -554,7 +553,8 @@ def test_chunk_update_instruction_empty_and_splits() -> None:
     assert chunks_3[0].flags == FLAG_COMPLETE_TICK
     assert len(chunks_3[0].operations) == 3
 
-    # 9 operations with max_ops_per_chunk=4 -> 3 chunks: [4 ops flags=1], [4 ops flags=1], [1 op flags=0]
+    # 9 operations with max_ops_per_chunk=4 -> 3 chunks:
+    # [4 ops flags=1], [4 ops flags=1], [1 op flags=0]
     ops_9 = tuple(
         LogicalOperation(
             peripheral_type=PeripheralType.ANALOG_OUTPUT,
@@ -871,8 +871,9 @@ def _drive_fake_variable_rig_to_state(
         SystemInfoResponse,
         TestConfiguration,
     )
+    from test_protocol_connection import _queue_incoming, _written_messages
+
     from hilrig.protocol import ProtocolWorkflowState
-    from test_protocol_connection import _written_messages, _queue_incoming
 
     if target is None:
         target = ProtocolWorkflowState.RUNNING
@@ -928,6 +929,7 @@ def _drive_fake_variable_rig_to_state(
 
 def test_connection_service_multi_chunk_variable_test_result(tmp_path: Path) -> None:
     from protocol_fakes import FakeSerial, FakeTransport
+
     from hilrig.protocol import FixedIOProtocolConnection
 
     compiled = _compiled_variable_io_test()
@@ -953,6 +955,7 @@ def test_connection_service_multi_chunk_variable_test_result(tmp_path: Path) -> 
 
     # Drive to RUNNING
     from test_protocol_connection import _queue_incoming
+
     _drive_fake_variable_rig_to_state(connection, application)
 
     test_id = FakeProtocol.TestId(attempt.application_test_id.to_bytes(16, "big"))
