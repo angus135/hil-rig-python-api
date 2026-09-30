@@ -12,6 +12,7 @@ from hilrig import (
     FixedIOProtocolAdapter,
     ManualSendResult,
     PWMMeasurement,
+    ProtocolSessionError,
     TickResult,
 )
 from hilrig.protocol import ProtocolWorkflowState, UploadAdvanceMode, UploadOperationKind
@@ -51,9 +52,13 @@ class _AutomaticConnection:
         *,
         block_results: bool = False,
         application_errors: tuple[ApplicationErrorRecord, ...] = (),
+        fail_during_upload: bool = False,
     ) -> None:
         self.block_results = block_results
         self.application_errors = application_errors
+        self.fail_during_upload = fail_during_upload
+        self._accumulated_errors: list[ApplicationErrorRecord] = []
+        self.last_error = None
         self.session_confirmed = False
         self.session_info = None
         self.workflow_state = ProtocolWorkflowState.CONNECTING
@@ -71,17 +76,33 @@ class _AutomaticConnection:
     def waiting_for_operator(self) -> bool:
         return self.next_upload_operation is not None
 
+    def drain_accumulated_errors(self) -> tuple[ApplicationErrorRecord, ...]:
+        errors = tuple(self._accumulated_errors)
+        self._accumulated_errors.clear()
+        return errors
+
     def service(self):
         stored = ()
         errors = ()
         if not self.session_confirmed:
             self.session_confirmed = True
             self.session_info = SimpleNamespace(
-                protocol_version="0.3.0",
+                protocol_version="0.3.1",
                 firmware_version="1.2.3",
             )
             self.workflow_state = ProtocolWorkflowState.READY
         elif self.workflow_state is ProtocolWorkflowState.CONFIGURING:
+            if self.fail_during_upload:
+                self.workflow_state = ProtocolWorkflowState.FAILED
+                self.last_error = "Instruction upload rejected on tick 0: INVALID_TICK (detail 42)"
+                err = ApplicationErrorRecord(
+                    category="tick_rejected",
+                    detail="INVALID_TICK (detail 42)",
+                    recoverable=False,
+                    tick=0,
+                )
+                self._accumulated_errors.append(err)
+                raise ProtocolSessionError(self.last_error)
             if self.advance_mode is UploadAdvanceMode.OPERATOR_GATED:
                 self.next_upload_operation = SimpleNamespace(
                     kind=UploadOperationKind.START,
@@ -184,7 +205,7 @@ class _ManualConnection:
             self.session_confirmed = True
             if not self.skip_system_info:
                 self.session_info = SimpleNamespace(
-                    protocol_version="0.3.0",
+                    protocol_version="0.3.1",
                     firmware_version="1.2.3",
                 )
         elif self.pending is not None:
@@ -482,3 +503,24 @@ def _wait_for_manual_result(worker: ProtocolWorker) -> None:
             return
         time.sleep(0.001)
     raise AssertionError(f"manual send did not complete: {worker.manual_snapshot()}")
+
+
+def test_worker_handles_upload_rejection_retaining_inbox_error(tmp_path: Path) -> None:
+    definition = _write_test_file(tmp_path / "failing_upload.py")
+    connection = _AutomaticConnection(fail_during_upload=True)
+    worker = ProtocolWorker(connection_factory=lambda: connection, poll_interval_s=0)
+    try:
+        assert worker.submit(definition)
+        assert worker.wait_until_idle(5)
+        snapshot = worker.snapshot()
+
+        assert snapshot.state is WorkerState.FAILED
+        assert snapshot.inbox_count == 1
+        assert "ProtocolSessionError" in (snapshot.error or "")
+
+        inbox = worker.run_inbox()
+        assert len(inbox) == 1
+        assert "tick_rejected" in inbox[0]
+        assert "INVALID_TICK" in inbox[0]
+    finally:
+        worker.shutdown()

@@ -801,6 +801,9 @@ class ProtocolWorker:
                 service_report = connection.service()
                 received_tick_count += len(service_report.stored_tick_results)
                 self._record_run_errors(service_report.stored_application_errors)
+                if connection.workflow_state is ProtocolWorkflowState.FAILED:
+                    err_msg = getattr(connection, "last_error", None) or "Protocol workflow failed"
+                    raise ProtocolSessionError(err_msg)
                 if (
                     connection.workflow_state is ProtocolWorkflowState.READY_TO_START
                     and compiled.start_mode == "HOST_COMMAND"
@@ -858,6 +861,8 @@ class ProtocolWorker:
                 + (f" Partial results: {output_directory}" if output_directory else "")
             )
         except BaseException as error:
+            if connection is not None and hasattr(connection, "drain_accumulated_errors"):
+                self._record_run_errors(connection.drain_accumulated_errors())
             if builder is not None:
                 try:
                     captured_run = builder.finalize(status=CaptureStatus.PROTOCOL_ERROR)

@@ -9,7 +9,7 @@ protocol-neutral JSON and Excel intermediate representations, persistent capture
 storage, and host-side assertion evaluation with JSON and Markdown reports. The
 optional protocol integration lowers fixed Digital, Analogue, and PWM state plus UART,
 SPI, and CAN traffic through `hil-rig-protocol`. Application messages use direct
-length-prefixed framing over a USB CDC COM port. Protocol v0.3.0 discovery, semantic
+length-prefixed framing over a USB CDC COM port. Protocol v0.3.1 discovery, semantic
 Responses, upload finalization, fixed and variable results, Application Errors, START,
 ABORT, and RESET_APPLICATION are integrated.
 
@@ -18,7 +18,7 @@ ABORT, and RESET_APPLICATION are integrated.
 - Python 3.12 or newer
 - Git
 
-Hardware communication additionally requires `hil-rig-protocol` 0.3.0 or newer and
+Hardware communication additionally requires `hil-rig-protocol` 0.3.1 or newer and
 `pyserial`. Until dependency packaging is finalized, install them into the active
 environment from the adjacent protocol checkout:
 

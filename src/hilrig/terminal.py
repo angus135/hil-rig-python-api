@@ -545,6 +545,7 @@ class HilRigShell:
 
     def _bottom_toolbar(self) -> str:
         snapshot = self.worker.snapshot()
+        inbox_str = f" | Inbox: {snapshot.inbox_count}" if snapshot.inbox_count else ""
         if snapshot.busy:
             step_str = " (Stepped)" if snapshot.stepped else ""
             ticks_str = (
@@ -552,12 +553,12 @@ class HilRigShell:
                 if snapshot.expected_tick_count
                 else ""
             )
-            return f" [Run: {snapshot.state.value.upper()}{step_str}{ticks_str}] "
+            return f" [Run: {snapshot.state.value.upper()}{step_str}{ticks_str}{inbox_str}] "
         manual = self.worker.manual_snapshot()
         if manual.active:
             port = f" on {manual.device}" if manual.device else ""
             return f" [Manual: {manual.state.value.upper()}{port} | Inbox: {manual.inbox_count}] "
-        return " [HIL-RIG: IDLE] "
+        return f" [HIL-RIG: IDLE{inbox_str}] "
 
     def cmdloop(self, intro: str | None = None) -> None:
         """Run the prompt_toolkit interactive shell loop."""

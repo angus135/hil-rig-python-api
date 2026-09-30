@@ -210,6 +210,8 @@ class FixedIOProtocolConnection:
         self._retired_application_test_ids: set[int] = set()
         self._workflow_state = ProtocolWorkflowState.CONNECTING
         self._closed = False
+        self._accumulated_errors: list[ApplicationErrorRecord] = []
+        self._last_error: str | None = None
 
     @classmethod
     def connect(
@@ -380,6 +382,16 @@ class FixedIOProtocolConnection:
     @property
     def last_manual_send_result(self) -> ManualSendResult | None:
         return self._last_manual_send_result
+
+    @property
+    def last_error(self) -> str | None:
+        return self._last_error
+
+    def drain_accumulated_errors(self) -> tuple[ApplicationErrorRecord, ...]:
+        """Drain and return all accumulated application errors recorded on this connection."""
+        errors = tuple(self._accumulated_errors)
+        self._accumulated_errors.clear()
+        return errors
 
     @property
     def upload_delivery_complete(self) -> bool:
@@ -812,14 +824,26 @@ class FixedIOProtocolConnection:
                     and self._pending_operation.kind == "manual"
                     and self._pending_operation.application_response_required
                 ):
-                    self._handle_application_response(message)
+                    self._handle_application_response(message, stored_errors)
             elif type(message) is p.ApplicationErrorMessage:
+                record = None
                 if (
                     not self._manual_mode
                     and self.result_adapter is not None
                     and self._error_belongs_to_active_upload(message)
                 ):
-                    stored_errors.append(self.result_adapter.ingest_application_error(message))
+                    record = self.result_adapter.ingest_application_error(message)
+                elif not self._manual_mode and self._active_upload is not None:
+                    record = ApplicationErrorRecord(
+                        category=message.category.name.lower(),
+                        detail=str(message.detail),
+                        recoverable=message.recoverable,
+                        tick=message.tick_number,
+                        diagnostic_data=message.diagnostic_data,
+                    )
+                if record is not None:
+                    stored_errors.append(record)
+                    self._accumulated_errors.append(record)
                 self._handle_application_error(message)
             elif type(message) in (p.TestResult, getattr(p, "VariableTestResult", None)):
                 if not self._manual_mode:
@@ -900,9 +924,87 @@ class FixedIOProtocolConnection:
         operation.response_received = True
         self._finish_pending_operation_if_ready()
 
-    def _handle_application_response(self, message: object) -> None:
+    def _handle_application_response(
+        self,
+        message: object,
+        stored_errors: list[ApplicationErrorRecord] | None = None,
+    ) -> None:
+        p = self.protocol
         operation = self._pending_operation
+
+        # Check for tick-scoped response interrupting or responding to instruction upload
+        if message.scope is p.ResponseScope.TICK:
+            if self._active_upload is not None:
+                received_test_id = (
+                    None
+                    if message.test_id is None
+                    else application_test_id_from_bytes(message.test_id.bytes)
+                )
+                if (
+                    received_test_id is not None
+                    and received_test_id != self._active_upload.upload_attempt.application_test_id
+                ):
+                    self._response_mismatch("Application Test ID does not match the active upload")
+                self._last_application_response = message
+                if message.outcome is not p.ResponseOutcome.ACCEPTED:
+                    reason_name = getattr(message.reason, "name", str(message.reason))
+                    error_record = ApplicationErrorRecord(
+                        category="tick_rejected",
+                        detail=f"{reason_name} (detail {message.detail})",
+                        recoverable=False,
+                        tick=message.tick_number,
+                    )
+                    if self.result_adapter is not None:
+                        self.result_adapter.builder.add_application_error(error_record)
+                    if stored_errors is not None:
+                        stored_errors.append(error_record)
+                    self._accumulated_errors.append(error_record)
+
+                    self._interrupt_host_transport()
+                    self._workflow_state = ProtocolWorkflowState.FAILED
+                    self._last_error = (
+                        f"Instruction upload rejected on tick {message.tick_number}: "
+                        f"{reason_name} (detail {message.detail})"
+                    )
+                    raise ProtocolSessionError(self._last_error)
+                return
+
         if operation is None or operation.response is None:
+            if (
+                self._active_upload is not None
+                and getattr(message, "outcome", None) is p.ResponseOutcome.REJECTED
+            ):
+                received_test_id = (
+                    None
+                    if message.test_id is None
+                    else application_test_id_from_bytes(message.test_id.bytes)
+                )
+                if (
+                    received_test_id is None
+                    or received_test_id == self._active_upload.upload_attempt.application_test_id
+                ):
+                    reason_name = getattr(message.reason, "name", str(message.reason))
+                    scope_name = getattr(message.scope, "name", str(message.scope))
+                    error_record = ApplicationErrorRecord(
+                        category=f"{scope_name.lower()}_rejected",
+                        detail=f"{reason_name} (detail {message.detail})",
+                        recoverable=False,
+                        tick=message.tick_number,
+                    )
+                    if self.result_adapter is not None:
+                        self.result_adapter.builder.add_application_error(error_record)
+                    if stored_errors is not None:
+                        stored_errors.append(error_record)
+                    self._accumulated_errors.append(error_record)
+
+                    self._interrupt_host_transport()
+                    self._workflow_state = ProtocolWorkflowState.FAILED
+                    self._last_error = (
+                        f"Application upload rejected ({scope_name}): "
+                        f"{reason_name} (detail {message.detail})"
+                    )
+                    raise ProtocolSessionError(self._last_error)
+
             self._fail_workflow()
             fields = [
                 f"scope={message.scope.name}",
@@ -960,14 +1062,37 @@ class FixedIOProtocolConnection:
                 f"{message.reason.name} (detail {message.detail})"
             )
             operation.response_outcome = message.outcome
+            if self._active_upload is not None:
+                scope_name = getattr(correlation.scope, "name", str(correlation.scope))
+                reason_name = getattr(message.reason, "name", str(message.reason))
+                record = ApplicationErrorRecord(
+                    category=f"{scope_name.lower()}_{message.outcome.name.lower()}",
+                    detail=f"{reason_name} (detail {message.detail})",
+                    recoverable=False,
+                    tick=message.tick_number,
+                )
+                if self.result_adapter is not None:
+                    self.result_adapter.builder.add_application_error(record)
+                if stored_errors is not None:
+                    stored_errors.append(record)
+                self._accumulated_errors.append(record)
 
         operation.response_received = True
         self._finish_pending_operation_if_ready()
 
     def _handle_application_error(self, message: object) -> None:
-        """Terminate the single pending operation when an Application Error applies to it."""
+        """Terminate the single pending operation or upload when an Application Error applies to it."""
         operation = self._pending_operation
-        if operation is None or not self._application_error_matches_operation(message, operation):
+        error_matches_operation = (
+            operation is not None and self._application_error_matches_operation(message, operation)
+        )
+        error_matches_upload = (
+            self._active_upload is not None
+            and not self._execution_started
+            and self._error_belongs_to_active_upload(message)
+        )
+
+        if not error_matches_operation and not error_matches_upload:
             return
 
         fields = [
@@ -980,12 +1105,29 @@ class FixedIOProtocolConnection:
         if message.diagnostic_data:
             fields.append(f"diagnostic_data=0x{message.diagnostic_data.hex()}")
 
-        operation.response_error = (
-            f"RIG Application Error while waiting for the {operation.kind} response: "
-            f"ApplicationError({', '.join(fields)})"
-        )
-        operation.response_received = True
-        self._finish_pending_operation_if_ready()
+        error_detail = f"ApplicationError({', '.join(fields)})"
+
+        if operation is not None and operation.kind in {
+            "configuration",
+            "finalize",
+            "start",
+            "abort",
+            "reset",
+            "manual",
+        }:
+            operation.response_error = (
+                f"RIG Application Error while waiting for the {operation.kind} response: "
+                f"{error_detail}"
+            )
+            operation.response_received = True
+            self._finish_pending_operation_if_ready()
+            return
+
+        if not self._execution_started:
+            self._interrupt_host_transport()
+            self._workflow_state = ProtocolWorkflowState.FAILED
+            self._last_error = f"RIG Application Error during instruction upload: {error_detail}"
+            raise ProtocolSessionError(self._last_error)
 
     @staticmethod
     def _application_error_matches_operation(
@@ -1076,7 +1218,7 @@ class FixedIOProtocolConnection:
         """Apply the protocol's scope-specific recovery semantics."""
         p = self.protocol
         if operation.kind in {"configuration", "tick", "finalize"}:
-            self._retire_active_upload()
+            self._interrupt_host_transport()
             self._workflow_state = ProtocolWorkflowState.FAILED
             return
         if operation.kind == "start" and operation.response_outcome is p.ResponseOutcome.REJECTED:
@@ -1305,7 +1447,25 @@ class FixedIOProtocolConnection:
             == self._active_upload.upload_attempt.application_test_id
         )
 
+    def _interrupt_host_transport(self) -> None:
+        """Immediately cancel outbound instruction streaming and purge write buffers."""
+        self._pending_output = None
+        self._pending_output_offset = 0
+        self._upload_operations.clear()
+        self._gated_operation = None
+        self._pending_operation = None
+        self._transport_delivery_pending = False
+        if hasattr(self.serial_port, "reset_output_buffer"):
+            with suppress(Exception):
+                self.serial_port.reset_output_buffer()
+        self._retire_active_upload()
+
     def _fail_workflow(self) -> None:
+        self._pending_output = None
+        self._pending_output_offset = 0
+        if hasattr(self.serial_port, "reset_output_buffer"):
+            with suppress(Exception):
+                self.serial_port.reset_output_buffer()
         self._upload_operations.clear()
         self._gated_operation = None
         self._pending_operation = None

@@ -134,7 +134,7 @@ class ProtocolVersion:
     patch: int
 
 
-PROTOCOL_VERSION = ProtocolVersion(0, 3, 0)
+PROTOCOL_VERSION = ProtocolVersion(0, 3, 1)
 
 
 class ControlCommand(IntEnum):
@@ -550,6 +550,7 @@ class FakeSerial:
     received: bytearray = field(default_factory=bytearray)
     written: bytearray = field(default_factory=bytearray)
     closed: bool = False
+    reset_output_buffer_calls: int = 0
 
     @property
     def in_waiting(self) -> int:
@@ -569,7 +570,7 @@ class FakeSerial:
         self.received.clear()
 
     def reset_output_buffer(self) -> None:
-        pass
+        self.reset_output_buffer_calls += 1
 
     def close(self) -> None:
         self.closed = True

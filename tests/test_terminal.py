@@ -306,3 +306,36 @@ def test_terminal_run_supports_legacy_and_family_flags() -> None:
     rendered = output.getvalue()
     assert "Run (legacy message family) queued:" in rendered
     assert "Stepped run (variable message family) queued:" in rendered
+
+
+def test_terminal_toolbar_displays_inbox_count_and_inbox_command() -> None:
+    output = StringIO()
+    worker = _StubWorker()
+    shell = HilRigShell(worker=worker, stdout=output)
+
+    # When running with inbox errors
+    worker.current = RunSnapshot(
+        state=WorkerState.RUNNING,
+        detail="Receiving results.",
+        test_name="Terminal test",
+        expected_tick_count=100,
+        received_tick_count=25,
+        inbox_count=2,
+    )
+    toolbar_running = shell._bottom_toolbar()
+    assert "| Inbox: 2" in toolbar_running
+
+    # When idle with inbox errors
+    worker.current = RunSnapshot(
+        state=WorkerState.IDLE,
+        inbox_count=1,
+    )
+    worker.manual_current = ManualSessionSnapshot(state=ManualSessionState.DISCONNECTED)
+    toolbar_idle = shell._bottom_toolbar()
+    assert "[HIL-RIG: IDLE | Inbox: 1]" in toolbar_idle
+
+    # Inbox command shows recorded errors
+    shell.onecmd("inbox")
+    rendered = output.getvalue()
+    assert "Run inbox:" in rendered
+    assert "ApplicationError(category=execution" in rendered

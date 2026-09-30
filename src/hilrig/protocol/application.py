@@ -170,7 +170,7 @@ class FixedIOProtocolAdapter:
         missing = tuple(name for name in _CONTROL_FLOW_API if not hasattr(self.protocol, name))
         if missing:
             raise ProtocolDependencyError(
-                "Fixed-I/O protocol control flow requires hil-rig-protocol 0.3.0 or newer; "
+                "Fixed-I/O protocol control flow requires hil-rig-protocol 0.3.1 or newer; "
                 f"missing public API: {', '.join(missing)}"
             )
         if application_config is None:
@@ -834,7 +834,7 @@ class VariableIOProtocolAdapter:
         missing = tuple(name for name in _CONTROL_FLOW_API if not hasattr(self.protocol, name))
         if missing:
             raise ProtocolDependencyError(
-                "Variable-I/O protocol control flow requires hil-rig-protocol 0.3.0 or newer; "
+                "Variable-I/O protocol control flow requires hil-rig-protocol 0.3.1 or newer; "
                 f"missing public API: {', '.join(missing)}"
             )
         if application_config is None:

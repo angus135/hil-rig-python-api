@@ -900,3 +900,168 @@ def test_manual_rejection_is_reported_without_ending_the_session(tmp_path: Path)
     assert not result.success
     assert "INVALID_TICK" in result.detail
     assert connection.workflow_state is ProtocolWorkflowState.MANUAL_READY
+
+
+def test_tick_rejection_interrupts_host_transport_and_records_error(tmp_path: Path) -> None:
+    compiled = _compiled_digital_test()
+    attempt = compiled.new_upload_attempt()
+    builder = CapturedRunBuilder.from_compiled_test(
+        tmp_path / "run.sqlite3",
+        compiled,
+        upload_attempt=attempt,
+    )
+    application = FixedIOProtocolAdapter(protocol_module=FakeProtocol)
+    transport = FakeTransport()
+    serial_port = FakeSerial()
+    connection = FixedIOProtocolConnection(
+        serial_port=serial_port,
+        application=application,
+        transport=transport,
+        result_adapter=IncomingResultAdapter(builder, protocol_module=FakeProtocol),
+    )
+    connection.queue_upload(compiled, upload_attempt=attempt)
+
+    responded = 0
+    with pytest.raises(ProtocolSessionError, match="Instruction upload rejected on tick 0: INVALID_TICK"):
+        for _ in range(50):
+            connection.service()
+            requests = _written_messages(serial_port, application)
+            while responded < len(requests):
+                req = requests[responded]
+                responded += 1
+                if type(req) is SystemInfoRequest:
+                    _queue_incoming(
+                        serial_port,
+                        application,
+                        SystemInfoResponse(
+                            protocol_version=FakeProtocol.PROTOCOL_VERSION,
+                            firmware_version=ProtocolVersion(1, 2, 3),
+                        ),
+                    )
+                elif type(req) is ProtocolTestConfiguration:
+                    _queue_incoming(
+                        serial_port,
+                        application,
+                        ApplicationResponse(
+                            req.test_id,
+                            ResponseScope.TEST_CONFIGURATION,
+                            ResponseOutcome.ACCEPTED,
+                        ),
+                    )
+                elif type(req) is ProtocolTestInstruction:
+                    _queue_incoming(
+                        serial_port,
+                        application,
+                        ApplicationResponse(
+                            req.test_id,
+                            ResponseScope.TICK,
+                            ResponseOutcome.REJECTED,
+                            reason=ResponseReason.INVALID_TICK,
+                            tick_number=0,
+                            detail=42,
+                        ),
+                    )
+                    break
+
+    assert connection.workflow_state is ProtocolWorkflowState.FAILED
+    assert connection.active_upload is None
+    assert not connection.upload_accepted
+    assert serial_port.reset_output_buffer_calls > 0
+
+    accumulated = connection.drain_accumulated_errors()
+    assert len(accumulated) == 1
+    assert accumulated[0].category == "tick_rejected"
+    assert "INVALID_TICK" in accumulated[0].detail
+    assert "42" in accumulated[0].detail
+    assert accumulated[0].tick == 0
+
+
+def test_application_error_during_instruction_streaming_interrupts_host_transport(tmp_path: Path) -> None:
+    test = HilRigTest(name="Multi-tick upload")
+    test.configure(frequency_mode=FrequencyMode.HZ_1K, start_mode=StartMode.IMMEDIATE)
+    output = test.digital_output(channel=0).configure(
+        voltage=LogicVoltage.V3_3,
+        initial_state=DigitalState.LOW,
+    )
+    output.high(at_tick=1)
+    output.low(at_tick=2)
+    compiled = test.compile()
+
+    attempt = compiled.new_upload_attempt()
+    builder = CapturedRunBuilder.from_compiled_test(
+        tmp_path / "run.sqlite3",
+        compiled,
+        upload_attempt=attempt,
+    )
+    application = FixedIOProtocolAdapter(protocol_module=FakeProtocol)
+    transport = FakeTransport()
+    serial_port = FakeSerial()
+    connection = FixedIOProtocolConnection(
+        serial_port=serial_port,
+        application=application,
+        transport=transport,
+        result_adapter=IncomingResultAdapter(builder, protocol_module=FakeProtocol),
+    )
+    connection.queue_upload(
+        compiled,
+        upload_attempt=attempt,
+        advance_mode=UploadAdvanceMode.OPERATOR_GATED,
+    )
+
+    # Drive to operator gate before configuration
+    responded = _drive_fake_rig_to_state(
+        connection,
+        application,
+        ProtocolWorkflowState.WAITING_FOR_OPERATOR,
+    )
+    # Release configuration
+    connection.release_next_operation()
+    # Drive until configuration accepted and waiting for tick 1
+    for _ in range(20):
+        connection.service()
+        requests = _written_messages(serial_port, application)
+        while responded < len(requests):
+            req = requests[responded]
+            responded += 1
+            if type(req) is ProtocolTestConfiguration:
+                _queue_incoming(
+                    serial_port,
+                    application,
+                    ApplicationResponse(
+                        req.test_id,
+                        ResponseScope.TEST_CONFIGURATION,
+                        ResponseOutcome.ACCEPTED,
+                    ),
+                )
+        if connection.workflow_state is ProtocolWorkflowState.WAITING_FOR_OPERATOR:
+            break
+
+    # Release tick 1 operation and service it
+    connection.release_next_operation()
+    connection.service()
+    assert connection.workflow_state is ProtocolWorkflowState.WAITING_FOR_OPERATOR
+
+    # Queue an application error while tick 2 is waiting at the operator gate
+    _queue_incoming(
+        serial_port,
+        application,
+        ApplicationErrorMessage(
+            ProtocolTestId(attempt.application_test_id.to_bytes(16, "big")),
+            ErrorCategory.PROTOCOL,
+            False,
+            tick_number=0,
+            detail=99,
+        ),
+    )
+
+    with pytest.raises(ProtocolSessionError, match="RIG Application Error during instruction upload"):
+        connection.service()
+
+    assert connection.workflow_state is ProtocolWorkflowState.FAILED
+    assert connection.active_upload is None
+    assert serial_port.reset_output_buffer_calls > 0
+
+    accumulated = connection.drain_accumulated_errors()
+    assert len(accumulated) == 1
+    assert accumulated[0].category == "protocol"
+    assert "99" in accumulated[0].detail

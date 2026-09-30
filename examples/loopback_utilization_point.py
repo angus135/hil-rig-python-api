@@ -35,16 +35,16 @@ from hilrig import (
 PROFILE = LoopbackProfile(
     uart_baud_hz=1_000_000,
     spi_clock_hz=1_406_000,
-    can_bitrate_hz=500_000,
+    can_bitrate_hz=1_000_000,
     uart_bits_per_byte=10,
     can_payload_bytes_per_frame=8,
     can_wire_bits_per_frame=135,
 )
 
 DEFAULT_POINT = LoopbackWorkloadPoint(
-    frequency_hz=100,
+    frequency_hz=10_000,
     duration_s=1,
-    target_utilization_percent=60.0,
+    target_utilization_percent=96,
     burst_interval_ticks=1,
     seed=1,
 )
