@@ -34,7 +34,7 @@ from hilrig import (
 
 PROFILE = LoopbackProfile(
     uart_baud_hz=1_000_000,
-    spi_clock_hz=1_406_000,
+    spi_clock_hz=2_813_000,
     can_bitrate_hz=1_000_000,
     uart_bits_per_byte=10,
     can_payload_bytes_per_frame=8,
@@ -42,9 +42,9 @@ PROFILE = LoopbackProfile(
 )
 
 DEFAULT_POINT = LoopbackWorkloadPoint(
-    frequency_hz=10_000,
+    frequency_hz=100,
     duration_s=1,
-    target_utilization_percent=96,
+    target_utilization_percent=50.0,
     burst_interval_ticks=1,
     seed=1,
 )
@@ -93,7 +93,7 @@ def build_test_for_point(point: LoopbackWorkloadPoint) -> Test:
         .named("SPI_ch1")
         .configure(
             role=SPIRole.MASTER,
-            baud=SPIBaud.BAUD_1M406BIT,
+            baud=SPIBaud.BAUD_2M813BIT,
             data_size=SPISize.SIZE_8BIT,
             mode=SPIMode.MODE_0,
             first_bit=SPIFirst.MSB,
@@ -119,7 +119,7 @@ def build_test_for_point(point: LoopbackWorkloadPoint) -> Test:
                 transfer.data,
                 allow_stream_match=True,
                 from_tick=transfer.tick,
-                until_tick=transfer.tick + 20,
+                until_tick=transfer.tick + 100,
             )
     with test.group("SPI Workload"):
         for transfer in _boundary_transfers(payloads.spi):
@@ -127,7 +127,7 @@ def build_test_for_point(point: LoopbackWorkloadPoint) -> Test:
                 transfer.data,
                 allow_stream_match=True,
                 from_tick=transfer.tick,
-                until_tick=transfer.tick + 20,
+                until_tick=transfer.tick + 100,
             )
     with test.group("CAN Workload"):
         for transfer in _boundary_transfers(payloads.can):
@@ -135,7 +135,7 @@ def build_test_for_point(point: LoopbackWorkloadPoint) -> Test:
                 frame_id=CAN_FRAME_ID,
                 data=transfer.data,
                 from_tick=transfer.tick,
-                until_tick=transfer.tick + 20,
+                until_tick=transfer.tick + 100,
             )
     return test
 
