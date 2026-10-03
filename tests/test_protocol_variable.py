@@ -36,6 +36,8 @@ from protocol_fakes import (
 )
 
 from hilrig import (
+    DEFAULT_MAX_BYTES_PER_CHUNK,
+    DEFAULT_MAX_OPS_PER_CHUNK,
     CapturedRunBuilder,
     CaptureStatus,
     CommunicationPeripheral,
@@ -595,6 +597,159 @@ def test_chunk_update_instruction_empty_and_splits() -> None:
                 instruction_factory=FakeProtocol.UpdateInstruction,
             )
         )
+
+
+def test_chunk_update_instruction_byte_bounded_50_pct_test() -> None:
+    test_id = FakeProtocol.TestId(b"\x01" * 16)
+    op_uart = LogicalOperation(
+        peripheral_type=PeripheralType.UART,
+        channel=1,
+        payload=b"U" * 1250,
+    )
+    op_spi = LogicalOperation(
+        peripheral_type=PeripheralType.SPI,
+        channel=0,
+        payload=b"S" * 1406,
+    )
+    op_can = LogicalOperation(
+        peripheral_type=PeripheralType.CAN,
+        channel=1,
+        payload=b"C" * 96,
+    )
+
+    chunks = list(
+        chunk_update_instruction(
+            test_id=test_id,
+            tick_number=0,
+            operations=(op_uart, op_spi, op_can),
+            max_ops_per_chunk=4,
+            max_bytes_per_chunk=2000,
+            instruction_factory=FakeProtocol.UpdateInstruction,
+        )
+    )
+
+    assert len(chunks) == 2
+    # Chunk 1: contains UART (1,250 B) -> 24 (envelope) + 4 (op header) + 1250 = 1278 B total
+    assert chunks[0].tick_number == 0
+    assert chunks[0].flags == FLAG_HAS_MORE_CHUNKS
+    assert chunks[0].operations == (op_uart,)
+
+    # Chunk 2: contains SPI (1,406 B) + CAN (96 B) -> 24 + (4 + 1406) + (4 + 96) = 1534 B total
+    assert chunks[1].tick_number == 0
+    assert chunks[1].flags == FLAG_COMPLETE_TICK
+    assert chunks[1].operations == (op_spi, op_can)
+
+
+@pytest.mark.parametrize("invalid", [0, -1, -500, True, False, 1.5, "2000", None])
+def test_chunk_update_instruction_validates_max_bytes_per_chunk(invalid: Any) -> None:
+    test_id = FakeProtocol.TestId(b"\x01" * 16)
+    with pytest.raises(ValueError, match="max_bytes_per_chunk must be a positive integer"):
+        list(
+            chunk_update_instruction(
+                test_id=test_id,
+                tick_number=0,
+                operations=(),
+                max_bytes_per_chunk=invalid,
+                instruction_factory=FakeProtocol.UpdateInstruction,
+            )
+        )
+
+
+@pytest.mark.parametrize("invalid", [0, -1, True, False, "2000"])
+def test_variable_adapter_validates_max_bytes_per_chunk(invalid: Any) -> None:
+    with pytest.raises(ValueError, match="max_bytes_per_chunk must be a positive integer"):
+        VariableIOProtocolAdapter(
+            protocol_module=FakeProtocol,
+            max_bytes_per_chunk=invalid,
+        )
+
+
+def test_chunk_update_instruction_single_large_operation() -> None:
+    test_id = FakeProtocol.TestId(b"\x01" * 16)
+    # A single operation whose encoded size alone exceeds max_bytes_per_chunk
+    op_huge = LogicalOperation(
+        peripheral_type=PeripheralType.UART,
+        channel=0,
+        payload=b"X" * 2100,
+    )
+    op_small = LogicalOperation(
+        peripheral_type=PeripheralType.DIGITAL_OUTPUT,
+        channel=0,
+        payload=b"\x01\x00",
+    )
+
+    chunks = list(
+        chunk_update_instruction(
+            test_id=test_id,
+            tick_number=1,
+            operations=(op_huge, op_small),
+            max_bytes_per_chunk=2000,
+            instruction_factory=FakeProtocol.UpdateInstruction,
+        )
+    )
+
+    assert len(chunks) == 2
+    assert chunks[0].flags == FLAG_HAS_MORE_CHUNKS
+    assert chunks[0].operations == (op_huge,)
+    assert chunks[1].flags == FLAG_COMPLETE_TICK
+    assert chunks[1].operations == (op_small,)
+
+
+def test_variable_adapter_with_custom_byte_chunking() -> None:
+    test = HilRigTest(name="Byte-bounded chunking test")
+    test.configure(frequency_mode=FrequencyMode.HZ_100, start_mode=StartMode.IMMEDIATE)
+    uart = test.uart(channel=0).configure(
+        mode=UARTMode.TTL_3V3,
+        baud_hz=1_000_000,
+        parity=UARTParity.NONE,
+        length=UARTLengthBits.EIGHT,
+        stop=UARTStopBits.ONE,
+    )
+    spi = test.spi(channel=0).configure(
+        role=SPIRole.MASTER,
+        baud=SPIBaud.BAUD_2M813BIT,
+        data_size=SPISize.SIZE_8BIT,
+        mode=SPIMode.MODE_0,
+        first_bit=SPIFirst.MSB,
+    )
+    can = test.can(channel=0).configure(bitrate=1_000_000)
+
+    # Tick 5 has 3 operations: UART 1250B, SPI 1406B, CAN 8B data
+    uart.write(data=b"U" * 1250, at_tick=5)
+    spi.transfer(tx_data=b"S" * 1406, rx_length=0, at_tick=5)
+    can.transmit(frame_id=0x123, data=b"C" * 8, at_tick=5)
+
+    compiled = test.compile()
+    attempt = UploadAttempt(
+        definition_test_id=compiled.test_id,
+        application_test_id=0x0102030405060708090A0B0C0D0E0F10,
+    )
+
+    adapter = VariableIOProtocolAdapter(
+        protocol_module=FakeProtocol,
+        max_bytes_per_chunk=2000,
+    )
+    upload = adapter.build_upload(compiled, upload_attempt=attempt)
+
+    # On tick 5: UART (1250 B) is in chunk 1, SPI + CAN is in chunk 2
+    tick_5_instructions = [inst for inst in upload.instructions if inst.tick_number == 5]
+    assert len(tick_5_instructions) == 2
+    assert tick_5_instructions[0].flags == FLAG_HAS_MORE_CHUNKS
+    assert len(tick_5_instructions[0].operations) == 1
+    assert tick_5_instructions[0].operations[0].peripheral_type == PeripheralType.UART
+
+    assert tick_5_instructions[1].flags == FLAG_COMPLETE_TICK
+    assert len(tick_5_instructions[1].operations) == 2
+    assert tick_5_instructions[1].operations[0].peripheral_type == PeripheralType.SPI
+    assert tick_5_instructions[1].operations[1].peripheral_type == PeripheralType.CAN
+
+
+def test_chunking_default_constants() -> None:
+    assert DEFAULT_MAX_OPS_PER_CHUNK == 4
+    assert DEFAULT_MAX_BYTES_PER_CHUNK == 2000
+    adapter = VariableIOProtocolAdapter(protocol_module=FakeProtocol)
+    assert adapter.max_ops_per_chunk == 4
+    assert adapter.max_bytes_per_chunk == 2000
 
 
 def test_variable_adapter_with_custom_chunking() -> None:

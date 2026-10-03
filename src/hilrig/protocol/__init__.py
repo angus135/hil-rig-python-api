@@ -1,6 +1,8 @@
 """Application protocol and direct serial integration for the HIL-RIG host API."""
 
 from hilrig.protocol.application import (
+    DEFAULT_MAX_BYTES_PER_CHUNK,
+    DEFAULT_MAX_OPS_PER_CHUNK,
     FLAG_COMPLETE_TICK,
     FLAG_HAS_MORE_CHUNKS,
     FixedIOProtocolAdapter,
@@ -37,6 +39,8 @@ from hilrig.protocol.serial import (
 )
 
 __all__ = [
+    "DEFAULT_MAX_BYTES_PER_CHUNK",
+    "DEFAULT_MAX_OPS_PER_CHUNK",
     "FLAG_COMPLETE_TICK",
     "FLAG_HAS_MORE_CHUNKS",
     "FixedIOProtocolAdapter",

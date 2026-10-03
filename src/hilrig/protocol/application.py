@@ -23,6 +23,11 @@ from hilrig.models.identifiers import (
 FLAG_COMPLETE_TICK = 0x00
 FLAG_HAS_MORE_CHUNKS = 0x01
 
+UPDATE_INSTRUCTION_ENVELOPE_BYTES = 24
+LOGICAL_OPERATION_HEADER_BYTES = 4
+DEFAULT_MAX_OPS_PER_CHUNK = 4
+DEFAULT_MAX_BYTES_PER_CHUNK = 2000
+
 _UINT32_MAX = (1 << 32) - 1
 _FIXED_OUTPUT_PERIPHERALS = frozenset({"digital_output", "analogue_output", "pwm_output"})
 _CONTROL_FLOW_API = (
@@ -776,7 +781,8 @@ def chunk_update_instruction(
     test_id: Any,
     tick_number: int,
     operations: tuple[Any, ...],
-    max_ops_per_chunk: int = 4,
+    max_ops_per_chunk: int = DEFAULT_MAX_OPS_PER_CHUNK,
+    max_bytes_per_chunk: int = DEFAULT_MAX_BYTES_PER_CHUNK,
     *,
     instruction_factory: Any | None = None,
 ) -> Iterator[Any]:
@@ -787,6 +793,12 @@ def chunk_update_instruction(
         or max_ops_per_chunk <= 0
     ):
         raise ValueError("max_ops_per_chunk must be a positive integer")
+    if (
+        not isinstance(max_bytes_per_chunk, int)
+        or isinstance(max_bytes_per_chunk, bool)
+        or max_bytes_per_chunk <= 0
+    ):
+        raise ValueError("max_bytes_per_chunk must be a positive integer")
 
     if instruction_factory is None:
         p = _load_protocol_module()
@@ -800,16 +812,37 @@ def chunk_update_instruction(
             operations=(),
         )
         return
-    total = len(operations)
-    for i in range(0, total, max_ops_per_chunk):
-        chunk_ops = operations[i : i + max_ops_per_chunk]
-        is_last = (i + max_ops_per_chunk) >= total
 
+    current_chunk: list[Any] = []
+    current_chunk_bytes = UPDATE_INSTRUCTION_ENVELOPE_BYTES
+
+    for op in operations:
+        payload = getattr(op, "payload", b"")
+        payload_len = len(payload) if payload is not None else 0
+        op_bytes = LOGICAL_OPERATION_HEADER_BYTES + payload_len
+
+        if current_chunk and (
+            len(current_chunk) >= max_ops_per_chunk
+            or current_chunk_bytes + op_bytes > max_bytes_per_chunk
+        ):
+            yield instruction_factory(
+                test_id=test_id,
+                tick_number=tick_number,
+                flags=FLAG_HAS_MORE_CHUNKS,
+                operations=tuple(current_chunk),
+            )
+            current_chunk = [op]
+            current_chunk_bytes = UPDATE_INSTRUCTION_ENVELOPE_BYTES + op_bytes
+        else:
+            current_chunk.append(op)
+            current_chunk_bytes += op_bytes
+
+    if current_chunk:
         yield instruction_factory(
             test_id=test_id,
             tick_number=tick_number,
-            flags=FLAG_COMPLETE_TICK if is_last else FLAG_HAS_MORE_CHUNKS,
-            operations=tuple(chunk_ops),
+            flags=FLAG_COMPLETE_TICK,
+            operations=tuple(current_chunk),
         )
 
 
@@ -821,7 +854,8 @@ class VariableIOProtocolAdapter:
         *,
         protocol_module: ModuleType | Any | None = None,
         application_config: object | None = None,
-        max_ops_per_chunk: int = 4,
+        max_ops_per_chunk: int = DEFAULT_MAX_OPS_PER_CHUNK,
+        max_bytes_per_chunk: int = DEFAULT_MAX_BYTES_PER_CHUNK,
     ) -> None:
         if (
             not isinstance(max_ops_per_chunk, int)
@@ -829,7 +863,14 @@ class VariableIOProtocolAdapter:
             or max_ops_per_chunk <= 0
         ):
             raise ValueError("max_ops_per_chunk must be a positive integer")
+        if (
+            not isinstance(max_bytes_per_chunk, int)
+            or isinstance(max_bytes_per_chunk, bool)
+            or max_bytes_per_chunk <= 0
+        ):
+            raise ValueError("max_bytes_per_chunk must be a positive integer")
         self.max_ops_per_chunk = max_ops_per_chunk
+        self.max_bytes_per_chunk = max_bytes_per_chunk
         self.protocol = protocol_module or _load_protocol_module()
         missing = tuple(name for name in _CONTROL_FLOW_API if not hasattr(self.protocol, name))
         if missing:
@@ -1218,6 +1259,7 @@ class VariableIOProtocolAdapter:
                         tick_number=tick,
                         operations=tuple(operations),
                         max_ops_per_chunk=self.max_ops_per_chunk,
+                        max_bytes_per_chunk=self.max_bytes_per_chunk,
                         instruction_factory=p.UpdateInstruction,
                     )
                 )
@@ -1226,12 +1268,16 @@ class VariableIOProtocolAdapter:
 
 
 __all__ = [
+    "DEFAULT_MAX_BYTES_PER_CHUNK",
+    "DEFAULT_MAX_OPS_PER_CHUNK",
     "FLAG_COMPLETE_TICK",
     "FLAG_HAS_MORE_CHUNKS",
     "FixedIOProtocolAdapter",
     "FixedIOUploadMessages",
+    "LOGICAL_OPERATION_HEADER_BYTES",
     "ProtocolFamily",
     "ResponseCorrelation",
+    "UPDATE_INSTRUCTION_ENVELOPE_BYTES",
     "UploadOperation",
     "UploadOperationKind",
     "UploadPlan",

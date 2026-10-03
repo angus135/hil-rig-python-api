@@ -67,6 +67,8 @@ from hilrig.models.configuration import (
 from hilrig.models.execution import CompiledTestIR
 from hilrig.models.identifiers import UploadAttempt
 from hilrig.protocol import (
+    DEFAULT_MAX_BYTES_PER_CHUNK,
+    DEFAULT_MAX_OPS_PER_CHUNK,
     FLAG_COMPLETE_TICK,
     FLAG_HAS_MORE_CHUNKS,
     FixedIOProtocolAdapter,
@@ -150,6 +152,8 @@ __all__ = [
     "CompiledTestIR",
     "CommunicationPeripheral",
     "CommunicationResult",
+    "DEFAULT_MAX_BYTES_PER_CHUNK",
+    "DEFAULT_MAX_OPS_PER_CHUNK",
     "DigitalInput",
     "DigitalInputExpectation",
     "DigitalOutput",
