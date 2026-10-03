@@ -11,8 +11,8 @@ from hilrig import (
     ApplicationErrorRecord,
     FixedIOProtocolAdapter,
     ManualSendResult,
-    PWMMeasurement,
     ProtocolSessionError,
+    PWMMeasurement,
     TickResult,
 )
 from hilrig.protocol import ProtocolWorkflowState, UploadAdvanceMode, UploadOperationKind

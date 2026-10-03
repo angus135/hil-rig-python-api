@@ -18,6 +18,7 @@ from typing import Any
 
 from hilrig.api import Test
 from hilrig.evaluation import evaluate_assertions
+from hilrig.exceptions import ProtocolSessionError
 from hilrig.models.execution import CompiledTestIR
 from hilrig.models.identifiers import validate_uint128
 from hilrig.protocol import (

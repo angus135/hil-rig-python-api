@@ -933,41 +933,40 @@ class FixedIOProtocolConnection:
         operation = self._pending_operation
 
         # Check for tick-scoped response interrupting or responding to instruction upload
-        if message.scope is p.ResponseScope.TICK:
-            if self._active_upload is not None:
-                received_test_id = (
-                    None
-                    if message.test_id is None
-                    else application_test_id_from_bytes(message.test_id.bytes)
+        if message.scope is p.ResponseScope.TICK and self._active_upload is not None:
+            received_test_id = (
+                None
+                if message.test_id is None
+                else application_test_id_from_bytes(message.test_id.bytes)
+            )
+            if (
+                received_test_id is not None
+                and received_test_id != self._active_upload.upload_attempt.application_test_id
+            ):
+                self._response_mismatch("Application Test ID does not match the active upload")
+            self._last_application_response = message
+            if message.outcome is not p.ResponseOutcome.ACCEPTED:
+                reason_name = getattr(message.reason, "name", str(message.reason))
+                error_record = ApplicationErrorRecord(
+                    category="tick_rejected",
+                    detail=f"{reason_name} (detail {message.detail})",
+                    recoverable=False,
+                    tick=message.tick_number,
                 )
-                if (
-                    received_test_id is not None
-                    and received_test_id != self._active_upload.upload_attempt.application_test_id
-                ):
-                    self._response_mismatch("Application Test ID does not match the active upload")
-                self._last_application_response = message
-                if message.outcome is not p.ResponseOutcome.ACCEPTED:
-                    reason_name = getattr(message.reason, "name", str(message.reason))
-                    error_record = ApplicationErrorRecord(
-                        category="tick_rejected",
-                        detail=f"{reason_name} (detail {message.detail})",
-                        recoverable=False,
-                        tick=message.tick_number,
-                    )
-                    if self.result_adapter is not None:
-                        self.result_adapter.builder.add_application_error(error_record)
-                    if stored_errors is not None:
-                        stored_errors.append(error_record)
-                    self._accumulated_errors.append(error_record)
+                if self.result_adapter is not None:
+                    self.result_adapter.builder.add_application_error(error_record)
+                if stored_errors is not None:
+                    stored_errors.append(error_record)
+                self._accumulated_errors.append(error_record)
 
-                    self._interrupt_host_transport()
-                    self._workflow_state = ProtocolWorkflowState.FAILED
-                    self._last_error = (
-                        f"Instruction upload rejected on tick {message.tick_number}: "
-                        f"{reason_name} (detail {message.detail})"
-                    )
-                    raise ProtocolSessionError(self._last_error)
-                return
+                self._interrupt_host_transport()
+                self._workflow_state = ProtocolWorkflowState.FAILED
+                self._last_error = (
+                    f"Instruction upload rejected on tick {message.tick_number}: "
+                    f"{reason_name} (detail {message.detail})"
+                )
+                raise ProtocolSessionError(self._last_error)
+            return
 
         if operation is None or operation.response is None:
             if (
@@ -1081,7 +1080,7 @@ class FixedIOProtocolConnection:
         self._finish_pending_operation_if_ready()
 
     def _handle_application_error(self, message: object) -> None:
-        """Terminate the single pending operation or upload when an Application Error applies to it."""
+        """Terminate pending operation or upload when an Application Error applies to it."""
         operation = self._pending_operation
         error_matches_operation = (
             operation is not None and self._application_error_matches_operation(message, operation)

@@ -922,7 +922,9 @@ def test_tick_rejection_interrupts_host_transport_and_records_error(tmp_path: Pa
     connection.queue_upload(compiled, upload_attempt=attempt)
 
     responded = 0
-    with pytest.raises(ProtocolSessionError, match="Instruction upload rejected on tick 0: INVALID_TICK"):
+    with pytest.raises(
+        ProtocolSessionError, match="Instruction upload rejected on tick 0: INVALID_TICK"
+    ):
         for _ in range(50):
             connection.service()
             requests = _written_messages(serial_port, application)
@@ -976,7 +978,9 @@ def test_tick_rejection_interrupts_host_transport_and_records_error(tmp_path: Pa
     assert accumulated[0].tick == 0
 
 
-def test_application_error_during_instruction_streaming_interrupts_host_transport(tmp_path: Path) -> None:
+def test_application_error_during_instruction_streaming_interrupts_host_transport(
+    tmp_path: Path,
+) -> None:
     test = HilRigTest(name="Multi-tick upload")
     test.configure(frequency_mode=FrequencyMode.HZ_1K, start_mode=StartMode.IMMEDIATE)
     output = test.digital_output(channel=0).configure(
@@ -1054,7 +1058,9 @@ def test_application_error_during_instruction_streaming_interrupts_host_transpor
         ),
     )
 
-    with pytest.raises(ProtocolSessionError, match="RIG Application Error during instruction upload"):
+    with pytest.raises(
+        ProtocolSessionError, match="RIG Application Error during instruction upload"
+    ):
         connection.service()
 
     assert connection.workflow_state is ProtocolWorkflowState.FAILED
