@@ -6,9 +6,13 @@ build-backend = "setuptools.build_meta"
 name = "hil-rig-api"
 version = "0.1.0"
 description = "Host-side API for defining and compiling HIL-RIG hardware tests"
-readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "prompt_toolkit>=3.0.43",
+]
+
+[project.scripts]
+hil-rig = "hilrig.terminal:main"
 
 [project.optional-dependencies]
 dev = [

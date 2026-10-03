@@ -63,6 +63,15 @@ class I2CSpeed(Enum):
     FAST_400KHZ = 400_000
 
 
+@dataclass(frozen=True, slots=True)
+class CANConfiguration:
+    """Static configuration for a CAN channel."""
+
+    bitrate: int
+    filter_id: int = 0
+    filter_mask: int = 0
+
+
 class Pullup(Enum):
     """Selectable I2C pull-up resistor values in ohms."""
 
@@ -231,6 +240,7 @@ PeripheralConfiguration: TypeAlias = (
     | PwmInputConfiguration
     | PwmOutputConfiguration
     | I2CConfiguration
+    | CANConfiguration
     | SPIConfiguration
     | UARTConfiguration
 )
@@ -243,6 +253,7 @@ _CONFIGURATION_TYPES: dict[ChannelKind, type[object]] = {
     ChannelKind.ANALOGUE_INPUT: AnalogueInputConfiguration,
     ChannelKind.ANALOGUE_OUTPUT: AnalogueOutputConfiguration,
     ChannelKind.I2C: I2CConfiguration,
+    ChannelKind.CAN: CANConfiguration,
     ChannelKind.SPI: SPIConfiguration,
     ChannelKind.UART: UARTConfiguration,
 }

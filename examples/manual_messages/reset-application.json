@@ -1,0 +1,4 @@
+{
+  "type": "global_control",
+  "command": "RESET_APPLICATION"
+}

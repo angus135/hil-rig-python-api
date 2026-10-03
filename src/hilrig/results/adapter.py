@@ -1,16 +1,17 @@
-"""Translate decoded protocol result messages into the captured-run IR."""
-
-from __future__ import annotations
-
+from collections.abc import Iterator
+from dataclasses import dataclass
 from importlib import import_module
 from types import ModuleType
 from typing import Any
 
 from hilrig.exceptions import ProtocolDependencyError, ProtocolSessionError
 from hilrig.models.identifiers import application_test_id_from_bytes
+from hilrig.models.protocol import ProtocolFamily
 from hilrig.results.builder import CapturedRunBuilder
 from hilrig.results.models import (
     ApplicationErrorRecord,
+    CommunicationPeripheral,
+    CommunicationResult,
     PWMMeasurement,
     TickCondition,
     TickResult,
@@ -26,34 +27,96 @@ def _load_protocol_module() -> ModuleType:
         ) from error
 
 
+@dataclass
+class AggregatedTickResult:
+    tick_number: int
+    records: list[Any]
+    condition: Any = 0
+    problem_detail: int = 0
+
+
+def aggregate_variable_results(
+    incoming_results: Iterator[Any],
+) -> Iterator[AggregatedTickResult]:
+    """Reassembles multi-chunk VariableTestResults into single tick results."""
+    current_tick: AggregatedTickResult | None = None
+    for msg in incoming_results:
+        if current_tick is None or current_tick.tick_number != msg.tick_number:
+            current_tick = AggregatedTickResult(
+                tick_number=msg.tick_number,
+                records=list(msg.records),
+                condition=msg.condition,
+                problem_detail=msg.problem_detail,
+            )
+        else:
+            current_tick.records.extend(msg.records)
+            is_not_ok = getattr(msg.condition, "value", msg.condition) != 0
+            if is_not_ok or msg.problem_detail != 0:
+                current_tick.condition = msg.condition
+                current_tick.problem_detail = msg.problem_detail
+        if getattr(msg, "flags", 0) == 0:  # FLAG_COMPLETE_TICK
+            yield current_tick
+            current_tick = None
+
+
 class IncomingResultAdapter:
-    """Convert fixed Application Test Results and queue them for SQLite storage."""
+    """Convert fixed and variable Application Test Results and queue them for SQLite storage."""
 
     def __init__(
         self,
         builder: CapturedRunBuilder,
         *,
         protocol_module: ModuleType | Any | None = None,
+        expected_family: ProtocolFamily | str | None = None,
     ) -> None:
         if not isinstance(builder, CapturedRunBuilder):
             raise TypeError("builder must be a CapturedRunBuilder")
+        if isinstance(expected_family, str):
+            try:
+                expected_family = ProtocolFamily(expected_family.lower())
+            except ValueError as error:
+                raise ValueError(f"Unknown protocol family: {expected_family!r}") from error
+        elif expected_family is not None and not isinstance(expected_family, ProtocolFamily):
+            raise TypeError("expected_family must be a ProtocolFamily, str, or None")
+        self.expected_family = expected_family
         self.builder = builder
         self.protocol = protocol_module or _load_protocol_module()
+        self._latched_digital_inputs = [False] * 10
+        self._latched_analogue_inputs = [0] * 2
+        self._latched_pwm_inputs = [PWMMeasurement(period_ns=0, duty_permyriad=0)] * 2
+        self._current_chunk_tick: int | None = None
+        self._current_chunk_condition: TickCondition = TickCondition.OK
+        self._current_chunk_problem_detail: int = 0
 
     def receive_usb_bytes(self, data: bytes) -> None:
-        """Reject unframed bytes; the serial Transport connection owns this step."""
+        """Reject framed bytes; the serial connection owns deframing."""
         if not isinstance(data, bytes):
             raise TypeError("data must be bytes")
         raise ProtocolSessionError(
             "Raw USB bytes must be supplied to FixedIOProtocolConnection.service()"
         )
 
-    def ingest_application_message(self, application_message: object) -> TickResult:
-        """Validate and persist one decoded fixed Test Result message."""
+    def ingest_application_message(self, application_message: object) -> TickResult | None:
+        """Validate and persist one decoded Test Result or Variable Test Result message."""
         p = self.protocol
-        if type(application_message) is not p.TestResult:
+        is_fixed = hasattr(p, "TestResult") and type(application_message) is p.TestResult
+        is_variable = (
+            hasattr(p, "VariableTestResult") and type(application_message) is p.VariableTestResult
+        )
+
+        if not is_fixed and not is_variable:
             raise ProtocolSessionError(
-                f"Expected TestResult, received {type(application_message).__name__}"
+                "Expected TestResult or VariableTestResult, received "
+                f"{type(application_message).__name__}"
+            )
+
+        if self.expected_family is ProtocolFamily.VARIABLE and is_fixed:
+            raise ProtocolSessionError(
+                "Received legacy TestResult (Type 33) when variable message family was expected"
+            )
+        if self.expected_family is ProtocolFamily.LEGACY and is_variable:
+            raise ProtocolSessionError(
+                "Received VariableTestResult (Type 34) when legacy message family was expected"
             )
 
         received_test_id = application_test_id_from_bytes(application_message.test_id.bytes)
@@ -73,28 +136,121 @@ class IncomingResultAdapter:
                 f"Unsupported TestResult condition: {application_message.condition!r}"
             )
 
-        if condition is TickCondition.EXECUTION_PROBLEM:
+        if is_fixed:
+            if condition is TickCondition.EXECUTION_PROBLEM:
+                result = TickResult.execution_problem(
+                    tick=application_message.tick_number,
+                    problem_detail=application_message.problem_detail,
+                )
+            else:
+                result = TickResult(
+                    tick=application_message.tick_number,
+                    digital_inputs=tuple(
+                        value.high for value in application_message.digital_inputs
+                    ),
+                    analogue_inputs_uv=tuple(
+                        value.microvolts for value in application_message.analog_inputs
+                    ),
+                    pwm_inputs=tuple(
+                        PWMMeasurement(
+                            period_ns=value.period_nanoseconds,
+                            duty_permyriad=value.duty_cycle_permyriad,
+                        )
+                        for value in application_message.pwm_inputs
+                    ),
+                    condition=condition,
+                    problem_detail=application_message.problem_detail,
+                )
+            self.builder.add_tick_result(result)
+            return result
+
+        tick = application_message.tick_number
+        flags = getattr(application_message, "flags", 0)
+
+        if self._current_chunk_tick is None or self._current_chunk_tick != tick:
+            self._current_chunk_tick = tick
+            self._current_chunk_condition = condition
+            self._current_chunk_problem_detail = application_message.problem_detail
+        else:
+            if condition is not TickCondition.OK or application_message.problem_detail != 0:
+                self._current_chunk_condition = condition
+                self._current_chunk_problem_detail = application_message.problem_detail
+
+        for record in application_message.records:
+            periph_type = record.peripheral_type
+            if periph_type == p.PeripheralType.DIGITAL_INPUT:
+                pin_mask = int.from_bytes(record.data[:2], "little")
+                for pin in range(10):
+                    self._latched_digital_inputs[pin] = bool((pin_mask >> pin) & 1)
+            elif periph_type == p.PeripheralType.ANALOG_INPUT:
+                if 0 <= record.channel < len(self._latched_analogue_inputs):
+                    self._latched_analogue_inputs[record.channel] = int.from_bytes(
+                        record.data[:4], "little"
+                    )
+            elif periph_type == p.PeripheralType.PWM_INPUT:
+                if 0 <= record.channel < len(self._latched_pwm_inputs):
+                    period_ns = int.from_bytes(record.data[:4], "little")
+                    duty_permyriad = int.from_bytes(record.data[4:6], "little")
+                    self._latched_pwm_inputs[record.channel] = PWMMeasurement(
+                        period_ns=period_ns,
+                        duty_permyriad=duty_permyriad,
+                    )
+            elif periph_type == p.PeripheralType.UART:
+                comm_res = CommunicationResult(
+                    tick=tick,
+                    peripheral=CommunicationPeripheral.UART,
+                    channel=record.channel,
+                    payload=bytes(record.data),
+                )
+                self.builder.add_communication_result(comm_res)
+            elif periph_type == p.PeripheralType.SPI:
+                comm_res = CommunicationResult(
+                    tick=tick,
+                    peripheral=CommunicationPeripheral.SPI,
+                    channel=record.channel,
+                    payload=bytes(record.data),
+                )
+                self.builder.add_communication_result(comm_res)
+            elif periph_type == p.PeripheralType.CAN:
+                # CAN results may batch several fixed-size canonical frames.
+                # Keep one frame per stored communication so assertions can
+                # match a frame without depending on batching boundaries.
+                payload = bytes(record.data)
+                if len(payload) == 0 or len(payload) % 12:
+                    raise ProtocolSessionError(
+                        "CAN result payload is not a whole number of 12-byte frames"
+                    )
+                for offset in range(0, len(payload), 12):
+                    self.builder.add_communication_result(
+                        CommunicationResult(
+                            tick=tick,
+                            peripheral=CommunicationPeripheral.CAN,
+                            channel=record.channel,
+                            payload=payload[offset : offset + 12],
+                        )
+                    )
+
+        if flags != 0:
+            return None
+
+        if self._current_chunk_condition is TickCondition.EXECUTION_PROBLEM:
             result = TickResult.execution_problem(
-                tick=application_message.tick_number,
-                problem_detail=application_message.problem_detail,
+                tick=tick,
+                problem_detail=self._current_chunk_problem_detail,
             )
         else:
             result = TickResult(
-                tick=application_message.tick_number,
-                digital_inputs=tuple(value.high for value in application_message.digital_inputs),
-                analogue_inputs_uv=tuple(
-                    value.microvolts for value in application_message.analog_inputs
-                ),
-                pwm_inputs=tuple(
-                    PWMMeasurement(
-                        period_ns=value.period_nanoseconds,
-                        duty_permyriad=value.duty_cycle_permyriad,
-                    )
-                    for value in application_message.pwm_inputs
-                ),
-                condition=condition,
-                problem_detail=application_message.problem_detail,
+                tick=tick,
+                digital_inputs=tuple(self._latched_digital_inputs),
+                analogue_inputs_uv=tuple(self._latched_analogue_inputs),
+                pwm_inputs=tuple(self._latched_pwm_inputs),
+                condition=self._current_chunk_condition,
+                problem_detail=self._current_chunk_problem_detail,
             )
+
+        self._current_chunk_tick = None
+        self._current_chunk_condition = TickCondition.OK
+        self._current_chunk_problem_detail = 0
         self.builder.add_tick_result(result)
         return result
 
@@ -125,4 +281,8 @@ class IncomingResultAdapter:
         return record
 
 
-__all__ = ["IncomingResultAdapter"]
+__all__ = [
+    "AggregatedTickResult",
+    "IncomingResultAdapter",
+    "aggregate_variable_results",
+]

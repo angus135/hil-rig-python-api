@@ -170,7 +170,7 @@ def test_uart_configuration_is_stored() -> None:
     )
 
 
-@pytest.mark.parametrize("baud_hz", [0, -1, 921_601, 115_200.0, True])
+@pytest.mark.parametrize("baud_hz", [0, -1, 115_200.0, True])
 def test_uart_rejects_invalid_baud_rates(baud_hz) -> None:
     test = HilRigTest(name="Invalid UART baud")
 

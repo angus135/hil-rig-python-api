@@ -23,10 +23,11 @@ implementation details unless that detail is itself an important invariant.
 
 ## Adding a subsystem
 
-Keep user-facing convenience methods in `api.py`, domain data in `models/`, and
-validation/translation logic in compiler modules. When the IDC design is stable,
-add serialization and transport as separate packages so protocol details do not leak
-into the public test-definition API.
+Keep user-facing convenience methods in `api.py`, protocol-neutral domain data in
+`models/`, and compilation rules in `compiler.py`. Put Application-message translation
+in `protocol/application.py`, direct serial framing and workflow state in
+`protocol/connection.py`, and decoded result mapping in `results/adapter.py`. Preserve
+these boundaries so protocol details do not leak into the public test-definition API.
 
 ## Pull requests
 

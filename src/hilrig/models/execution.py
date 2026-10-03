@@ -10,7 +10,7 @@ from typing import TypeAlias
 from hilrig.models.identifiers import UploadAttempt
 from hilrig.models.instructions import Instruction
 
-IR_SCHEMA_VERSION = "1.1"
+IR_SCHEMA_VERSION = "1.2"
 IRScalar: TypeAlias = str | int | float | bool | None
 
 
@@ -46,6 +46,24 @@ class CompiledInstruction:
     channel: int
     operation: str
     arguments: MappingProxyType[str, IRScalar]
+    group_id: int | None = None
+    subject_name: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.subject_name:
+            object.__setattr__(
+                self,
+                "subject_name",
+                f"{self.peripheral}[{self.channel}]",
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledAssertionGroup:
+    """One named host-side assertion group."""
+
+    group_id: int
+    name: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +75,16 @@ class CompiledAssertion:
     channel: int
     assertion: str
     arguments: MappingProxyType[str, IRScalar]
+    group_id: int = 0
+    subject_name: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.subject_name:
+            object.__setattr__(
+                self,
+                "subject_name",
+                f"{self.peripheral}[{self.channel}]",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +105,7 @@ class CompiledTestIR:
     start_mode: str
     configurations: tuple[CompiledConfiguration, ...]
     instructions: tuple[CompiledInstruction, ...]
+    assertion_groups: tuple[CompiledAssertionGroup, ...]
     assertions: tuple[CompiledAssertion, ...]
     time_slots: tuple[TimeSlot, ...]
     schema_version: str = IR_SCHEMA_VERSION

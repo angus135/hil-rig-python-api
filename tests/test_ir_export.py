@@ -62,7 +62,7 @@ def test_compile_returns_an_immutable_chronological_snapshot() -> None:
 def test_machine_ir_uses_stable_values_and_excludes_assertions() -> None:
     machine_ir = _compiled_example().to_dict()
 
-    assert machine_ir["ir_version"] == "1.1"
+    assert machine_ir["ir_version"] == "1.2"
     assert machine_ir["test"]["frequency_mode"] == "HZ_10K"
     assert machine_ir["test"]["start_mode"] == "HOST_COMMAND"
     assert machine_ir["test"]["expected_tick_count"] == 10_021
