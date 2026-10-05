@@ -51,7 +51,7 @@ The 9,252-cycle reference originated from the existing `loopback_utilization_poi
 
 ### Current ISR-overrun detection limitation
 
-The firmware records timed ISR tick count, total, minimum, maximum, and the zero-based tick producing the maximum. It does not currently compare the measured ISR duration with the configured execution period or latch an execution failure when the duration exceeds that period. `EXECUTION_MANAGER_FAILURE_INSTRUCTION_LATE` detects a logical instruction timestamp that is already behind the serviced execution tick; it is not a wall-clock ISR-overrun detector.
+The firmware records ISR sample count, total, minimum, maximum, and the boundary producing the maximum. It does not currently compare the measured ISR duration with the configured execution period or latch an execution failure when the duration exceeds that period. `EXECUTION_MANAGER_FAILURE_INSTRUCTION_LATE` detects a logical instruction timestamp that is already behind the serviced execution boundary; it is not a wall-clock ISR-overrun detector.
 
 Until explicit firmware detection exists, the Python run analysis must classify a run as failed when `maximum_cycles >= deadline_cycles` and must retain the raw cycle values. This post-run check detects that at least one ISR exceeded its period, but it cannot reconstruct how many hardware timer updates may have coalesced while the ISR was running. Strong bounded-fault claims therefore require a firmware-side deadline-exceed counter or fault latch.
 
@@ -146,7 +146,7 @@ Run after a stable utilization ceiling is established.
 1, 2, 5, 10, 20, 50, 100 ticks
 ```
 
-A burst interval of `N` places approximately `N` ticks of traffic into one commanded tick while preserving the run's average modeled utilization. The compiled manifest must report maximum payload and encoded instruction size at an active tick so failures can be attributed to instantaneous instruction, queue, buffer, or ISR pressure rather than average wire utilization.
+A burst interval of `N` places approximately `N` ticks of traffic into one commanded boundary while preserving the run's average modeled utilization. The compiled manifest must report maximum payload and encoded instruction size at an active boundary so failures can be attributed to instantaneous instruction, queue, buffer, or ISR pressure rather than average wire utilization.
 
 ### Preliminary burst estimates
 
@@ -253,7 +253,7 @@ Report the first limiting domain separately so a representation or upload limit 
 7. Result buffering and NAND service.
 8. Post-run result transport and host custody.
 
-Preserve the underlying fault code and first failing tick wherever available.
+Preserve the underlying fault code and first failing tick/boundary wherever available.
 
 ## Known Capacity and Deadline Constraints
 
@@ -292,12 +292,12 @@ For the stronger observable-and-classified-fault claim, add UART/SPI DMA wrap ac
 
 ### Execution and timing
 
-- Verdict, classification, first fault, and fault tick.
-- Expected and completed execution ticks.
+- Verdict, classification, first fault, and fault boundary.
+- Expected and completed execution boundaries.
 - Per-transfer commanded and receive-observation timing.
 - Per-peripheral offset distribution: count, minimum, median, selected upper percentiles, and maximum.
-- Timed ISR tick count, core clock, average, peak cycles, peak tick, and deadline margin.
-- Instruction-buffer minimum unread bytes and tick.
+- ISR sample count, average, peak cycles, peak boundary, and deadline margin.
+- Instruction-buffer minimum unread bytes and boundary.
 
 ### Buffers, storage, and custody
 
