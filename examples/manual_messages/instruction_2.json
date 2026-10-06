@@ -1,0 +1,13 @@
+{
+  "type": "test_instruction",
+  "test_id": "00112233445566778899aabbccddeeff",
+  "tick": 1000,
+  "digital_outputs": [
+    {
+      "channel": 0,
+      "high": false
+    }
+  ],
+  "analog_outputs": [],
+  "pwm_outputs": []
+}

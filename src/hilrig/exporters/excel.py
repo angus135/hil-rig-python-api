@@ -86,11 +86,22 @@ def _workbook_rows(compiled: CompiledTestIR) -> dict[str, list[list[object]]]:
         instructions.append(["No stimulus instructions", "", "", "", "", ""])
 
     assertions: list[list[object]] = [
-        ["Assertion ID", "Peripheral", "Channel", "Assertion", "Arguments"]
+        [
+            "Assertion ID",
+            "Group",
+            "Subject",
+            "Peripheral",
+            "Channel",
+            "Assertion",
+            "Arguments",
+        ]
     ]
+    group_names = {group.group_id: group.name for group in compiled.assertion_groups}
     assertions.extend(
         [
             item.assertion_id,
+            group_names[item.group_id],
+            item.subject_name,
             item.peripheral,
             item.channel,
             item.assertion,
@@ -99,7 +110,7 @@ def _workbook_rows(compiled: CompiledTestIR) -> dict[str, list[list[object]]]:
         for item in compiled.assertions
     )
     if not compiled.assertions:
-        assertions.append(["No host-side assertions", "", "", "", ""])
+        assertions.append(["No host-side assertions", "", "", "", "", "", ""])
 
     return {
         "Test Summary": summary,

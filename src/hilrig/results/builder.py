@@ -13,7 +13,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from hilrig.exceptions import CaptureStateError, CaptureStorageError
-from hilrig.models.execution import IR_SCHEMA_VERSION, CompiledAssertion, CompiledTestIR
+from hilrig.models.execution import (
+    IR_SCHEMA_VERSION,
+    CompiledAssertion,
+    CompiledAssertionGroup,
+    CompiledInstruction,
+    CompiledTestIR,
+)
 from hilrig.models.identifiers import UploadAttempt, validate_uint128
 from hilrig.results.models import (
     ApplicationErrorRecord,
@@ -80,6 +86,12 @@ class CapturedRunBuilder:
             tick_period_ns=compiled_test.tick_period_ns,
             expected_tick_count=compiled_test.expected_tick_count,
             compiled_ir_version=compiled_test.schema_version,
+            compiled_assertion_groups=compiled_test.assertion_groups,
+            compiled_stimuli=tuple(
+                instruction
+                for instruction in compiled_test.instructions
+                if instruction.group_id is not None
+            ),
             compiled_assertions=compiled_test.assertions,
             run_id=run_id,
             application_protocol_version=application_protocol_version,
@@ -99,6 +111,8 @@ class CapturedRunBuilder:
         tick_period_ns: int,
         expected_tick_count: int,
         compiled_ir_version: str = IR_SCHEMA_VERSION,
+        compiled_assertion_groups: Sequence[CompiledAssertionGroup] = (),
+        compiled_stimuli: Sequence[CompiledInstruction] = (),
         compiled_assertions: Sequence[CompiledAssertion] = (),
         run_id: int | None = None,
         application_protocol_version: str | None = None,
@@ -133,6 +147,8 @@ class CapturedRunBuilder:
             compiled_ir_version,
             name="compiled_ir_version",
         )
+        self._compiled_assertion_groups = tuple(compiled_assertion_groups)
+        self._compiled_stimuli = tuple(compiled_stimuli)
         self._compiled_assertions = tuple(compiled_assertions)
         self._batch_size = _positive_int(batch_size, name="batch_size")
         if (
@@ -153,6 +169,8 @@ class CapturedRunBuilder:
             tick_period_ns=self._tick_period_ns,
             expected_tick_count=self._expected_tick_count,
             compiled_ir_version=self._compiled_ir_version,
+            compiled_assertion_groups=self._compiled_assertion_groups,
+            compiled_stimuli=self._compiled_stimuli,
             compiled_assertions=self._compiled_assertions,
             application_protocol_version=_optional_text(
                 application_protocol_version,

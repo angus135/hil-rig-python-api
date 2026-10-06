@@ -1,0 +1,24 @@
+{
+  "type": "test_instruction",
+  "test_id": "00112233445566778899aabbccddeeff",
+  "tick": 10,
+  "digital_outputs": [
+    {
+      "channel": 0,
+      "high": true
+    }
+  ],
+  "analog_outputs": [
+    {
+      "channel": 0,
+      "microvolts": 2500000
+    }
+  ],
+  "pwm_outputs": [
+    {
+      "channel": 0,
+      "period_nanoseconds": 1000000,
+      "duty_cycle_permyriad": 5000
+    }
+  ]
+}

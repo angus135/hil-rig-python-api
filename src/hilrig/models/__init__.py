@@ -75,6 +75,7 @@ from hilrig.models.instructions import (
     SPITransferInstruction,
     UARTWriteInstruction,
 )
+from hilrig.models.protocol import ProtocolFamily
 
 __all__ = [
     "AnalogueInputConfiguration",
@@ -116,6 +117,7 @@ __all__ = [
     "LogicVoltage",
     "Pullup",
     "PointAssertion",
+    "ProtocolFamily",
     "PwmInputDutyCycleNearAssertion",
     "PwmInputDutyCycleRemainWithinAssertion",
     "PwmInputFrequencyNearAssertion",

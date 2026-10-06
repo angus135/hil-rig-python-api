@@ -42,7 +42,7 @@ class CaptureSchemaError(CaptureStorageError):
 
 
 class ProtocolIntegrationError(HilRigError):
-    """The host API could not safely use the Application or Transport protocol."""
+    """The host API could not safely use the Application protocol connection."""
 
 
 class ProtocolDependencyError(ProtocolIntegrationError):

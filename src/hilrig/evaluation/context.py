@@ -140,7 +140,7 @@ def _include_missing_ticks(
     from_tick: int,
     until_tick: int,
 ) -> Iterator[EvidenceSample[EvidenceValue]]:
-    """Yield exactly one evidence item for every requested tick."""
+    """Yield one evidence item for every tick in ``[from_tick, until_tick)``."""
     expected_tick = from_tick
     for sample in samples:
         if sample.tick < expected_tick:
@@ -150,7 +150,7 @@ def _include_missing_ticks(
             expected_tick += 1
         yield sample
         expected_tick += 1
-    while expected_tick <= until_tick:
+    while expected_tick < until_tick:
         yield _missing(expected_tick)
         expected_tick += 1
 

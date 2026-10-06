@@ -73,6 +73,9 @@ def make_result(
     from_tick, until_tick = assertion_ticks(assertion)
     return AssertionResult(
         assertion_id=assertion.assertion_id,
+        group_id=assertion.group_id,
+        group_name="",
+        subject_name=assertion.subject_name,
         verdict=verdict,
         peripheral=assertion.peripheral,
         channel=assertion.channel,

@@ -51,6 +51,7 @@ def test_compiled_assertions_are_snapshotted_and_restored_for_evaluation(
     assert snapshot.name == "Original compiled assertions"
     assert snapshot.compiled_ir_version == compiled.schema_version == IR_SCHEMA_VERSION
     assert snapshot.assertion_count == 3
+    assert snapshot.stimuli == ()
     assert snapshot.assertions == compiled.assertions
     assert snapshot.assertions is not compiled.assertions
     assert dict(snapshot.assertions[2].arguments) == {
@@ -80,6 +81,7 @@ def test_direct_builder_creates_an_empty_original_assertion_set(tmp_path: Path) 
     assert run.metadata.schema_version == RESULT_IR_SCHEMA_VERSION
     assert run.original_assertion_set.compiled_ir_version == IR_SCHEMA_VERSION
     assert run.original_assertion_set.assertions == ()
+    assert run.original_assertion_set.stimuli == ()
 
 
 def test_unknown_assertion_set_is_reported_clearly(tmp_path: Path) -> None:
@@ -127,6 +129,7 @@ def test_capture_open_rejects_a_missing_original_assertion_set(tmp_path: Path) -
 
     with sqlite3.connect(builder.database_path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("DELETE FROM assertion_groups")
         connection.execute("DELETE FROM assertion_sets")
 
     with pytest.raises(CaptureSchemaError, match="no original assertion set"):
