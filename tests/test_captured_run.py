@@ -19,11 +19,13 @@ from protocol_fakes import (
 
 from hilrig import (
     ApplicationErrorRecord,
+    ApplicationResponseRecord,
     CapturedRunBuilder,
     CapturedRunIR,
     CaptureStateError,
     CaptureStatus,
     CaptureStorageError,
+    CollectionIntegrityIssue,
     CommunicationPeripheral,
     CommunicationResult,
     DigitalState,
@@ -32,6 +34,8 @@ from hilrig import (
     LogicVoltage,
     ProtocolSessionError,
     PWMMeasurement,
+    RigStatusRecord,
+    RunReportRecord,
     StartMode,
     TickCondition,
     TickResult,
@@ -63,6 +67,71 @@ def _builder(path: Path, *, expected_tick_count: int = 3, **kwargs: object) -> C
         tick_period_ns=100_000,
         expected_tick_count=expected_tick_count,
         **kwargs,
+    )
+
+
+def test_terminal_report_and_collection_integrity_are_persisted(tmp_path: Path) -> None:
+    builder = _builder(
+        tmp_path / "reported.sqlite3",
+        expected_tick_count=3,
+        attempt_number=2,
+        started_at="2026-10-06T00:00:00+00:00",
+    )
+    builder.add_tick_result(_tick(0))
+    report = RunReportRecord(
+        schema_version=1,
+        valid_sections=0x03,
+        run_outcome="FAILED",
+        execution_outcome="FAILED",
+        result_status="PARTIAL",
+        expected_tick_count=3,
+        tick_period_us=100,
+        last_completed_boundary=1,
+        result_ticks_emitted=2,
+        failure_source="EXECUTION_MANAGER",
+        failure_stage="EXECUTION",
+        failure_reason="INSTRUCTION_UNDERRUN",
+        isr_timing=None,
+        instruction_buffer=None,
+        result_buffer=None,
+        flash=None,
+        extension_data=b"future",
+        raw_bytes=b"raw-report",
+    )
+    response = ApplicationResponseRecord(
+        scope="EXECUTION_CONTROL",
+        outcome="COMPLETED",
+        reason="NONE",
+        detail=0,
+        tick=0,
+        control_command="START",
+    )
+    status = RigStatusRecord(
+        origin="NOTIFICATION",
+        state="RUNNING",
+        flags=8,
+        application_test_id=0x9ABC,
+        schema_version=1,
+        failure_source="NONE",
+        failure_stage="NONE",
+        failure_reason="NONE",
+        observed_at="2026-10-06T00:00:01+00:00",
+    )
+
+    run = builder.finalize(report=report, responses=(response,), status_events=(status,))
+
+    assert run.metadata.attempt_number == 2
+    assert run.metadata.started_at == "2026-10-06T00:00:00+00:00"
+    assert run.metadata.completed_at is not None
+    assert run.report == report
+    assert tuple(run.iter_lifecycle_responses()) == (response,)
+    assert tuple(run.iter_status_events()) == (status,)
+    assert tuple(run.iter_integrity_issues()) == (
+        CollectionIntegrityIssue(
+            code="result_tick_count_mismatch",
+            detail="Host stored 1 complete result ticks, but the Run Report states that "
+            "firmware emitted 2.",
+        ),
     )
 
 
@@ -332,6 +401,61 @@ def test_manifest_and_csv_exports_are_derived_from_database(tmp_path: Path) -> N
     assert communication_rows[0]["payload_hex"] == "0xaabb"
     with errors_path.open(encoding="utf-8", newline="") as stream:
         assert list(csv.DictReader(stream)) == []
+
+
+def test_run_metadata_markdown_contains_capture_and_firmware_evidence(tmp_path: Path) -> None:
+    builder = _builder(
+        tmp_path / "run.sqlite3",
+        expected_tick_count=1,
+        attempt_number=3,
+        started_at="2026-10-06T00:00:00+00:00",
+    )
+    builder.add_tick_result(_tick(0))
+    report = RunReportRecord(
+        schema_version=1,
+        valid_sections=0x03,
+        run_outcome="FAILED",
+        execution_outcome="FAILED",
+        result_status="PARTIAL",
+        expected_tick_count=1,
+        tick_period_us=100,
+        last_completed_boundary=1,
+        result_ticks_emitted=1,
+        failure_source="EXECUTION_MANAGER",
+        failure_stage="EXECUTION",
+        failure_reason="INSTRUCTION_UNDERRUN",
+        isr_timing={"max_latency_us": 7},
+        instruction_buffer=None,
+        result_buffer=None,
+        flash=None,
+        extension_data=b"future",
+        raw_bytes=b"raw-report",
+    )
+    status = RigStatusRecord(
+        origin="NOTIFICATION",
+        state="FAILED",
+        flags=8,
+        application_test_id=0x9ABC,
+        schema_version=1,
+        failure_source="EXECUTION_MANAGER",
+        failure_stage="EXECUTION",
+        failure_reason="INSTRUCTION_UNDERRUN",
+        observed_at="2026-10-06T00:00:01+00:00",
+    )
+    run = builder.finalize(report=report, status_events=(status,))
+
+    path = run.write_metadata_markdown(tmp_path / "run-metadata.md")
+    markdown = path.read_text(encoding="utf-8")
+
+    assert path == (tmp_path / "run-metadata.md").resolve()
+    assert "# HIL-RIG Run Metadata: Captured test" in markdown
+    assert "**Capture status:** `COMPLETE`" in markdown
+    assert "| Attempt number | 3 |" in markdown
+    assert "| Run outcome | FAILED |" in markdown
+    assert "| Failure reason | INSTRUCTION_UNDERRUN |" in markdown
+    assert '| ISR timing | {"max_latency_us": 7} |' in markdown
+    assert "| NOTIFICATION | FAILED |" in markdown
+    assert "No host-side collection integrity issues were recorded." in markdown
 
 
 def test_incoming_protocol_result_is_mapped_to_sqlite_records(tmp_path: Path) -> None:

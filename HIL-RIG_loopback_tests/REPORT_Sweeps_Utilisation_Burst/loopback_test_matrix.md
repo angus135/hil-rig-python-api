@@ -70,7 +70,9 @@ Utilization and equal-exposure comparisons use `stimulus_ticks`; no new traffic 
 | Discovery stimulus | 200 ticks | 2,000 ticks | 20,000 ticks |
 | Boundary-confirmation stimulus | 1,000 ticks | 10,000 ticks | 100,000 ticks |
 | 60-second soak stimulus | 6,000 ticks | 60,000 ticks | 600,000 ticks |
-| 5-minute soak stimulus | 30,000 ticks | 300,000 ticks | 3,000,000 ticks |
+| Extended soak stimulus | 30,000 ticks (5m) | 300,000 ticks (5m) | 900,000 ticks (90s)* |
+
+\* At 10 kHz, extended soak is capped at 900,000 ticks (90 seconds / 900k samples) to keep `expected_tick_count` safely below the protocol engine ceiling of `< 1,000,000` ticks (which includes settling time).
 
 `drain_ticks` is calculated per compiled workload from the final commanded traffic, cumulative peripheral service time, and the configured receive-observation allowance. It is stored separately in the run manifest.
 
@@ -81,20 +83,20 @@ Smooth traffic uses `burst_interval_ticks = 1`.
 ### Coarse discovery
 
 ```text
-10%, 25%, 50%, 75%, 85%, 90%, 95%, 98%, 100%
+25%, 50%, 75%, 90%, 100%
 ```
 
-- Run every coarse point so non-monotonic results remain visible.
-- Use three predetermined seeds and one run per seed.
-- A discovery point passes only when all three runs pass.
+- Adaptive discovery sweeps ascending coarse points with predetermined seed 1.
+- Early termination on failure: as soon as an upper coarse point fails, higher points are skipped to immediately begin binary bracket refinement.
 - Requested percentages that compile to an identical workload are deduplicated and retain aliases in the summary.
+- The coarse grid is configurable to expanded resolution (e.g., `10%, 25%, 50%, 75%, 85%, 90%, 95%, 98%, 100%`) when deep unguided exploration is requested.
 
 ### Boundary search and confirmation
 
 1. Bracket the transition from the contiguous all-pass region starting at zero utilization.
-2. Refine the bracket until distinct compiled workloads are no more than one requested percentage point apart.
+2. Refine the bracket via binary search until distinct compiled workloads are no more than one requested percentage point apart (`resolution = 1.0%`).
 3. Scan every integer percentage in any mixed or non-monotonic region.
-4. Confirm the highest stable passing point and lowest failing point using five predetermined seeds repeated twice, for ten runs per point.
+4. Confirm the candidate stable passing point and lowest failing point across six predetermined seeds (`seeds 1..6`, 6 runs per point).
 5. Classify any mixed result as unstable; do not use majority voting.
 
 The reported result is the highest utilization that passed the prescribed finite campaign, not an unlimited-duration maximum.
@@ -311,13 +313,28 @@ For the stronger observable-and-classified-fault claim, add UART/SPI DMA wrap ac
 
 Unavailable metrics are recorded as unavailable, not inferred.
 
-## Endurance and Time-to-Fault
+## Endurance, Soak Validation, and Automated Backoff
 
-After boundary confirmation, test a guarded operating point initially selected as approximately 90% of the confirmed stable ceiling, subject to the point remaining below the lowest unstable/failing region.
+After boundary confirmation, test a guarded operating point initially selected as 100% (or guarded fraction) of the confirmed stable ceiling, subject to the point remaining strictly below any observed failing/unstable percentage.
 
-Escalate through discovery length, boundary-confirmation length, 60 seconds, and 5 minutes. Longer campaigns follow only after storage and result-drain capacity are validated.
+Escalate through discovery length (2s), boundary-confirmation length (10s), 60 seconds, and 5 minutes. 
+
+### Automated resilience and soak backoff
+
+If soak validation encounters a failure at the candidate boundary ceiling, the orchestrator triggers an automated **2-stage backoff engine**:
+1. It steps down to the highest previously passing lower candidate point.
+2. It restarts soak validation at the stepped-down utilization (up to two successive backoff attempts).
+3. If backoff succeeds, the stepped-down ceiling is recorded as the confirmed soak-validated ceiling; if all backoff attempts fail, the cell is flagged with its limiting failure domain.
 
 Report a failure at its first tick and elapsed time, or report survival for at least the configured exposure. A completed capped run is right-censored soak evidence, not proof of unlimited lifetime.
+
+## Campaign & Test Suite Organization
+
+The loopback test suite is partitioned into dedicated, independent test suites:
+
+- **`REPORT_Sweeps_Utilisation_Burst/`**: Whole-rig characterization campaign orchestrator (`loopback_sweep_campaign.py`) and authoring matrix for Sweep 1 (Utilization Ceiling) and Sweep 2 (Burstiness) across Configurations 1..4.
+- **`UART Sweep (development)/`**: Independent single-channel UART prototype sandbox (`uart_prototype_sweep.py`, `uart_prototype_burst_sweep.py`) for early hardware commissioning and fast iteration.
+- **`Endurance/`**: Standalone qualification harness (`burn_in_test.py`) for deep multi-minute and multi-hour soak runs (e.g., 1-hour 360,000-tick burn-in @ 100 Hz) independent of the sweep grid.
 
 ## Execution Order
 

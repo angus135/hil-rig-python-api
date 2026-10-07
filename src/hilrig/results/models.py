@@ -7,7 +7,7 @@ from enum import Enum
 
 from hilrig.models.execution import CompiledAssertion, CompiledAssertionGroup, CompiledInstruction
 
-RESULT_IR_SCHEMA_VERSION = "1.4"
+RESULT_IR_SCHEMA_VERSION = "1.5"
 ORIGINAL_ASSERTION_SET_ID = "original"
 
 DIGITAL_INPUT_CHANNEL_COUNT = 10
@@ -31,6 +31,7 @@ class CaptureStatus(str, Enum):
     INCOMPLETE = "incomplete"
     SESSION_LOST = "session_lost"
     PROTOCOL_ERROR = "protocol_error"
+    INDETERMINATE = "indeterminate"
     ABORTED = "aborted"
 
 
@@ -176,6 +177,138 @@ class ApplicationErrorRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class RunReportRecord:
+    """Application-neutral copy of the firmware's terminal Run Report."""
+
+    schema_version: int
+    valid_sections: int
+    run_outcome: str
+    execution_outcome: str
+    result_status: str
+    expected_tick_count: int
+    tick_period_us: int
+    last_completed_boundary: int | None
+    result_ticks_emitted: int
+    failure_source: str
+    failure_stage: str
+    failure_reason: str
+    isr_timing: dict[str, int] | None
+    instruction_buffer: dict[str, int] | None
+    result_buffer: dict[str, int] | None
+    flash: dict[str, int] | None
+    extension_data: bytes = b""
+    raw_bytes: bytes = b""
+
+    def __post_init__(self) -> None:
+        for name in (
+            "schema_version",
+            "valid_sections",
+            "expected_tick_count",
+            "tick_period_us",
+            "result_ticks_emitted",
+        ):
+            _non_negative_int(getattr(self, name), name=name)
+        if self.last_completed_boundary is not None:
+            _non_negative_int(self.last_completed_boundary, name="last_completed_boundary")
+        for name in (
+            "run_outcome",
+            "execution_outcome",
+            "result_status",
+            "failure_source",
+            "failure_stage",
+            "failure_reason",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{name} must be a non-empty string")
+        for name in ("isr_timing", "instruction_buffer", "result_buffer", "flash"):
+            values = getattr(self, name)
+            if values is not None and (
+                not isinstance(values, dict)
+                or any(
+                    not isinstance(key, str)
+                    or not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value < 0
+                    for key, value in values.items()
+                )
+            ):
+                raise TypeError(f"{name} must be a mapping of strings to non-negative integers")
+        if not isinstance(self.extension_data, bytes):
+            raise TypeError("extension_data must be bytes")
+        if not isinstance(self.raw_bytes, bytes):
+            raise TypeError("raw_bytes must be bytes")
+
+
+@dataclass(frozen=True, slots=True)
+class RigStatusRecord:
+    """One queried or unsolicited firmware lifecycle status event."""
+
+    origin: str
+    state: str
+    flags: int
+    application_test_id: int | None
+    schema_version: int
+    failure_source: str
+    failure_stage: str
+    failure_reason: str
+    observed_at: str
+
+    def __post_init__(self) -> None:
+        for name in ("origin", "state", "failure_source", "failure_stage", "failure_reason"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{name} must be a non-empty string")
+        _non_negative_int(self.flags, name="flags")
+        _non_negative_int(self.schema_version, name="schema_version")
+        if self.application_test_id is not None:
+            _bounded_int(
+                self.application_test_id,
+                minimum=0,
+                maximum=(1 << 128) - 1,
+                name="application_test_id",
+            )
+        if not isinstance(self.observed_at, str) or not self.observed_at:
+            raise ValueError("observed_at must be a non-empty string")
+
+
+@dataclass(frozen=True, slots=True)
+class ApplicationResponseRecord:
+    """A correlated lifecycle response retained as supporting evidence."""
+
+    scope: str
+    outcome: str
+    reason: str
+    detail: int
+    tick: int | None = None
+    control_command: str | None = None
+    global_control_command: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("scope", "outcome", "reason"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{name} must be a non-empty string")
+        _non_negative_int(self.detail, name="detail")
+        if self.tick is not None:
+            _non_negative_int(self.tick, name="tick")
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionIntegrityIssue:
+    """A host-side evidence collection problem that does not rewrite firmware truth."""
+
+    code: str
+    detail: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.code, str) or not self.code:
+            raise ValueError("code must be a non-empty string")
+        if not isinstance(self.detail, str) or not self.detail:
+            raise ValueError("detail must be a non-empty string")
+
+
+@dataclass(frozen=True, slots=True)
 class CapturedRunMetadata:
     """Small immutable summary read from a capture database."""
 
@@ -194,6 +327,9 @@ class CapturedRunMetadata:
     finalized_at: str | None
     application_protocol_version: str | None
     firmware_version: str | None
+    attempt_number: int = 1
+    started_at: str | None = None
+    completed_at: str | None = None
 
     @property
     def test_id_hex(self) -> str:

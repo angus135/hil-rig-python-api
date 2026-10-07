@@ -9,16 +9,16 @@ protocol-neutral JSON and Excel intermediate representations, persistent capture
 storage, and host-side assertion evaluation with JSON and Markdown reports. The
 optional protocol integration lowers fixed Digital, Analogue, and PWM state plus UART,
 SPI, and CAN traffic through `hil-rig-protocol`. Application messages use direct
-length-prefixed framing over a USB CDC COM port. Protocol v0.3.1 discovery, semantic
-Responses, upload finalization, fixed and variable results, Application Errors, START,
-ABORT, and RESET_APPLICATION are integrated.
+length-prefixed framing over a USB CDC COM port. Protocol v0.4.0 discovery, RIG status,
+semantic Responses, upload finalization, fixed and variable results, Application Errors,
+Run Reports, START, ABORT, GET_STATUS, and RESET_APPLICATION are integrated.
 
 ## Requirements
 
 - Python 3.12 or newer
 - Git
 
-Hardware communication additionally requires `hil-rig-protocol` 0.3.1 or newer and
+Hardware communication additionally requires `hil-rig-protocol` 0.4.0 and
 `pyserial`. Until dependency packaging is finalized, install them into the active
 environment from the adjacent protocol checkout:
 
@@ -117,10 +117,11 @@ Results: 412/1751 ticks
 
 `run` defaults to the variable message family. Use `run --legacy <path>` (equivalent to
 `run --family legacy <path>`) only with firmware that expects legacy
-`TestInstruction`/`TestResult` messages. Both families use the protocol-v0.3 workflow:
-System Information discovery, exact version confirmation, configuration acceptance,
-sparse update upload, Complete Test acceptance, START completion, and the complete
-ordered result set. Variable-family tick updates are streamed without a per-tick
+`TestInstruction`/`TestResult` messages. Both families use the protocol-v0.4 workflow:
+System Information discovery, exact version confirmation, RIG readiness confirmation,
+configuration acceptance, sparse update upload, Complete Test handling, START completion,
+zero or more ordered results, and an authoritative Run Report. Variable-family tick
+updates are streamed without a per-tick
 Application Response. `HOST_COMMAND` tests are started automatically by this runner
 after upload acceptance.
 
@@ -245,6 +246,7 @@ runs/
     |-- test-review.xlsx
     |-- captured-run.sqlite3
     |-- run-manifest.json
+    |-- run-metadata.md
     |-- fixed-results.csv
     |-- communication-results.csv
     |-- application-errors.csv
@@ -698,16 +700,24 @@ with FixedIOProtocolConnection.connect() as connection:
     )
     connection.bind_result_builder(builder)
     connection.queue_upload(compiled, upload_attempt=attempt)
+    while not connection.ready_for_upload:
+        connection.service()
+
     while not connection.upload_accepted:
         connection.service()
 
     # IMMEDIATE queues START after Complete Test is accepted. HOST_COMMAND waits
     # here for connection.start() to be called. EXTERNAL_TRIGGER deliberately has
     # no protocol action.
-    while not connection.results_complete:
+    while not connection.report_received:
         connection.service()
 
-    captured_run = builder.finalize()
+    captured_run = builder.finalize(
+        report=connection.run_report,
+        responses=connection.lifecycle_responses,
+        status_events=connection.status_events,
+    )
+    connection.reset_application()
 ```
 
 The connection scans `serial.tools.list_ports.comports()` and uses the first port whose
@@ -721,11 +731,13 @@ firmware ignores it.
 `service()` owns the byte-stream details. Every Application message is prefixed with a
 two-byte little-endian payload length. The connection retains incomplete incoming
 frames, preserves partial serial-write offsets, decodes complete messages, and first
-exchanges System Information with an exact protocol-version check. Configuration,
+exchanges System Information with an exact protocol-version check followed by a status
+notification or GET_STATUS query. Configuration,
 finalization, START, ABORT, and RESET_APPLICATION wait for their correlated responses.
 Variable-family tick updates are streamed without per-tick responses. After the final
 update, the connection sends `FINALIZE_TEST_UPLOAD` with the same Application Test ID
-and waits for the firmware's Complete Test Response.
+and waits for the firmware's Complete Test Response. Once finalization begins, a matching
+Run Report is owed even when finalization or START is rejected.
 
 By default, `IMMEDIATE` automatically queues `START`; `HOST_COMMAND` exposes
 `connection.start()`. Passing `advance_mode=UploadAdvanceMode.OPERATOR_GATED` to
@@ -736,22 +748,21 @@ response-gated controls. `EXTERNAL_TRIGGER` remains representable in the compile
 but intentionally performs no protocol action. Responses are correlated by scope,
 Application Test ID, tick, and command. A rejection, mismatch, response timeout, serial
 error, or incompatible message family fails the workflow rather than guessing that an
-operation succeeded.
+operation succeeded. Expected negative finalization and START responses remain supporting
+events; the Run Report supplies the terminal classification.
 
 Application Error messages associated with the active run are converted to
 `ApplicationErrorRecord` and queued into the same SQLite writer as results. Their
 category, recoverability, optional tick, numeric detail (stored losslessly as decimal
-text by the current schema), and diagnostic bytes are preserved. Errors do not replace
-the required fixed Test Results. The connection considers result transfer complete
-only after receiving the expected ordered result ticks `0..N-1`.
+text by the current schema), and diagnostic bytes are preserved. Errors and result counts
+do not classify or terminate an attempt. The report's emitted-result count is reconciled
+against stored complete ticks as a separate host integrity check.
 
-If configuration or whole-test validation is rejected, that upload ID is retired and
-the caller can restart immediately with `attempt.restart()`. A builder for
-the abandoned attempt must first be finalized, then a builder created for the fresh
-attempt can be attached with `connection.bind_result_builder(new_builder,
-replace=True)`. Reusing the retired wire ID is rejected locally. A rejected START leaves
-the accepted upload ready for an explicit retry; uncertain serial failures and
-`FAILED` control outcomes still require ABORT, RESET_APPLICATION, or reconnection.
+After a report is persisted, the terminal sends RESET_APPLICATION and admits no further
+upload until the RIG reports IDLE with READY_FOR_NEW_TEST and RESET_PERMITTED, no active
+Test ID, and no failure provenance. HARDWARE_NOT_READY reset rejections are retried while
+cleanup completes. A retained test can instead be repeated with `connection.repeat()`;
+this increments the host attempt number and sends START with the same Application Test ID.
 
 ## Evaluate captured assertions
 
@@ -785,6 +796,10 @@ The JSON report is useful for later tools and automation. The Markdown report co
 run summary, a compact assertion table, and detailed expected/observed evidence for each
 assertion. Generating a report does not modify the capture database, so evaluation can be
 rerun at any time.
+
+Terminal runs also write `run-metadata.md`, a human-readable summary of the durable
+capture metadata, firmware Run Report, lifecycle responses, RIG status events, and any
+host-side collection integrity issues.
 
 Point assertions are inconclusive when their tick is missing or invalid. Range
 assertions fail when any valid sample proves a violation; otherwise a gap or invalid

@@ -13,21 +13,29 @@ from hilrig.results.models import (
     ORIGINAL_ASSERTION_SET_ID,
     PWM_INPUT_CHANNEL_COUNT,
     AnalogueInputSample,
+    ApplicationResponseRecord,
     CapturedApplicationError,
     CapturedAssertionSet,
     CapturedRunMetadata,
     CapturedTickResult,
+    CollectionIntegrityIssue,
     CommunicationCapture,
     CommunicationPeripheral,
     DigitalInputSample,
     PWMInputSample,
+    RigStatusRecord,
+    RunReportRecord,
 )
 from hilrig.results.sqlite_store import (
     iter_application_errors,
+    iter_collection_integrity_issues,
     iter_communications,
+    iter_lifecycle_responses,
+    iter_rig_status_events,
     iter_ticks,
     read_assertion_set,
     read_metadata,
+    read_run_report,
     read_tick,
     validate_capture_database,
 )
@@ -65,6 +73,23 @@ class CapturedRunIR:
     def metadata(self) -> CapturedRunMetadata:
         """Read the latest immutable run summary."""
         return read_metadata(self._database_path)
+
+    @property
+    def report(self) -> RunReportRecord | None:
+        """Return the firmware's authoritative terminal report, when available."""
+        return read_run_report(self._database_path)
+
+    def iter_lifecycle_responses(self) -> Iterator[ApplicationResponseRecord]:
+        """Return correlated finalization and control responses in arrival order."""
+        return iter_lifecycle_responses(self._database_path)
+
+    def iter_status_events(self) -> Iterator[RigStatusRecord]:
+        """Return retained queried and unsolicited RIG status events."""
+        return iter_rig_status_events(self._database_path)
+
+    def iter_integrity_issues(self) -> Iterator[CollectionIntegrityIssue]:
+        """Return host-side collection issues without changing firmware outcomes."""
+        return iter_collection_integrity_issues(self._database_path)
 
     @property
     def original_assertion_set(self) -> CapturedAssertionSet:
@@ -169,6 +194,24 @@ class CapturedRunIR:
                 "created_at": metadata.created_at,
                 "finalized_at": metadata.finalized_at,
             },
+            "run_report": (
+                None
+                if self.report is None
+                else {
+                    "run_outcome": self.report.run_outcome,
+                    "execution_outcome": self.report.execution_outcome,
+                    "result_status": self.report.result_status,
+                    "failure_source": self.report.failure_source,
+                    "failure_stage": self.report.failure_stage,
+                    "failure_reason": self.report.failure_reason,
+                    "result_ticks_emitted": self.report.result_ticks_emitted,
+                    "valid_sections": self.report.valid_sections,
+                }
+            ),
+            "integrity_issues": [
+                {"code": issue.code, "detail": issue.detail}
+                for issue in self.iter_integrity_issues()
+            ],
             "rig": {
                 "application_protocol_version": metadata.application_protocol_version,
                 "firmware_version": metadata.firmware_version,
@@ -190,6 +233,18 @@ class CapturedRunIR:
             encoding="utf-8",
         )
         return output
+
+    def to_metadata_markdown(self) -> str:
+        """Return the human-readable run metadata and lifecycle report."""
+        from hilrig.results.reporting import render_run_metadata_markdown
+
+        return render_run_metadata_markdown(self)
+
+    def write_metadata_markdown(self, path: str | Path) -> Path:
+        """Write the human-readable run metadata and lifecycle report."""
+        from hilrig.results.reporting import write_run_metadata_markdown
+
+        return write_run_metadata_markdown(self, path)
 
     def write_fixed_results_csv(self, path: str | Path) -> Path:
         """Export the wide fixed-result table as a human-readable CSV log."""
