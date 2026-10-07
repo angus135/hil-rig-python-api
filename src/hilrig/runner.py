@@ -11,14 +11,14 @@ from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from hilrig.api import Test
 from hilrig.evaluation import evaluate_assertions
-from hilrig.exceptions import ProtocolSessionError
+from hilrig.exceptions import ProtocolSessionError, RecoveryError, RunReportTimeoutError
 from hilrig.models.execution import CompiledTestIR
 from hilrig.models.identifiers import validate_uint128
 from hilrig.protocol import (
@@ -206,11 +206,20 @@ class ProtocolWorker:
         notification_callback: _NotificationCallback | None = None,
         poll_interval_s: float = 0.001,
         abort_timeout_s: float = 3.0,
+        reset_max_attempts: int = 4,
+        reset_retry_delay_s: float = 0.05,
+        readiness_timeout_s: float = 2.0,
     ) -> None:
         if poll_interval_s < 0:
             raise ValueError("poll_interval_s must be non-negative")
         if abort_timeout_s <= 0:
             raise ValueError("abort_timeout_s must be positive")
+        if not isinstance(reset_max_attempts, int) or reset_max_attempts <= 0:
+            raise ValueError("reset_max_attempts must be a positive integer")
+        if reset_retry_delay_s < 0:
+            raise ValueError("reset_retry_delay_s must be non-negative")
+        if readiness_timeout_s <= 0:
+            raise ValueError("readiness_timeout_s must be positive")
         self._connection_factory = connection_factory or FixedIOProtocolConnection.connect
         self._manual_connection_factory = (
             manual_connection_factory or FixedIOProtocolConnection.connect_manual
@@ -218,6 +227,9 @@ class ProtocolWorker:
         self._notification_callback = notification_callback
         self._poll_interval_s = float(poll_interval_s)
         self._abort_timeout_s = float(abort_timeout_s)
+        self._reset_max_attempts = reset_max_attempts
+        self._reset_retry_delay_s = float(reset_retry_delay_s)
+        self._readiness_timeout_s = float(readiness_timeout_s)
         self._commands: queue.Queue[_Command] = queue.Queue()
         self._manual_commands: queue.Queue[_ManualCommand] = queue.Queue()
         self._advance_commands: queue.Queue[_AdvanceCommand] = queue.Queue()
@@ -764,9 +776,18 @@ class ProtocolWorker:
                 connection = self._connection_factory(protocol_family=protocol_family)
             except TypeError:
                 connection = self._connection_factory()
-            while not connection.session_confirmed:
+            next_readiness_query = time.monotonic() + self._readiness_timeout_s
+            while not connection.session_confirmed or not connection.ready_for_upload:
                 self._raise_if_aborted()
                 report = connection.service()
+                if (
+                    connection.session_confirmed
+                    and not connection.ready_for_upload
+                    and connection.workflow_state is ProtocolWorkflowState.WAITING_FOR_READY
+                    and time.monotonic() >= next_readiness_query
+                ):
+                    connection.get_status()
+                    next_readiness_query = time.monotonic() + self._readiness_timeout_s
                 self._record_protocol_progress(connection, received_tick_count)
                 if not (
                     report.serial_bytes_read
@@ -784,6 +805,8 @@ class ProtocolWorker:
                 run_id=run_id,
                 application_protocol_version=info.protocol_version,
                 firmware_version=info.firmware_version,
+                attempt_number=1,
+                started_at=datetime.now(UTC).isoformat(),
             )
             connection.bind_result_builder(builder)
             connection.queue_upload(
@@ -796,7 +819,7 @@ class ProtocolWorker:
             self._notify(f"Connected to firmware {info.firmware_version}; uploading the test...")
 
             host_start_requested = False
-            while not connection.results_complete:
+            while not connection.report_received:
                 self._raise_if_aborted()
                 advance_applied = self._apply_operator_command(connection)
                 service_report = connection.service()
@@ -805,6 +828,18 @@ class ProtocolWorker:
                 if connection.workflow_state is ProtocolWorkflowState.FAILED:
                     err_msg = getattr(connection, "last_error", None) or "Protocol workflow failed"
                     raise ProtocolSessionError(err_msg)
+                if getattr(connection, "report_timed_out", False):
+                    status_deadline = time.monotonic() + self._readiness_timeout_s
+                    while (
+                        connection.workflow_state is ProtocolWorkflowState.WAITING_FOR_STATUS
+                        and time.monotonic() < status_deadline
+                    ):
+                        connection.service()
+                        self._pause(ignore_abort=True)
+                    raise RunReportTimeoutError(
+                        "Timed out waiting for the authoritative Run Report; "
+                        "RIG status was queried and no new test will be started."
+                    )
                 if (
                     connection.workflow_state is ProtocolWorkflowState.READY_TO_START
                     and compiled.start_mode == "HOST_COMMAND"
@@ -833,17 +868,27 @@ class ProtocolWorker:
                 protocol_state=connection.workflow_state.value,
                 received_tick_count=received_tick_count,
             )
-            captured_run = builder.finalize()
+            captured_run = builder.finalize(
+                report=connection.run_report,
+                responses=connection.lifecycle_responses,
+                status_events=connection.status_events,
+            )
             builder = None
             verdict = write_run_artifacts(captured_run, output_directory)
+            self._reset_after_run(connection)
+            outcome = (
+                captured_run.report.run_outcome if captured_run.report is not None else "UNKNOWN"
+            )
             self._set_snapshot(
                 state=WorkerState.COMPLETED,
-                detail=f"Run complete: {verdict.upper()}.",
+                detail=f"Run {outcome}; assertion verdict: {verdict.upper()}.",
                 protocol_state=connection.workflow_state.value,
                 received_tick_count=received_tick_count,
                 verdict=verdict,
             )
-            self._notify(f"Run complete: {verdict.upper()}. Results: {output_directory}")
+            self._notify(
+                f"Run {outcome}; assertion verdict: {verdict.upper()}. Results: {output_directory}"
+            )
         except _RunAborted:
             if connection is not None:
                 self._attempt_protocol_abort(connection)
@@ -866,7 +911,17 @@ class ProtocolWorker:
                 self._record_run_errors(connection.drain_accumulated_errors())
             if builder is not None:
                 try:
-                    captured_run = builder.finalize(status=CaptureStatus.PROTOCOL_ERROR)
+                    failure_status = (
+                        CaptureStatus.INDETERMINATE
+                        if isinstance(error, RunReportTimeoutError)
+                        else CaptureStatus.PROTOCOL_ERROR
+                    )
+                    captured_run = builder.finalize(
+                        status=failure_status,
+                        report=getattr(connection, "run_report", None),
+                        responses=getattr(connection, "lifecycle_responses", ()),
+                        status_events=getattr(connection, "status_events", ()),
+                    )
                     builder = None
                     if output_directory is not None:
                         write_run_artifacts(captured_run, output_directory)
@@ -880,7 +935,10 @@ class ProtocolWorker:
                 received_tick_count=received_tick_count,
                 error=f"{type(error).__name__}: {error}",
             )
-            self._notify(f"Run failed: {type(error).__name__}: {error}")
+            self._notify(
+                f"Run failed: {type(error).__name__}: {error}"
+                + (f" Results: {output_directory}" if output_directory else "")
+            )
         finally:
             if connection is not None:
                 with suppress(BaseException):
@@ -889,6 +947,78 @@ class ProtocolWorker:
             with self._snapshot_lock:
                 self._advance_request_pending = False
             self._discard_advance_commands()
+
+    def _reset_after_run(self, connection: Any) -> None:
+        """Reset after durable report storage and wait for exact new-test readiness."""
+        p = connection.protocol
+        attempts = 0
+        while attempts < self._reset_max_attempts:
+            attempts += 1
+            connection.reset_application()
+            while connection.workflow_state is ProtocolWorkflowState.RESETTING:
+                report = connection.service()
+                if not (
+                    report.serial_bytes_read
+                    or report.serial_bytes_written
+                    or report.application_message_submitted
+                ):
+                    self._pause(ignore_abort=True)
+            response = connection.last_application_response
+            if response is not None and response.outcome is p.ResponseOutcome.COMPLETED:
+                break
+            if (
+                response is not None
+                and response.outcome is p.ResponseOutcome.REJECTED
+                and response.reason is p.ResponseReason.HARDWARE_NOT_READY
+            ):
+                time.sleep(min(self._reset_retry_delay_s * attempts, 0.2))
+                continue
+            if (
+                response is not None
+                and response.outcome is p.ResponseOutcome.REJECTED
+                and response.reason is p.ResponseReason.OPERATION_NOT_ALLOWED
+            ):
+                # The firmware may still be completing report delivery/cleanup.
+                for _ in range(10):
+                    connection.service()
+                    time.sleep(0.01)
+                continue
+            with suppress(BaseException):
+                connection.get_status()
+                while connection.workflow_state is ProtocolWorkflowState.WAITING_FOR_STATUS:
+                    connection.service()
+            raise RecoveryError("RESET_APPLICATION failed; RIG status was queried")
+        else:
+            self._query_status_for_recovery(connection)
+            raise RecoveryError(
+                "RESET_APPLICATION retry policy was exhausted; "
+                f"{_format_rig_recovery_status(connection)}"
+            )
+
+        readiness_deadline = time.monotonic() + self._readiness_timeout_s
+        status_query_sent = False
+        while not connection.ready_for_upload:
+            connection.service()
+            if time.monotonic() >= readiness_deadline and not status_query_sent:
+                connection.get_status()
+                status_query_sent = True
+                readiness_deadline = time.monotonic() + self._readiness_timeout_s
+            elif time.monotonic() >= readiness_deadline:
+                raise RecoveryError("RIG did not return to ready/idle after reset")
+            self._pause(ignore_abort=True)
+
+    def _query_status_for_recovery(self, connection: Any) -> None:
+        """Best-effort status query used to explain an exhausted reset recovery."""
+        try:
+            connection.get_status()
+            deadline = time.monotonic() + self._readiness_timeout_s
+            while connection.workflow_state is ProtocolWorkflowState.WAITING_FOR_STATUS:
+                if time.monotonic() >= deadline:
+                    break
+                connection.service()
+                self._pause(ignore_abort=True)
+        except BaseException:
+            return
 
     def _record_run_errors(self, errors: tuple[ApplicationErrorRecord, ...]) -> None:
         for error in errors:
@@ -1038,6 +1168,7 @@ def create_run_directory(
 def write_run_artifacts(captured_run: CapturedRunIR, output_directory: Path) -> str:
     """Write all standard capture exports and evaluation reports."""
     captured_run.write_manifest_json(output_directory / "run-manifest.json")
+    captured_run.write_metadata_markdown(output_directory / "run-metadata.md")
     captured_run.write_fixed_results_csv(output_directory / "fixed-results.csv")
     captured_run.write_communication_results_csv(output_directory / "communication-results.csv")
     captured_run.write_application_errors_csv(output_directory / "application-errors.csv")
@@ -1055,6 +1186,8 @@ def _worker_state_for_protocol(
         ProtocolWorkflowState.CONNECTING,
         ProtocolWorkflowState.DISCOVERING,
         ProtocolWorkflowState.READY,
+        ProtocolWorkflowState.WAITING_FOR_STATUS,
+        ProtocolWorkflowState.WAITING_FOR_READY,
     }:
         return WorkerState.CONNECTING, "Confirming the protocol session."
     if protocol_state in {
@@ -1071,6 +1204,10 @@ def _worker_state_for_protocol(
         ProtocolWorkflowState.RESULTS_COMPLETE,
     }:
         return WorkerState.RUNNING, f"Receiving test results ({received_tick_count} received)."
+    if protocol_state is ProtocolWorkflowState.WAITING_FOR_REPORT:
+        return WorkerState.RUNNING, "Waiting for the authoritative Run Report."
+    if protocol_state is ProtocolWorkflowState.REPORT_RECEIVED:
+        return WorkerState.FINALIZING, "Run Report received; persisting the attempt."
     if protocol_state is ProtocolWorkflowState.ABORTING:
         return WorkerState.ABORTING, "Waiting for firmware to complete ABORT."
     if protocol_state is ProtocolWorkflowState.ABORTED:
@@ -1165,6 +1302,23 @@ def _format_application_error(error: ApplicationErrorRecord) -> str:
     if error.diagnostic_data:
         fields.append(f"diagnostic_data={error.diagnostic_data!r}")
     return f"ApplicationError({', '.join(fields)})"
+
+
+def _format_rig_recovery_status(connection: object) -> str:
+    status = getattr(connection, "latest_rig_status", None)
+    if status is None:
+        return "no RIG status was received"
+    application_test_id = getattr(status, "application_test_id", None)
+    test_id_text = "none" if application_test_id is None else f"{application_test_id:032x}"
+    failure = "/".join(
+        str(getattr(status, name, "UNKNOWN"))
+        for name in ("failure_source", "failure_stage", "failure_reason")
+    )
+    return (
+        f"RIG status state={getattr(status, 'state', 'UNKNOWN')}, "
+        f"flags=0x{int(getattr(status, 'flags', 0)):08x}, "
+        f"application_test_id={test_id_text}, failure={failure}"
+    )
 
 
 def _version_value(version: object) -> str:

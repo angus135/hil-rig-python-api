@@ -6,6 +6,7 @@ import time
 from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
 from types import ModuleType
 from typing import Any
@@ -28,12 +29,19 @@ from hilrig.protocol.manual import ManualApplicationMessage
 from hilrig.protocol.serial import SerialConnectionSettings, open_serial_port
 from hilrig.results.adapter import IncomingResultAdapter
 from hilrig.results.builder import CapturedRunBuilder
-from hilrig.results.models import ApplicationErrorRecord, TickResult
+from hilrig.results.models import (
+    ApplicationErrorRecord,
+    ApplicationResponseRecord,
+    RigStatusRecord,
+    RunReportRecord,
+    TickResult,
+)
 
 _UINT32_MASK = (1 << 32) - 1
 _DEFAULT_RETRANSMIT_TIMEOUT_MS = 250
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_APPLICATION_RESPONSE_TIMEOUT_S = 30.0
+_DEFAULT_RUN_REPORT_GRACE_S = 30.0
 
 
 def monotonic_now_ms() -> int:
@@ -47,6 +55,8 @@ class ProtocolWorkflowState(str, Enum):
     CONNECTING = "connecting"
     DISCOVERING = "discovering"
     READY = "ready"
+    WAITING_FOR_STATUS = "waiting_for_status"
+    WAITING_FOR_READY = "waiting_for_ready"
     MANUAL_READY = "manual_ready"
     MANUAL_SENDING = "manual_sending"
     WAITING_FOR_OPERATOR = "waiting_for_operator"
@@ -56,6 +66,8 @@ class ProtocolWorkflowState(str, Enum):
     READY_TO_START = "ready_to_start"
     STARTING = "starting"
     RUNNING = "running"
+    WAITING_FOR_REPORT = "waiting_for_report"
+    REPORT_RECEIVED = "report_received"
     ABORTING = "aborting"
     RESETTING = "resetting"
     RESULTS_COMPLETE = "results_complete"
@@ -92,6 +104,8 @@ class ProtocolServiceReport:
     serial_bytes_written: int
     application_message_submitted: bool
     workflow_state: ProtocolWorkflowState
+    run_reports: tuple[RunReportRecord, ...] = ()
+    rig_statuses: tuple[RigStatusRecord, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +161,7 @@ class FixedIOProtocolConnection:
         result_adapter: IncomingResultAdapter | None = None,
         protocol_family: ProtocolFamily | str | None = None,
         application_response_timeout_s: float = _DEFAULT_APPLICATION_RESPONSE_TIMEOUT_S,
+        run_report_grace_s: float = _DEFAULT_RUN_REPORT_GRACE_S,
         manual_mode: bool = False,
         skip_system_info: bool = False,
     ) -> None:
@@ -178,6 +193,13 @@ class FixedIOProtocolConnection:
         self.protocol_family = protocol_family
         self.protocol = application.protocol
         self.application_response_timeout_s = float(application_response_timeout_s)
+        if (
+            not isinstance(run_report_grace_s, (int, float))
+            or isinstance(run_report_grace_s, bool)
+            or run_report_grace_s <= 0
+        ):
+            raise ValueError("run_report_grace_s must be a positive number")
+        self.run_report_grace_s = float(run_report_grace_s)
         if not isinstance(manual_mode, bool):
             raise TypeError("manual_mode must be a bool")
         if not isinstance(skip_system_info, bool):
@@ -202,6 +224,15 @@ class FixedIOProtocolConnection:
         self._upload_accepted = False
         self._execution_started = False
         self._next_result_tick = 0
+        self._report_expected = False
+        self._report_deadline: float | None = None
+        self._report_timed_out = False
+        self._attempt_number = 0
+        self._run_report: RunReportRecord | None = None
+        self._unmatched_run_reports: list[RunReportRecord] = []
+        self._latest_rig_status: RigStatusRecord | None = None
+        self._status_events: list[RigStatusRecord] = []
+        self._lifecycle_responses: list[ApplicationResponseRecord] = []
         self._session_confirmed = False
         self._session_info: RigSystemInfo | None = None
         self._last_application_response: object | None = None
@@ -223,6 +254,7 @@ class FixedIOProtocolConnection:
         protocol_family: ProtocolFamily | str = ProtocolFamily.VARIABLE,
         result_builder: CapturedRunBuilder | None = None,
         application_response_timeout_s: float = _DEFAULT_APPLICATION_RESPONSE_TIMEOUT_S,
+        run_report_grace_s: float = _DEFAULT_RUN_REPORT_GRACE_S,
         protocol_module: ModuleType | Any | None = None,
         serial_factory: Any | None = None,
         comports: Any | None = None,
@@ -275,6 +307,7 @@ class FixedIOProtocolConnection:
                 result_adapter=result_adapter,
                 protocol_family=protocol_family,
                 application_response_timeout_s=application_response_timeout_s,
+                run_report_grace_s=run_report_grace_s,
             )
             connection.transport.notify_link_state(p.LinkState.CONNECTED, monotonic_now_ms())
             return connection
@@ -413,7 +446,44 @@ class FixedIOProtocolConnection:
 
     @property
     def results_complete(self) -> bool:
-        return self._workflow_state is ProtocolWorkflowState.RESULTS_COMPLETE
+        """Compatibility alias: a run is complete only after its Run Report."""
+        return self.report_received
+
+    @property
+    def report_expected(self) -> bool:
+        return self._report_expected
+
+    @property
+    def report_received(self) -> bool:
+        return self._run_report is not None
+
+    @property
+    def report_timed_out(self) -> bool:
+        return self._report_timed_out
+
+    @property
+    def run_report(self) -> RunReportRecord | None:
+        return self._run_report
+
+    @property
+    def latest_rig_status(self) -> RigStatusRecord | None:
+        return self._latest_rig_status
+
+    @property
+    def ready_for_upload(self) -> bool:
+        return self._status_is_ready(self._latest_rig_status)
+
+    @property
+    def status_events(self) -> tuple[RigStatusRecord, ...]:
+        return tuple(self._status_events)
+
+    @property
+    def lifecycle_responses(self) -> tuple[ApplicationResponseRecord, ...]:
+        return tuple(self._lifecycle_responses)
+
+    @property
+    def attempt_number(self) -> int:
+        return self._attempt_number
 
     @property
     def queued_application_message_count(self) -> int:
@@ -448,7 +518,11 @@ class FixedIOProtocolConnection:
                 "A captured-run builder is already bound; pass replace=True after "
                 "finalizing an abandoned attempt"
             )
-        if self.result_adapter is not None and self._active_upload is not None:
+        if (
+            self.result_adapter is not None
+            and self._active_upload is not None
+            and not self.report_received
+        ):
             raise ProtocolSessionError(
                 "Cannot replace the captured-run builder while an upload is active"
             )
@@ -522,6 +596,14 @@ class FixedIOProtocolConnection:
         self._upload_accepted = False
         self._execution_started = False
         self._next_result_tick = 0
+        self._report_expected = False
+        self._report_deadline = None
+        self._report_timed_out = False
+        self._attempt_number = 1
+        self._run_report = None
+        self._unmatched_run_reports.clear()
+        self._status_events = [] if self._latest_rig_status is None else [self._latest_rig_status]
+        self._lifecycle_responses.clear()
         self._advance_workflow()
         return upload.upload_attempt
 
@@ -646,6 +728,26 @@ class FixedIOProtocolConnection:
             )
         )
 
+    def repeat(self) -> int:
+        """START the retained test again with the same Application Test ID."""
+        self._require_open()
+        if self._active_upload is None or not self.report_received:
+            raise ProtocolSessionError("No reported test is retained for repetition")
+        if self._active_upload.start_mode == "EXTERNAL_TRIGGER":
+            raise ProtocolSessionError("EXTERNAL_TRIGGER has no protocol implementation")
+        self._require_no_pending_operation()
+        self._attempt_number += 1
+        self._next_result_tick = 0
+        self._execution_started = False
+        self._report_expected = True
+        self._run_report = None
+        self._report_deadline = None
+        self._report_timed_out = False
+        self._status_events = []
+        self._lifecycle_responses = []
+        self._queue_start()
+        return self._attempt_number
+
     def reset_application(self) -> None:
         """Queue a test-independent Application reset."""
         self._require_open()
@@ -663,6 +765,21 @@ class FixedIOProtocolConnection:
                     application_test_id=None,
                     global_control_command=(self.protocol.GlobalControlCommand.RESET_APPLICATION),
                 ),
+                previous_workflow_state=self._workflow_state,
+            )
+        )
+
+    def get_status(self) -> None:
+        """Request a query-origin RIG status; success is the RigStatus itself."""
+        self._require_open()
+        if not self._session_confirmed:
+            raise ProtocolSessionError("Application compatibility has not been confirmed")
+        self._require_no_pending_operation()
+        message = self.application.build_get_status()
+        self._activate_operation(
+            _ApplicationOperation(
+                kind="status",
+                encoded_messages=(self.application.encode(message),),
                 previous_workflow_state=self._workflow_state,
             )
         )
@@ -697,18 +814,27 @@ class FixedIOProtocolConnection:
             )
         # self._process_transport(now_ms, operating_mode)
 
-        events, messages, results, errors = self._drain()
+        events, messages, results, errors, run_reports, statuses = self._drain()
         self._advance_workflow()
         self._check_response_timeout()
+        self._check_report_timeout()
         submitted = self._submit_next_application_message()
         if submitted:
             # self._process_transport(now_ms, operating_mode)
             pass
 
         bytes_written = self._service_output(now_ms)
-        more_events, more_messages, more_results, more_errors = self._drain()
+        (
+            more_events,
+            more_messages,
+            more_results,
+            more_errors,
+            more_run_reports,
+            more_statuses,
+        ) = self._drain()
         self._advance_workflow()
         self._check_response_timeout()
+        self._check_report_timeout()
         return ProtocolServiceReport(
             events=(*events, *more_events),
             application_messages=(*messages, *more_messages),
@@ -718,6 +844,8 @@ class FixedIOProtocolConnection:
             serial_bytes_written=bytes_written,
             application_message_submitted=submitted,
             workflow_state=self._workflow_state,
+            run_reports=(*run_reports, *more_run_reports),
+            rig_statuses=(*statuses, *more_statuses),
         )
 
     def close(self) -> None:
@@ -789,6 +917,8 @@ class FixedIOProtocolConnection:
         tuple[object, ...],
         tuple[TickResult, ...],
         tuple[ApplicationErrorRecord, ...],
+        tuple[RunReportRecord, ...],
+        tuple[RigStatusRecord, ...],
     ]:
         p = self.protocol
         events: list[object] = []
@@ -796,21 +926,23 @@ class FixedIOProtocolConnection:
         messages: list[object] = []
         stored_results: list[TickResult] = []
         stored_errors: list[ApplicationErrorRecord] = []
-        # Direct USB Framing: 2-byte Little Endian length header
+        run_reports: list[RunReportRecord] = []
+        statuses: list[RigStatusRecord] = []
+        # Direct USB Framing: 2-byte Little Endian length header with self-healing recovery
         while len(self._incoming) >= 2:
             msg_len = int.from_bytes(self._incoming[:2], "little")
+            if msg_len == 0 or msg_len > 4096:
+                del self._incoming[0]
+                continue
             if len(self._incoming) < 2 + msg_len:
                 break
             encoded = bytes(self._incoming[2 : 2 + msg_len])
-            del self._incoming[: 2 + msg_len]
             try:
                 message = self.application.decode(encoded)
-            except Exception as error:
-                self._fail_workflow()
-                raise ProtocolSessionError(
-                    f"Failed to decode incoming message (length={msg_len}, "
-                    f"hex={encoded.hex()}): {error}"
-                ) from error
+                del self._incoming[: 2 + msg_len]
+            except Exception:
+                del self._incoming[0]
+                continue
             messages.append(message)
             if type(message) is p.SystemInfoResponse:
                 if (
@@ -845,6 +977,14 @@ class FixedIOProtocolConnection:
                     stored_errors.append(record)
                     self._accumulated_errors.append(record)
                 self._handle_application_error(message)
+            elif type(message) is getattr(p, "RunReport", None):
+                report = _run_report_record(message, encoded)
+                run_reports.append(report)
+                self._handle_run_report(message, report)
+            elif type(message) is getattr(p, "RigStatus", None):
+                status = _rig_status_record(message)
+                statuses.append(status)
+                self._handle_rig_status(message, status)
             elif type(message) in (p.TestResult, getattr(p, "VariableTestResult", None)):
                 if not self._manual_mode:
                     if (
@@ -871,18 +1011,20 @@ class FixedIOProtocolConnection:
                             stored_results.append(res)
                     if getattr(message, "flags", 0) == 0:
                         self._next_result_tick += 1
-                        if self._active_upload is not None and (
-                            self._next_result_tick
-                            == self._active_upload.configuration.expected_tick_count
-                        ):
-                            self._workflow_state = ProtocolWorkflowState.RESULTS_COMPLETE
             else:
                 if not self._manual_mode:
                     self._fail_workflow()
                     raise ProtocolSessionError(
                         f"Unexpected inbound Application message: {type(message).__name__}"
                     )
-        return tuple(events), tuple(messages), tuple(stored_results), tuple(stored_errors)
+        return (
+            tuple(events),
+            tuple(messages),
+            tuple(stored_results),
+            tuple(stored_errors),
+            tuple(run_reports),
+            tuple(statuses),
+        )
 
     def _handle_delivery_confirmed(self) -> None:
         operation = self._pending_operation
@@ -923,6 +1065,38 @@ class FixedIOProtocolConnection:
         )
         operation.response_received = True
         self._finish_pending_operation_if_ready()
+
+    def _handle_rig_status(self, message: object, status: RigStatusRecord) -> None:
+        self._latest_rig_status = status
+        self._status_events.append(status)
+        operation = self._pending_operation
+        query_origin = getattr(getattr(self.protocol, "StatusOrigin", None), "QUERY_RESPONSE", None)
+        if operation is not None and operation.kind == "status" and message.origin is query_origin:
+            operation.response_received = True
+            self._finish_pending_operation_if_ready()
+            return
+        if (
+            status.origin == "NOTIFICATION"
+            and self._status_is_ready(status)
+            and self._workflow_state is ProtocolWorkflowState.WAITING_FOR_READY
+        ):
+            self._workflow_state = ProtocolWorkflowState.READY
+
+    def _handle_run_report(self, message: object, report: RunReportRecord) -> None:
+        received_test_id = application_test_id_from_bytes(message.test_id.bytes)
+        expected_test_id = (
+            None
+            if self._active_upload is None
+            else self._active_upload.upload_attempt.application_test_id
+        )
+        if not self._report_expected or received_test_id != expected_test_id:
+            self._unmatched_run_reports.append(report)
+            return
+        if self._run_report is not None:
+            raise ProtocolSessionError("Received more than one Run Report for one attempt")
+        self._run_report = report
+        self._report_deadline = None
+        self._workflow_state = ProtocolWorkflowState.REPORT_RECEIVED
 
     def _handle_application_response(
         self,
@@ -1055,13 +1229,15 @@ class FixedIOProtocolConnection:
             self._response_mismatch("Global Control command does not match the request")
 
         self._last_application_response = message
+        if operation.kind in {"finalize", "start", "reset"}:
+            self._lifecycle_responses.append(_application_response_record(message))
         if message.outcome is not correlation.successful_outcome:
             operation.response_error = (
                 f"{operation.kind} was {message.outcome.name.lower()}: "
                 f"{message.reason.name} (detail {message.detail})"
             )
             operation.response_outcome = message.outcome
-            if self._active_upload is not None:
+            if self._active_upload is not None and self._run_report is None:
                 scope_name = getattr(correlation.scope, "name", str(correlation.scope))
                 reason_name = getattr(message.reason, "name", str(message.reason))
                 record = ApplicationErrorRecord(
@@ -1105,6 +1281,10 @@ class FixedIOProtocolConnection:
             fields.append(f"diagnostic_data=0x{message.diagnostic_data.hex()}")
 
         error_detail = f"ApplicationError({', '.join(fields)})"
+
+        if self._report_expected:
+            # Once finalization creates a report obligation, errors are diagnostics.
+            return
 
         if operation is not None and operation.kind in {
             "configuration",
@@ -1183,35 +1363,75 @@ class FixedIOProtocolConnection:
             )
             self._workflow_state = ProtocolWorkflowState.MANUAL_READY
             return
+        if operation.response_error is not None and operation.kind in {"finalize", "start"}:
+            if operation.kind == "finalize":
+                self._upload_accepted = False
+            self._execution_started = False
+            self._workflow_state = (
+                ProtocolWorkflowState.REPORT_RECEIVED
+                if self._run_report is not None
+                else ProtocolWorkflowState.WAITING_FOR_REPORT
+            )
+            self._report_deadline = time.monotonic() + self.run_report_grace_s
+            return
+        if operation.response_error is not None and operation.kind == "reset":
+            self._workflow_state = (
+                operation.previous_workflow_state or ProtocolWorkflowState.REPORT_RECEIVED
+            )
+            return
         if operation.response_error is not None:
             self._handle_negative_response(operation)
             raise ProtocolSessionError(operation.response_error)
         if operation.kind == "discovery":
             self._session_confirmed = True
+            if self._manual_mode:
+                self._workflow_state = ProtocolWorkflowState.MANUAL_READY
+            elif self._status_is_ready(self._latest_rig_status):
+                self._workflow_state = ProtocolWorkflowState.READY
+            else:
+                self.get_status()
+        elif operation.kind == "status":
             self._workflow_state = (
-                ProtocolWorkflowState.MANUAL_READY
-                if self._manual_mode
-                else ProtocolWorkflowState.READY
+                ProtocolWorkflowState.READY
+                if self._status_is_ready(self._latest_rig_status)
+                else ProtocolWorkflowState.WAITING_FOR_READY
             )
         elif operation.kind in {"configuration", "tick"}:
             if self._upload_operations:
                 self._advance_or_gate(self._upload_operations.popleft())
         elif operation.kind == "finalize":
             self._upload_accepted = True
-            self._workflow_state = ProtocolWorkflowState.READY_TO_START
-            if self._advance_mode is UploadAdvanceMode.OPERATOR_GATED:
+            if self._run_report is not None:
+                self._workflow_state = ProtocolWorkflowState.REPORT_RECEIVED
+            elif self._advance_mode is UploadAdvanceMode.OPERATOR_GATED:
+                self._workflow_state = ProtocolWorkflowState.READY_TO_START
                 self._gate_start()
             elif self._active_upload is not None and self._active_upload.start_mode == "IMMEDIATE":
+                self._workflow_state = ProtocolWorkflowState.READY_TO_START
                 self._queue_start()
+            else:
+                self._workflow_state = ProtocolWorkflowState.READY_TO_START
         elif operation.kind == "start":
             self._execution_started = True
-            self._workflow_state = ProtocolWorkflowState.RUNNING
+            if self._active_upload is not None:
+                duration_s = (
+                    self._active_upload.configuration.expected_tick_count
+                    * self._active_upload.configuration.tick_duration_us.microseconds
+                    / 1_000_000
+                )
+                self._report_deadline = time.monotonic() + duration_s + self.run_report_grace_s
+            self._workflow_state = (
+                ProtocolWorkflowState.REPORT_RECEIVED
+                if self._run_report is not None
+                else ProtocolWorkflowState.RUNNING
+            )
         elif operation.kind == "abort":
             self._retire_active_upload()
             self._workflow_state = ProtocolWorkflowState.ABORTED
         elif operation.kind == "reset":
             self._retire_active_upload()
-            self._workflow_state = ProtocolWorkflowState.READY
+            self._latest_rig_status = None
+            self._workflow_state = ProtocolWorkflowState.WAITING_FOR_READY
 
     def _handle_negative_response(self, operation: _ApplicationOperation) -> None:
         """Apply the protocol's scope-specific recovery semantics."""
@@ -1253,6 +1473,8 @@ class FixedIOProtocolConnection:
             return
         if self._manual_mode:
             return
+        if not self.ready_for_upload:
+            return
         if self._upload_operations:
             self._advance_or_gate(self._upload_operations.popleft())
 
@@ -1268,10 +1490,13 @@ class FixedIOProtocolConnection:
             "start": ProtocolWorkflowState.STARTING,
             "abort": ProtocolWorkflowState.ABORTING,
             "reset": ProtocolWorkflowState.RESETTING,
+            "status": ProtocolWorkflowState.WAITING_FOR_STATUS,
             "manual": ProtocolWorkflowState.MANUAL_SENDING,
         }[operation.kind]
 
     def _activate_upload_operation(self, operation: UploadOperation) -> None:
+        if operation.kind is UploadOperationKind.FINALIZE:
+            self._report_expected = True
         self._activate_operation(
             _ApplicationOperation(
                 kind=operation.kind.value,
@@ -1391,6 +1616,20 @@ class FixedIOProtocolConnection:
         self._fail_workflow()
         raise ProtocolSessionError(f"Timed out waiting for the {kind} Application response")
 
+    def _check_report_timeout(self) -> None:
+        if (
+            not self._report_expected
+            or self._run_report is not None
+            or self._report_deadline is None
+            or self._report_timed_out
+            or time.monotonic() < self._report_deadline
+        ):
+            return
+        self._report_timed_out = True
+        self._report_deadline = None
+        if self._pending_operation is None:
+            self.get_status()
+
     def _validate_result_sequence(self, message: object) -> None:
         if self._active_upload is None or not self._execution_started:
             self._fail_workflow()
@@ -1428,6 +1667,7 @@ class FixedIOProtocolConnection:
         self._upload_accepted = False
         self._execution_started = False
         self._next_result_tick = 0
+        self._report_expected = False
 
     def _retire_active_upload(self) -> None:
         if self._active_upload is not None:
@@ -1513,6 +1753,22 @@ class FixedIOProtocolConnection:
         if self._closed:
             raise ProtocolSessionError("The Application protocol connection is closed")
 
+    def _status_is_ready(self, status: RigStatusRecord | None) -> bool:
+        if status is None:
+            return False
+        flags = status.flags
+        ready_flag = int(self.protocol.RigStatusFlag.READY_FOR_NEW_TEST)
+        reset_flag = int(self.protocol.RigStatusFlag.RESET_PERMITTED)
+        return bool(
+            status.state == "IDLE"
+            and flags & ready_flag
+            and flags & reset_flag
+            and status.application_test_id is None
+            and status.failure_source == "NONE"
+            and status.failure_stage == "NONE"
+            and status.failure_reason == "NONE"
+        )
+
     def __enter__(self) -> FixedIOProtocolConnection:
         self._require_open()
         return self
@@ -1523,6 +1779,75 @@ class FixedIOProtocolConnection:
 
 def _version_text(version: object) -> str:
     return f"{version.major}.{version.minor}.{version.patch}"
+
+
+def _enum_name(value: object) -> str:
+    return str(getattr(value, "name", value))
+
+
+def _numeric_fields(value: object) -> dict[str, int]:
+    annotations = getattr(type(value), "__annotations__", {})
+    return {name: int(getattr(value, name)) for name in annotations}
+
+
+def _run_report_record(message: object, raw_bytes: bytes) -> RunReportRecord:
+    valid_sections = int(message.valid_sections)
+    return RunReportRecord(
+        schema_version=int(message.schema_version),
+        valid_sections=valid_sections,
+        run_outcome=_enum_name(message.run_outcome),
+        execution_outcome=_enum_name(message.execution_outcome),
+        result_status=_enum_name(message.result_status),
+        expected_tick_count=int(message.expected_tick_count),
+        tick_period_us=int(message.tick_period_us),
+        last_completed_boundary=(
+            int(message.last_completed_boundary) if valid_sections & 0x02 else None
+        ),
+        result_ticks_emitted=int(message.result_ticks_emitted),
+        failure_source=_enum_name(message.failure_source),
+        failure_stage=_enum_name(message.failure_stage),
+        failure_reason=_enum_name(message.failure_reason),
+        isr_timing=_numeric_fields(message.isr_timing) if valid_sections & 0x04 else None,
+        instruction_buffer=(
+            _numeric_fields(message.instruction_buffer) if valid_sections & 0x08 else None
+        ),
+        result_buffer=(_numeric_fields(message.result_buffer) if valid_sections & 0x10 else None),
+        flash=_numeric_fields(message.flash) if valid_sections & 0x20 else None,
+        extension_data=bytes(message.extension_data),
+        raw_bytes=raw_bytes,
+    )
+
+
+def _rig_status_record(message: object) -> RigStatusRecord:
+    return RigStatusRecord(
+        origin=_enum_name(message.origin),
+        state=_enum_name(message.state),
+        flags=int(message.flags),
+        application_test_id=(
+            None
+            if message.test_id is None
+            else application_test_id_from_bytes(message.test_id.bytes)
+        ),
+        schema_version=int(message.schema_version),
+        failure_source=_enum_name(message.failure_source),
+        failure_stage=_enum_name(message.failure_stage),
+        failure_reason=_enum_name(message.failure_reason),
+        observed_at=datetime.now(UTC).isoformat(),
+    )
+
+
+def _application_response_record(message: object) -> ApplicationResponseRecord:
+    control = getattr(message, "control_command", None)
+    global_control = getattr(message, "global_control_command", None)
+    return ApplicationResponseRecord(
+        scope=_enum_name(message.scope),
+        outcome=_enum_name(message.outcome),
+        reason=_enum_name(message.reason),
+        detail=int(message.detail),
+        tick=getattr(message, "tick_number", None),
+        control_command=(None if control is None else _enum_name(control)),
+        global_control_command=(None if global_control is None else _enum_name(global_control)),
+    )
 
 
 __all__ = [

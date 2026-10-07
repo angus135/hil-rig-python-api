@@ -36,6 +36,8 @@ _CONTROL_FLOW_API = (
     "SystemInfoResponse",
     "ApplicationResponse",
     "ApplicationErrorMessage",
+    "RunReport",
+    "RigStatus",
     "FinalizeTestUpload",
     "ExecutionControl",
     "GlobalControl",
@@ -44,6 +46,13 @@ _CONTROL_FLOW_API = (
     "ResponseScope",
     "ResponseOutcome",
     "ResponseReason",
+    "RunOutcome",
+    "ExecutionOutcome",
+    "RunResultStatus",
+    "RunReportSection",
+    "RigState",
+    "RigStatusFlag",
+    "StatusOrigin",
     "check_protocol_version",
 )
 
@@ -175,7 +184,7 @@ class FixedIOProtocolAdapter:
         missing = tuple(name for name in _CONTROL_FLOW_API if not hasattr(self.protocol, name))
         if missing:
             raise ProtocolDependencyError(
-                "Fixed-I/O protocol control flow requires hil-rig-protocol 0.3.1 or newer; "
+                "Fixed-I/O protocol control flow requires hil-rig-protocol 0.4.0; "
                 f"missing public API: {', '.join(missing)}"
             )
         if application_config is None:
@@ -331,6 +340,13 @@ class FixedIOProtocolAdapter:
         """Build a test-independent Application reset request."""
         return self.protocol.GlobalControl(
             command=self.protocol.GlobalControlCommand.RESET_APPLICATION,
+            flags=0,
+        )
+
+    def build_get_status(self) -> object:
+        """Build a status query; its success response is a RigStatus message."""
+        return self.protocol.GlobalControl(
+            command=self.protocol.GlobalControlCommand.GET_STATUS,
             flags=0,
         )
 
@@ -875,7 +891,7 @@ class VariableIOProtocolAdapter:
         missing = tuple(name for name in _CONTROL_FLOW_API if not hasattr(self.protocol, name))
         if missing:
             raise ProtocolDependencyError(
-                "Variable-I/O protocol control flow requires hil-rig-protocol 0.3.1 or newer; "
+                "Variable-I/O protocol control flow requires hil-rig-protocol 0.4.0; "
                 f"missing public API: {', '.join(missing)}"
             )
         if application_config is None:
@@ -1019,6 +1035,12 @@ class VariableIOProtocolAdapter:
     def build_reset_application(self) -> object:
         return self.protocol.GlobalControl(
             command=self.protocol.GlobalControlCommand.RESET_APPLICATION,
+            flags=0,
+        )
+
+    def build_get_status(self) -> object:
+        return self.protocol.GlobalControl(
+            command=self.protocol.GlobalControlCommand.GET_STATUS,
             flags=0,
         )
 

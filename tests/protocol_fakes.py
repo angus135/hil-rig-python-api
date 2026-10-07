@@ -134,7 +134,7 @@ class ProtocolVersion:
     patch: int
 
 
-PROTOCOL_VERSION = ProtocolVersion(0, 3, 1)
+PROTOCOL_VERSION = ProtocolVersion(0, 4, 0)
 
 
 class ControlCommand(IntEnum):
@@ -146,6 +146,7 @@ class ControlCommand(IntEnum):
 class GlobalControlCommand(IntEnum):
     INVALID = 0
     RESET_APPLICATION = 1
+    GET_STATUS = 2
 
 
 class ResponseScope(IntEnum):
@@ -183,6 +184,85 @@ class ErrorCategory(IntEnum):
     RETAINED_DATA = 4
     PROTOCOL = 5
     INTERNAL = 6
+
+
+class StatusOrigin(IntEnum):
+    INVALID = 0
+    QUERY_RESPONSE = 1
+    NOTIFICATION = 2
+
+
+class RigState(IntEnum):
+    INVALID = 0
+    INITIALISING = 1
+    IDLE = 2
+    UPLOADING = 3
+    CONFIGURING = 4
+    ARMED = 5
+    RUNNING = 6
+    FINALISING = 7
+    RESULTS_READY = 8
+    TRANSFERRING = 9
+    RECOVERING = 10
+    FAULT = 11
+
+
+class RigStatusFlag(IntEnum):
+    READY_FOR_NEW_TEST = 1
+    TRANSITION_PENDING = 2
+    RESET_PERMITTED = 4
+    EXECUTION_ACTIVE = 8
+
+
+class RunOutcome(IntEnum):
+    INVALID = 0
+    SUCCESS = 1
+    FAILED = 2
+    ABORTED = 3
+    REJECTED = 4
+
+
+class ExecutionOutcome(IntEnum):
+    INVALID = 0
+    NOT_STARTED = 1
+    COMPLETE = 2
+    FAILED = 3
+    ABORTED = 4
+
+
+class RunResultStatus(IntEnum):
+    INVALID = 0
+    COMPLETE = 1
+    PARTIAL = 2
+    UNAVAILABLE = 3
+
+
+class FailureSource(IntEnum):
+    NONE = 0
+    RUN_STATE_MANAGER = 1
+    EXECUTION_MANAGER = 2
+
+
+class FailureStage(IntEnum):
+    NONE = 0
+    PREPARATION = 1
+    EXECUTION = 2
+    CLEANUP = 6
+
+
+class FailureReason(IntEnum):
+    NONE = 0
+    HARDWARE_NOT_READY = 17
+    DRIVER_CONFIGURATION_FAILED = 32
+
+
+class RunReportSection(IntEnum):
+    TERMINAL = 1
+    LAST_COMPLETED_BOUNDARY = 2
+    ISR_TIMING = 4
+    INSTRUCTION_BUFFER = 8
+    RESULT_BUFFER = 16
+    FLASH_THROUGHPUT = 32
 
 
 class TransportStatus(IntEnum):
@@ -293,6 +373,85 @@ class ApplicationErrorMessage:
     tick_number: int | None = None
     detail: int = 0
     diagnostic_data: bytes = b""
+
+
+@dataclass(frozen=True)
+class RunIsrTiming:
+    sample_count: int = 0
+    total_cycles: int = 0
+    minimum_cycles: int = 0
+    maximum_cycles: int = 0
+    maximum_boundary: int = 0
+
+
+@dataclass(frozen=True)
+class RunInstructionBuffer:
+    sample_count: int = 0
+    minimum_unread_bytes: int = 0
+    minimum_boundary: int = 0
+
+
+@dataclass(frozen=True)
+class RunResultBuffer:
+    committed_record_count: int = 0
+    committed_bytes: int = 0
+    peak_pending_bytes: int = 0
+    peak_pending_boundary: int = 0
+    reserve_failure_count: int = 0
+    commit_failure_count: int = 0
+
+
+@dataclass(frozen=True)
+class RunFlashStatistics:
+    result_pages_drained: int = 0
+    result_bytes_drained: int = 0
+    result_drain_total_cycles: int = 0
+    result_drain_maximum_cycles: int = 0
+    instruction_pages_refilled: int = 0
+    instruction_bytes_refilled: int = 0
+    instruction_refill_total_cycles: int = 0
+    instruction_refill_maximum_cycles: int = 0
+    instruction_publish_sample_count: int = 0
+    instruction_publish_total_cycles: int = 0
+    instruction_publish_maximum_cycles: int = 0
+    service_gap_sample_count: int = 0
+    service_gap_total_cycles: int = 0
+    service_gap_maximum_cycles: int = 0
+    refill_drain_contention_count: int = 0
+
+
+@dataclass(frozen=True)
+class RunReport:
+    test_id: TestId
+    run_outcome: RunOutcome
+    execution_outcome: ExecutionOutcome
+    result_status: RunResultStatus
+    expected_tick_count: int
+    tick_period_us: int
+    schema_version: int = 1
+    valid_sections: int = int(RunReportSection.TERMINAL)
+    last_completed_boundary: int = 0
+    result_ticks_emitted: int = 0
+    failure_source: FailureSource = FailureSource.NONE
+    failure_stage: FailureStage = FailureStage.NONE
+    failure_reason: FailureReason = FailureReason.NONE
+    isr_timing: RunIsrTiming = RunIsrTiming()
+    instruction_buffer: RunInstructionBuffer = RunInstructionBuffer()
+    result_buffer: RunResultBuffer = RunResultBuffer()
+    flash: RunFlashStatistics = RunFlashStatistics()
+    extension_data: bytes = b""
+
+
+@dataclass(frozen=True)
+class RigStatus:
+    origin: StatusOrigin
+    state: RigState
+    flags: int = 0
+    test_id: TestId | None = None
+    schema_version: int = 1
+    failure_source: FailureSource = FailureSource.NONE
+    failure_stage: FailureStage = FailureStage.NONE
+    failure_reason: FailureReason = FailureReason.NONE
 
 
 @dataclass(frozen=True)
@@ -489,12 +648,24 @@ class FakeProtocol:
     GlobalControl = GlobalControl
     ApplicationResponse = ApplicationResponse
     ApplicationErrorMessage = ApplicationErrorMessage
+    RunReport = RunReport
+    RigStatus = RigStatus
     ControlCommand = ControlCommand
     GlobalControlCommand = GlobalControlCommand
     ResponseScope = ResponseScope
     ResponseOutcome = ResponseOutcome
     ResponseReason = ResponseReason
     ErrorCategory = ErrorCategory
+    StatusOrigin = StatusOrigin
+    RigState = RigState
+    RigStatusFlag = RigStatusFlag
+    RunOutcome = RunOutcome
+    ExecutionOutcome = ExecutionOutcome
+    RunResultStatus = RunResultStatus
+    RunReportSection = RunReportSection
+    FailureSource = FailureSource
+    FailureStage = FailureStage
+    FailureReason = FailureReason
     TickDuration = TickDuration
     DigitalInputConfig = DigitalInputConfig
     DigitalOutputConfig = DigitalOutputConfig

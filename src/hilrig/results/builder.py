@@ -23,8 +23,11 @@ from hilrig.models.execution import (
 from hilrig.models.identifiers import UploadAttempt, validate_uint128
 from hilrig.results.models import (
     ApplicationErrorRecord,
+    ApplicationResponseRecord,
     CaptureStatus,
     CommunicationResult,
+    RigStatusRecord,
+    RunReportRecord,
     TickResult,
 )
 from hilrig.results.sqlite_store import SQLiteCaptureWriter, initialize_capture_database
@@ -40,6 +43,9 @@ class _ControlRequest:
     action: str
     event: threading.Event
     status: CaptureStatus | None = None
+    report: RunReportRecord | None = None
+    responses: tuple[ApplicationResponseRecord, ...] = ()
+    status_events: tuple[RigStatusRecord, ...] = ()
     error: BaseException | None = None
 
 
@@ -65,6 +71,8 @@ class CapturedRunBuilder:
         run_id: int | None = None,
         application_protocol_version: str | None = None,
         firmware_version: str | None = None,
+        attempt_number: int = 1,
+        started_at: str | None = None,
         batch_size: int = 2_000,
         flush_interval_s: float = 0.025,
         queue_capacity: int = 20_000,
@@ -96,6 +104,8 @@ class CapturedRunBuilder:
             run_id=run_id,
             application_protocol_version=application_protocol_version,
             firmware_version=firmware_version,
+            attempt_number=attempt_number,
+            started_at=started_at,
             batch_size=batch_size,
             flush_interval_s=flush_interval_s,
             queue_capacity=queue_capacity,
@@ -117,6 +127,8 @@ class CapturedRunBuilder:
         run_id: int | None = None,
         application_protocol_version: str | None = None,
         firmware_version: str | None = None,
+        attempt_number: int = 1,
+        started_at: str | None = None,
         batch_size: int = 2_000,
         flush_interval_s: float = 0.025,
         queue_capacity: int = 20_000,
@@ -177,6 +189,8 @@ class CapturedRunBuilder:
                 name="application_protocol_version",
             ),
             firmware_version=_optional_text(firmware_version, name="firmware_version"),
+            attempt_number=_positive_int(attempt_number, name="attempt_number"),
+            started_at=_optional_text(started_at, name="started_at"),
         )
 
         self._queue: queue.Queue[_QueueItem] = queue.Queue(maxsize=capacity)
@@ -242,7 +256,14 @@ class CapturedRunBuilder:
         self._submit(request)
         self._wait_for(request)
 
-    def finalize(self, *, status: CaptureStatus | None = None) -> CapturedRunIR:
+    def finalize(
+        self,
+        *,
+        status: CaptureStatus | None = None,
+        report: RunReportRecord | None = None,
+        responses: Sequence[ApplicationResponseRecord] = (),
+        status_events: Sequence[RigStatusRecord] = (),
+    ) -> CapturedRunIR:
         """Flush, mark the run terminal, stop the writer, and open the read-only IR.
 
         With no explicit status, a run is ``COMPLETE`` only when it contains every
@@ -252,7 +273,22 @@ class CapturedRunBuilder:
         """
         if status is not None and not isinstance(status, CaptureStatus):
             raise TypeError("status must be a CaptureStatus value or None")
-        request = _ControlRequest(action="finalize", event=threading.Event(), status=status)
+        if report is not None and not isinstance(report, RunReportRecord):
+            raise TypeError("report must be a RunReportRecord or None")
+        response_records = tuple(responses)
+        status_records = tuple(status_events)
+        if any(not isinstance(item, ApplicationResponseRecord) for item in response_records):
+            raise TypeError("responses must contain ApplicationResponseRecord values")
+        if any(not isinstance(item, RigStatusRecord) for item in status_records):
+            raise TypeError("status_events must contain RigStatusRecord values")
+        request = _ControlRequest(
+            action="finalize",
+            event=threading.Event(),
+            status=status,
+            report=report,
+            responses=response_records,
+            status_events=status_records,
+        )
         with self._state_lock:
             self._raise_worker_error()
             if not self._accepting:
@@ -376,7 +412,12 @@ class CapturedRunBuilder:
                         active_request = item
                         flush_pending()
                         if item.action == "finalize":
-                            writer.finalize(item.status)
+                            writer.finalize(
+                                item.status,
+                                report=item.report,
+                                responses=item.responses,
+                                status_events=item.status_events,
+                            )
                             item.event.set()
                             active_request = None
                             return

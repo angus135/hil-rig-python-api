@@ -246,8 +246,10 @@ Application workflow retains response-bearing operations until their correlated
 semantic response arrives. Variable-family tick updates advance after submission and
 whole-upload acceptance is established by `FINALIZE_TEST_UPLOAD`.
 
-Every connection begins with BASIC System Information discovery and
-an exact major/minor/patch compatibility check. `UploadPlan` then supplies ordered,
+Every connection begins with BASIC System Information discovery, an exact
+major/minor/patch compatibility check, and readiness confirmation from either a status
+notification or GET_STATUS query. A notification cannot satisfy an outstanding query.
+`UploadPlan` then supplies ordered,
 immutable operations containing their wire-message group and response-correlation
 metadata. The control-gated sequence is Test Configuration, non-consecutive sparse
 ticks (streamed without per-tick Application Response overhead),
@@ -258,9 +260,12 @@ finalization and Complete Test acceptance remain automatic. `continue_upload()`
 switches the remaining plan back to automatic advancement without bypassing required
 acknowledgements. EXTERNAL_TRIGGER
 remains in the protocol-neutral IR but has no protocol behavior. ABORT and
-RESET_APPLICATION use the same single-outstanding-operation mechanism. A serial error,
-response timeout, negative response, family mismatch, or correlation mismatch abandons
-the workflow; an upload is never blindly replayed.
+RESET_APPLICATION use the same single-outstanding-operation mechanism. Finalization
+establishes a Run Report obligation. Finalization and START rejections are retained as
+supporting evidence while the connection continues receiving; only a matching Run Report
+classifies and terminates the attempt. Result count and Application Errors never replace
+that report. Serial errors, response timeouts, family mismatches, and correlation
+mismatches still abandon the workflow; an upload is never blindly replayed.
 
 ## Captured-run boundary
 
@@ -269,6 +274,12 @@ complete Application `TestResult` or `VariableTestResult` into one `TickResult` 
 adds raw UART, SPI, and CAN records as `CommunicationResult` values. Decoded Application
 Errors become `ApplicationErrorRecord` values. These typed storage records have no
 dependency on CFFI objects or USB framing.
+
+The capture database also stores the complete Run Report, raw report bytes, lifecycle
+responses, status events, attempt number, and host collection-integrity issues. Diagnostic
+sections are exposed only when selected by the report's `valid_sections` mask. The stored
+complete-tick count is reconciled with `result_ticks_emitted`; a mismatch is a host-side
+integrity issue and never rewrites the firmware's outcome triplet or failure provenance.
 
 `TickResult` currently mirrors the stable semantic content identified in the
 application design:
@@ -325,6 +336,8 @@ The SQLite file is authoritative and schema-versioned:
 
 - `run_metadata` contains the logical test ID, Application Test ID, run ID, timing,
   provenance, live tick counts, and state;
+- `run_report`, `lifecycle_responses`, `rig_status_events`, and
+  `collection_integrity_issues` retain terminal firmware and host-collection evidence;
 - `assertion_sets` identifies versioned immutable assertion snapshots;
 - `assertion_definitions` stores compiled operations and JSON-encoded scalar arguments;
 - `tick_results` contains one wide row per tick rather than one row per channel;
@@ -355,6 +368,7 @@ needed.
 The IR derives optional review artifacts while keeping bulk values out of JSON:
 
 - a small JSON manifest;
+- a human-readable run-metadata Markdown report;
 - a wide fixed-results CSV;
 - a raw communication-results CSV;
 - an application-errors CSV.

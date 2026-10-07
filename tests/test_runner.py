@@ -5,7 +5,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from protocol_fakes import FakeProtocol, FinalizeTestUpload
+from protocol_fakes import (
+    ApplicationResponse,
+    FakeProtocol,
+    FinalizeTestUpload,
+    GlobalControlCommand,
+    ResponseOutcome,
+    ResponseReason,
+    ResponseScope,
+)
 
 from hilrig import (
     ApplicationErrorRecord,
@@ -13,6 +21,7 @@ from hilrig import (
     ManualSendResult,
     ProtocolSessionError,
     PWMMeasurement,
+    RunReportRecord,
     TickResult,
 )
 from hilrig.protocol import ProtocolWorkflowState, UploadAdvanceMode, UploadOperationKind
@@ -53,10 +62,15 @@ class _AutomaticConnection:
         block_results: bool = False,
         application_errors: tuple[ApplicationErrorRecord, ...] = (),
         fail_during_upload: bool = False,
+        reset_responses: tuple[tuple[ResponseOutcome, ResponseReason], ...] = (),
+        reported_outcome: str = "SUCCESS",
     ) -> None:
         self.block_results = block_results
         self.application_errors = application_errors
         self.fail_during_upload = fail_during_upload
+        self.reset_responses = list(reset_responses)
+        self.reset_attempts = 0
+        self.reported_outcome = reported_outcome
         self._accumulated_errors: list[ApplicationErrorRecord] = []
         self.last_error = None
         self.session_confirmed = False
@@ -64,6 +78,14 @@ class _AutomaticConnection:
         self.workflow_state = ProtocolWorkflowState.CONNECTING
         self.active_upload = None
         self.results_complete = False
+        self.report_received = False
+        self.report_timed_out = False
+        self.run_report = None
+        self.lifecycle_responses = ()
+        self.status_events = ()
+        self.ready_for_upload = True
+        self.protocol = FakeProtocol
+        self.last_application_response = None
         self.builder = None
         self.compiled = None
         self.start_called = False
@@ -87,7 +109,7 @@ class _AutomaticConnection:
         if not self.session_confirmed:
             self.session_confirmed = True
             self.session_info = SimpleNamespace(
-                protocol_version="0.3.1",
+                protocol_version="0.4.0",
                 firmware_version="1.2.3",
             )
             self.workflow_state = ProtocolWorkflowState.READY
@@ -103,6 +125,16 @@ class _AutomaticConnection:
                 )
                 self._accumulated_errors.append(err)
                 raise ProtocolSessionError(self.last_error)
+            if self.reported_outcome == "REJECTED":
+                self.run_report = self._report(
+                    run_outcome="REJECTED",
+                    execution_outcome="NOT_STARTED",
+                    result_status="UNAVAILABLE",
+                    emitted=0,
+                )
+                self.workflow_state = ProtocolWorkflowState.REPORT_RECEIVED
+                self.report_received = True
+                return self._service_report()
             if self.advance_mode is UploadAdvanceMode.OPERATOR_GATED:
                 self.next_upload_operation = SimpleNamespace(
                     kind=UploadOperationKind.START,
@@ -119,10 +151,65 @@ class _AutomaticConnection:
             stored = tuple(_tick_result(tick) for tick in range(self.compiled.expected_tick_count))
             for result in stored:
                 self.builder.add_tick_result(result)
-            self.workflow_state = ProtocolWorkflowState.RESULTS_COMPLETE
+            self.run_report = self._report(
+                run_outcome="SUCCESS",
+                execution_outcome="COMPLETE",
+                result_status="COMPLETE",
+                emitted=self.compiled.expected_tick_count,
+            )
+            self.workflow_state = ProtocolWorkflowState.REPORT_RECEIVED
             self.results_complete = True
+            self.report_received = True
+        elif self.workflow_state is ProtocolWorkflowState.RESETTING:
+            outcome, reason = (
+                self.reset_responses.pop(0)
+                if self.reset_responses
+                else (ResponseOutcome.COMPLETED, ResponseReason.NONE)
+            )
+            self.last_application_response = ApplicationResponse(
+                test_id=None,
+                scope=ResponseScope.GLOBAL_CONTROL,
+                outcome=outcome,
+                reason=reason,
+                global_control_command=GlobalControlCommand.RESET_APPLICATION,
+            )
+            self.workflow_state = ProtocolWorkflowState.REPORT_RECEIVED
+            if outcome is ResponseOutcome.COMPLETED:
+                self.workflow_state = ProtocolWorkflowState.READY
+                self.ready_for_upload = True
         elif self.workflow_state is ProtocolWorkflowState.ABORTING:
             self.workflow_state = ProtocolWorkflowState.ABORTED
+        return self._service_report(stored=stored, errors=errors)
+
+    def _report(
+        self,
+        *,
+        run_outcome: str,
+        execution_outcome: str,
+        result_status: str,
+        emitted: int,
+    ) -> RunReportRecord:
+        return RunReportRecord(
+            schema_version=1,
+            valid_sections=1,
+            run_outcome=run_outcome,
+            execution_outcome=execution_outcome,
+            result_status=result_status,
+            expected_tick_count=self.compiled.expected_tick_count,
+            tick_period_us=self.compiled.tick_period_ns // 1000,
+            last_completed_boundary=None,
+            result_ticks_emitted=emitted,
+            failure_source="NONE",
+            failure_stage="NONE",
+            failure_reason="NONE",
+            isr_timing=None,
+            instruction_buffer=None,
+            result_buffer=None,
+            flash=None,
+        )
+
+    @staticmethod
+    def _service_report(*, stored=(), errors=()):
         return SimpleNamespace(
             stored_tick_results=stored,
             stored_application_errors=errors,
@@ -182,6 +269,15 @@ class _AutomaticConnection:
         self.abort_called = True
         self.workflow_state = ProtocolWorkflowState.ABORTING
 
+    def reset_application(self) -> None:
+        self.reset_attempts += 1
+        self.ready_for_upload = False
+        self.workflow_state = ProtocolWorkflowState.RESETTING
+
+    def get_status(self) -> None:
+        self.ready_for_upload = True
+        self.workflow_state = ProtocolWorkflowState.READY
+
     def close(self) -> None:
         self.closed = True
 
@@ -205,7 +301,7 @@ class _ManualConnection:
             self.session_confirmed = True
             if not self.skip_system_info:
                 self.session_info = SimpleNamespace(
-                    protocol_version="0.3.1",
+                    protocol_version="0.4.0",
                     firmware_version="1.2.3",
                 )
         elif self.pending is not None:
@@ -303,6 +399,7 @@ def test_worker_runs_test_writes_artifacts_and_accepts_another_run(tmp_path: Pat
             "test-review.xlsx",
             "captured-run.sqlite3",
             "run-manifest.json",
+            "run-metadata.md",
             "fixed-results.csv",
             "communication-results.csv",
             "application-errors.csv",
@@ -317,6 +414,76 @@ def test_worker_runs_test_writes_artifacts_and_accepts_another_run(tmp_path: Pat
         assert second.state is WorkerState.COMPLETED
         assert second.output_directory != first.output_directory
         assert len(connections) == 2
+    finally:
+        worker.shutdown()
+
+
+def test_worker_retries_reset_while_hardware_cleanup_is_finishing(tmp_path: Path) -> None:
+    definition = _write_test_file(tmp_path / "reset-retry.py")
+    connection = _AutomaticConnection(
+        reset_responses=(
+            (ResponseOutcome.REJECTED, ResponseReason.HARDWARE_NOT_READY),
+            (ResponseOutcome.COMPLETED, ResponseReason.NONE),
+        )
+    )
+    worker = ProtocolWorker(connection_factory=lambda: connection, poll_interval_s=0)
+    try:
+        assert worker.submit(definition)
+        assert worker.wait_until_idle(5)
+        assert worker.snapshot().state is WorkerState.COMPLETED
+        assert connection.reset_attempts == 2
+    finally:
+        worker.shutdown()
+
+
+def test_worker_keeps_reports_when_reset_recovery_is_exhausted(tmp_path: Path) -> None:
+    definition = _write_test_file(tmp_path / "reset-fails.py")
+    connection = _AutomaticConnection(
+        reset_responses=(
+            (ResponseOutcome.REJECTED, ResponseReason.HARDWARE_NOT_READY),
+            (ResponseOutcome.REJECTED, ResponseReason.HARDWARE_NOT_READY),
+            (ResponseOutcome.REJECTED, ResponseReason.HARDWARE_NOT_READY),
+            (ResponseOutcome.REJECTED, ResponseReason.HARDWARE_NOT_READY),
+        )
+    )
+    worker = ProtocolWorker(
+        connection_factory=lambda: connection,
+        poll_interval_s=0,
+        reset_retry_delay_s=0,
+    )
+    try:
+        assert worker.submit(definition)
+        assert worker.wait_until_idle(5)
+        snapshot = worker.snapshot()
+
+        assert snapshot.state is WorkerState.FAILED
+        assert snapshot.output_directory is not None
+        assert (snapshot.output_directory / "captured-run.sqlite3").is_file()
+        assert (snapshot.output_directory / "run-metadata.md").is_file()
+        assert (snapshot.output_directory / "evaluation-report.md").is_file()
+        failure = (snapshot.output_directory / "run-error.txt").read_text(encoding="utf-8")
+        assert "RecoveryError" in failure
+    finally:
+        worker.shutdown()
+
+
+def test_worker_returns_rejected_report_as_completed_attempt(tmp_path: Path) -> None:
+    definition = _write_test_file(tmp_path / "rejected.py")
+    connection = _AutomaticConnection(reported_outcome="REJECTED")
+    worker = ProtocolWorker(connection_factory=lambda: connection, poll_interval_s=0)
+    try:
+        assert worker.submit(definition)
+        assert worker.wait_until_idle(5)
+        snapshot = worker.snapshot()
+        assert snapshot.state is WorkerState.COMPLETED
+        assert "REJECTED" in snapshot.detail
+        database = snapshot.output_directory / "captured-run.sqlite3"
+        from hilrig import CapturedRunIR
+
+        captured = CapturedRunIR.open(database)
+        assert captured.report.run_outcome == "REJECTED"
+        assert captured.report.execution_outcome == "NOT_STARTED"
+        assert captured.report.result_status == "UNAVAILABLE"
     finally:
         worker.shutdown()
 
@@ -337,6 +504,7 @@ def test_worker_abort_retains_partial_capture(tmp_path: Path) -> None:
         assert connection.closed
         assert snapshot.output_directory is not None
         assert (snapshot.output_directory / "captured-run.sqlite3").is_file()
+        assert (snapshot.output_directory / "run-metadata.md").is_file()
         assert (snapshot.output_directory / "evaluation-report.md").is_file()
     finally:
         worker.shutdown()

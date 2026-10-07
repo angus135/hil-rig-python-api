@@ -57,6 +57,14 @@ class ProtocolSessionError(ProtocolIntegrationError):
     """A protocol or serial session could not continue safely."""
 
 
+class RunReportTimeoutError(ProtocolSessionError):
+    """Firmware did not provide the authoritative report for an owed attempt."""
+
+
+class RecoveryError(ProtocolIntegrationError):
+    """The RIG could not be reset to a state that safely admits another test."""
+
+
 class EvaluationError(HilRigError):
     """A captured run could not be evaluated safely."""
 

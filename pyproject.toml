@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "Host-side API for defining and compiling HIL-RIG hardware tests"
 requires-python = ">=3.12"
 dependencies = [
+    "hil-rig-protocol==0.4.0",
     "prompt_toolkit>=3.0.43",
+    "pyserial>=3.5",
 ]
 
 [project.scripts]
@@ -33,6 +35,7 @@ hilrig = ["py.typed"]
 
 [tool.pytest.ini_options]
 addopts = ["-ra", "--strict-config", "--strict-markers"]
+pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.coverage.run]

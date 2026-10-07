@@ -286,13 +286,15 @@ payload length, handles decoded messages, writes as much queued output as possib
 and returns a `ProtocolServiceReport`.
 
 Configuration, finalization, START, ABORT, and RESET_APPLICATION wait for correctly
-correlated Application Responses. Variable-family tick updates do not have per-tick
-responses. A response timeout, rejection, correlation mismatch, serial error, or wrong
-result family fails the workflow safely.
+correlated Application Responses. GET_STATUS completes with a query-origin RigStatus,
+not an Application Response. Variable-family tick updates do not have per-tick responses.
+After finalization begins, finalization and START rejections remain supporting events and
+the matching Run Report is the authoritative terminal event. A response timeout,
+correlation mismatch, serial error, or wrong result family fails the workflow safely.
 
-Each connection first requests System Information and checks the exact protocol
-version. Manual mode may explicitly skip that Application-level check, but still opens
-and services the serial connection.
+Each connection first requests System Information, checks protocol v0.4.0 exactly, and
+confirms the RIG readiness flags before uploading. Manual mode may explicitly skip that
+Application-level check, but still opens and services the serial connection.
 
 ## Thread ownership
 
@@ -333,6 +335,8 @@ explicit status, a complete range becomes `COMPLETE`; otherwise it becomes
 The SQLite database is the authoritative result. Its main tables are:
 
 - `run_metadata`
+- `run_report`, `lifecycle_responses`, `rig_status_events`, and
+  `collection_integrity_issues`
 - `assertion_sets` and `assertion_definitions`
 - `tick_results`
 - `communication_results`
@@ -345,6 +349,8 @@ are sparse and differently sized.
 `CapturedRunIR` is the read-only access layer. Callers should use its tick, channel,
 communication, error, and assertion-set methods instead of writing SQL. Range queries
 stream rows, so large captures do not need to be loaded fully into memory.
+It also exposes the firmware Run Report and lifecycle/status evidence, and can write a
+human-readable `run-metadata.md` report alongside the JSON manifest.
 
 The current captured-result schema version is 1.2. The source of truth is
 `results/models.py`. Older unsupported schemas are rejected; there is no automatic
@@ -511,7 +517,8 @@ When debugging an end-to-end failure, follow the same direction as the main flow
 
 1. Inspect the compiled JSON/Excel to confirm the definition.
 2. Inspect the connection workflow state and last Application response.
-3. Inspect `run-manifest.json` and capture metadata for counts and status.
+3. Inspect `run-metadata.md` for the operator summary, or `run-manifest.json` and
+   capture metadata for machine-readable counts and status.
 4. Query the SQLite file through `CapturedRunIR` for missing or invalid ticks.
 5. Read the evaluation report for the exact evidence used by each assertion.
 

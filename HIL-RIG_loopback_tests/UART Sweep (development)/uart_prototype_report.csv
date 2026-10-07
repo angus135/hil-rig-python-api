@@ -1,0 +1,3 @@
+sweep,config_id,config_name,frequency_hz,ceiling_or_burst,soak_passed,total_runs,total_ticks,limiting_domain,limiting_reason
+Sweep 1 (Utilization),0,0 — UART2 Max-Baud Prototype,10000,100.0,True,12,820000,,
+Sweep 2 (Burstiness),0,0 — UART2 Max-Baud Prototype,10000,100,False,14,860000,,

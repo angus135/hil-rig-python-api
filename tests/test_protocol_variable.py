@@ -1019,9 +1019,15 @@ def _drive_fake_variable_rig_to_state(
     from protocol_fakes import (
         ApplicationResponse,
         FinalizeTestUpload,
+        GlobalControl,
+        GlobalControlCommand,
         ProtocolVersion,
         ResponseOutcome,
         ResponseScope,
+        RigState,
+        RigStatus,
+        RigStatusFlag,
+        StatusOrigin,
         SystemInfoRequest,
         SystemInfoResponse,
         TestConfiguration,
@@ -1065,6 +1071,16 @@ def _drive_fake_variable_rig_to_state(
                         request.test_id,
                         ResponseScope.COMPLETE_TEST,
                         ResponseOutcome.ACCEPTED,
+                    )
+                ]
+            elif type(request) is GlobalControl:
+                assert request.command is GlobalControlCommand.GET_STATUS
+                responses = [
+                    RigStatus(
+                        origin=StatusOrigin.QUERY_RESPONSE,
+                        state=RigState.IDLE,
+                        flags=int(RigStatusFlag.READY_FOR_NEW_TEST)
+                        | int(RigStatusFlag.RESET_PERMITTED),
                     )
                 ]
             else:

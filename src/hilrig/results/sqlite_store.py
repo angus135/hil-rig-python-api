@@ -23,15 +23,19 @@ from hilrig.results.models import (
     ORIGINAL_ASSERTION_SET_ID,
     RESULT_IR_SCHEMA_VERSION,
     ApplicationErrorRecord,
+    ApplicationResponseRecord,
     CapturedApplicationError,
     CapturedAssertionSet,
     CapturedRunMetadata,
     CapturedTickResult,
     CaptureStatus,
+    CollectionIntegrityIssue,
     CommunicationCapture,
     CommunicationPeripheral,
     CommunicationResult,
     PWMMeasurement,
+    RigStatusRecord,
+    RunReportRecord,
     TickCondition,
     TickResult,
 )
@@ -57,7 +61,62 @@ CREATE TABLE run_metadata (
     created_at TEXT NOT NULL,
     finalized_at TEXT,
     application_protocol_version TEXT,
-    firmware_version TEXT
+    firmware_version TEXT,
+    attempt_number INTEGER NOT NULL DEFAULT 1 CHECK (attempt_number > 0),
+    started_at TEXT,
+    completed_at TEXT
+);
+
+CREATE TABLE run_report (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    schema_version INTEGER NOT NULL,
+    valid_sections INTEGER NOT NULL,
+    run_outcome TEXT NOT NULL,
+    execution_outcome TEXT NOT NULL,
+    result_status TEXT NOT NULL,
+    expected_tick_count INTEGER NOT NULL,
+    tick_period_us INTEGER NOT NULL,
+    last_completed_boundary INTEGER,
+    result_ticks_emitted INTEGER NOT NULL,
+    failure_source TEXT NOT NULL,
+    failure_stage TEXT NOT NULL,
+    failure_reason TEXT NOT NULL,
+    isr_timing_json TEXT,
+    instruction_buffer_json TEXT,
+    result_buffer_json TEXT,
+    flash_json TEXT,
+    extension_data BLOB NOT NULL,
+    raw_report BLOB NOT NULL
+);
+
+CREATE TABLE lifecycle_responses (
+    response_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    detail INTEGER NOT NULL,
+    tick INTEGER,
+    control_command TEXT,
+    global_control_command TEXT
+);
+
+CREATE TABLE rig_status_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    origin TEXT NOT NULL,
+    state TEXT NOT NULL,
+    flags INTEGER NOT NULL,
+    application_test_id_hex TEXT,
+    schema_version INTEGER NOT NULL,
+    failure_source TEXT NOT NULL,
+    failure_stage TEXT NOT NULL,
+    failure_reason TEXT NOT NULL,
+    observed_at TEXT NOT NULL
+);
+
+CREATE TABLE collection_integrity_issues (
+    issue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL,
+    detail TEXT NOT NULL
 );
 
 CREATE TABLE assertion_sets (
@@ -216,8 +275,12 @@ _REQUIRED_TABLES = frozenset(
         "assertion_groups",
         "assertion_sets",
         "communication_results",
+        "collection_integrity_issues",
+        "lifecycle_responses",
         "result_ir_schema",
+        "rig_status_events",
         "run_metadata",
+        "run_report",
         "stimulus_definitions",
         "tick_results",
     }
@@ -239,6 +302,8 @@ def initialize_capture_database(
     compiled_assertions: Sequence[CompiledAssertion],
     application_protocol_version: str | None,
     firmware_version: str | None,
+    attempt_number: int = 1,
+    started_at: str | None = None,
 ) -> None:
     """Create a new capture database without overwriting an existing file."""
     resolved = path.expanduser().resolve()
@@ -263,8 +328,9 @@ def initialize_capture_database(
                 singleton, test_id_hex, application_test_id_hex, run_id_hex,
                 test_name, tick_period_ns,
                 expected_tick_count, status, created_at,
-                application_protocol_version, firmware_version
-            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                application_protocol_version, firmware_version,
+                attempt_number, started_at
+            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 f"{test_id:032x}",
@@ -277,6 +343,8 @@ def initialize_capture_database(
                 _utc_now(),
                 application_protocol_version,
                 firmware_version,
+                attempt_number,
+                started_at,
             ),
         )
         assertion_set_created_at = _utc_now()
@@ -400,7 +468,14 @@ class SQLiteCaptureWriter:
             self._connection.rollback()
             raise CaptureStorageError(f"Could not commit captured result batch: {error}") from error
 
-    def finalize(self, requested_status: CaptureStatus | None) -> CaptureStatus:
+    def finalize(
+        self,
+        requested_status: CaptureStatus | None,
+        *,
+        report: RunReportRecord | None = None,
+        responses: Sequence[ApplicationResponseRecord] = (),
+        status_events: Sequence[RigStatusRecord] = (),
+    ) -> CaptureStatus:
         """Mark the capture terminal and return the status written to metadata."""
         row = self._connection.execute(
             """
@@ -419,6 +494,17 @@ class SQLiteCaptureWriter:
         fixed_ticks_complete = (
             received == expected and first_tick == 0 and last_tick == expected - 1
         )
+        issues: list[CollectionIntegrityIssue] = []
+        if report is not None and received != report.result_ticks_emitted:
+            issues.append(
+                CollectionIntegrityIssue(
+                    code="result_tick_count_mismatch",
+                    detail=(
+                        f"Host stored {received} complete result ticks, but the Run Report "
+                        f"states that firmware emitted {report.result_ticks_emitted}."
+                    ),
+                )
+            )
         status = requested_status or (
             CaptureStatus.COMPLETE if fixed_ticks_complete else CaptureStatus.INCOMPLETE
         )
@@ -428,11 +514,102 @@ class SQLiteCaptureWriter:
             raise CaptureStorageError(
                 "A capture cannot be marked complete until every expected fixed tick is stored"
             )
-        self._connection.execute(
-            "UPDATE run_metadata SET status = ?, finalized_at = ? WHERE singleton = 1",
-            (status.value, _utc_now()),
-        )
-        self._connection.commit()
+        completed_at = _utc_now()
+        try:
+            self._connection.execute("BEGIN")
+            if report is not None:
+                self._connection.execute(
+                    """
+                    INSERT INTO run_report (
+                        singleton, schema_version, valid_sections, run_outcome,
+                        execution_outcome, result_status, expected_tick_count,
+                        tick_period_us, last_completed_boundary, result_ticks_emitted,
+                        failure_source, failure_stage, failure_reason, isr_timing_json,
+                        instruction_buffer_json, result_buffer_json, flash_json,
+                        extension_data, raw_report
+                    ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        report.schema_version,
+                        report.valid_sections,
+                        report.run_outcome,
+                        report.execution_outcome,
+                        report.result_status,
+                        report.expected_tick_count,
+                        report.tick_period_us,
+                        report.last_completed_boundary,
+                        report.result_ticks_emitted,
+                        report.failure_source,
+                        report.failure_stage,
+                        report.failure_reason,
+                        _json_or_none(report.isr_timing),
+                        _json_or_none(report.instruction_buffer),
+                        _json_or_none(report.result_buffer),
+                        _json_or_none(report.flash),
+                        sqlite3.Binary(report.extension_data),
+                        sqlite3.Binary(report.raw_bytes),
+                    ),
+                )
+            self._connection.executemany(
+                """
+                INSERT INTO lifecycle_responses (
+                    scope, outcome, reason, detail, tick,
+                    control_command, global_control_command
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    (
+                        item.scope,
+                        item.outcome,
+                        item.reason,
+                        item.detail,
+                        item.tick,
+                        item.control_command,
+                        item.global_control_command,
+                    )
+                    for item in responses
+                ),
+            )
+            self._connection.executemany(
+                """
+                INSERT INTO rig_status_events (
+                    origin, state, flags, application_test_id_hex, schema_version,
+                    failure_source, failure_stage, failure_reason, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    (
+                        item.origin,
+                        item.state,
+                        item.flags,
+                        None
+                        if item.application_test_id is None
+                        else f"{item.application_test_id:032x}",
+                        item.schema_version,
+                        item.failure_source,
+                        item.failure_stage,
+                        item.failure_reason,
+                        item.observed_at,
+                    )
+                    for item in status_events
+                ),
+            )
+            self._connection.executemany(
+                "INSERT INTO collection_integrity_issues (code, detail) VALUES (?, ?)",
+                ((item.code, item.detail) for item in issues),
+            )
+            self._connection.execute(
+                """
+                UPDATE run_metadata
+                SET status = ?, finalized_at = ?, completed_at = ?
+                WHERE singleton = 1
+                """,
+                (status.value, completed_at, completed_at),
+            )
+            self._connection.commit()
+        except sqlite3.Error as error:
+            self._connection.rollback()
+            raise CaptureStorageError(f"Could not finalize captured attempt: {error}") from error
         return status
 
     def close(self) -> None:
@@ -470,7 +647,10 @@ def read_metadata(path: Path) -> CapturedRunMetadata:
                 m.created_at,
                 m.finalized_at,
                 m.application_protocol_version,
-                m.firmware_version
+                m.firmware_version,
+                m.attempt_number,
+                m.started_at,
+                m.completed_at
             FROM run_metadata AS m
             JOIN result_ir_schema AS s ON s.singleton = 1
             WHERE m.singleton = 1
@@ -494,7 +674,83 @@ def read_metadata(path: Path) -> CapturedRunMetadata:
         finalized_at=row[12],
         application_protocol_version=row[13],
         firmware_version=row[14],
+        attempt_number=row[15],
+        started_at=row[16],
+        completed_at=row[17],
     )
+
+
+def read_run_report(path: Path) -> RunReportRecord | None:
+    """Read the terminal firmware report, if the attempt has one."""
+    with closing(_read_connection(path)) as connection:
+        row = connection.execute("SELECT * FROM run_report WHERE singleton = 1").fetchone()
+    if row is None:
+        return None
+    return RunReportRecord(
+        schema_version=row[1],
+        valid_sections=row[2],
+        run_outcome=row[3],
+        execution_outcome=row[4],
+        result_status=row[5],
+        expected_tick_count=row[6],
+        tick_period_us=row[7],
+        last_completed_boundary=row[8],
+        result_ticks_emitted=row[9],
+        failure_source=row[10],
+        failure_stage=row[11],
+        failure_reason=row[12],
+        isr_timing=_json_mapping_or_none(row[13]),
+        instruction_buffer=_json_mapping_or_none(row[14]),
+        result_buffer=_json_mapping_or_none(row[15]),
+        flash=_json_mapping_or_none(row[16]),
+        extension_data=bytes(row[17]),
+        raw_bytes=bytes(row[18]),
+    )
+
+
+def iter_lifecycle_responses(path: Path) -> Iterator[ApplicationResponseRecord]:
+    with closing(_read_connection(path)) as connection:
+        rows = connection.execute(
+            """
+            SELECT scope, outcome, reason, detail, tick,
+                   control_command, global_control_command
+            FROM lifecycle_responses ORDER BY response_id
+            """
+        ).fetchall()
+    return iter(ApplicationResponseRecord(*row) for row in rows)
+
+
+def iter_rig_status_events(path: Path) -> Iterator[RigStatusRecord]:
+    with closing(_read_connection(path)) as connection:
+        rows = connection.execute(
+            """
+            SELECT origin, state, flags, application_test_id_hex, schema_version,
+                   failure_source, failure_stage, failure_reason, observed_at
+            FROM rig_status_events ORDER BY event_id
+            """
+        ).fetchall()
+    return iter(
+        RigStatusRecord(
+            origin=row[0],
+            state=row[1],
+            flags=row[2],
+            application_test_id=None if row[3] is None else int(row[3], 16),
+            schema_version=row[4],
+            failure_source=row[5],
+            failure_stage=row[6],
+            failure_reason=row[7],
+            observed_at=row[8],
+        )
+        for row in rows
+    )
+
+
+def iter_collection_integrity_issues(path: Path) -> Iterator[CollectionIntegrityIssue]:
+    with closing(_read_connection(path)) as connection:
+        rows = connection.execute(
+            "SELECT code, detail FROM collection_integrity_issues ORDER BY issue_id"
+        ).fetchall()
+    return iter(CollectionIntegrityIssue(*row) for row in rows)
 
 
 def read_assertion_set(path: Path, assertion_set_id: str) -> CapturedAssertionSet:
@@ -991,3 +1247,16 @@ def _pwm_measurement(period_ns: object, duty_permyriad: object) -> PWMMeasuremen
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _json_or_none(value: dict[str, int] | None) -> str | None:
+    return None if value is None else json.dumps(value, sort_keys=True)
+
+
+def _json_mapping_or_none(value: object) -> dict[str, int] | None:
+    if value is None:
+        return None
+    decoded = json.loads(str(value))
+    if not isinstance(decoded, dict):
+        raise CaptureSchemaError("Stored Run Report diagnostic section is not an object")
+    return {str(key): int(item) for key, item in decoded.items()}

@@ -70,7 +70,9 @@ Utilization and equal-exposure comparisons use `stimulus_ticks`; no new traffic 
 | Discovery stimulus | 200 ticks | 2,000 ticks | 20,000 ticks |
 | Boundary-confirmation stimulus | 1,000 ticks | 10,000 ticks | 100,000 ticks |
 | 60-second soak stimulus | 6,000 ticks | 60,000 ticks | 600,000 ticks |
-| 5-minute soak stimulus | 30,000 ticks | 300,000 ticks | 3,000,000 ticks |
+| Extended soak stimulus | 30,000 ticks (5m) | 300,000 ticks (5m) | 900,000 ticks (90s)* |
+
+\* At 10 kHz, extended soak is capped at 900,000 ticks (90 seconds / 900k samples) to keep `expected_tick_count` safely below the protocol engine ceiling of `< 1,000,000` ticks (which includes settling time).
 
 `drain_ticks` is calculated per compiled workload from the final commanded traffic, cumulative peripheral service time, and the configured receive-observation allowance. It is stored separately in the run manifest.
 
