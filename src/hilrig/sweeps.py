@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 import io
-import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -17,8 +16,6 @@ from hilrig.workloads import (
     LoopbackConfiguration,
     LoopbackWorkloadPoint,
     check_workload_admissibility,
-    compile_configuration_workload,
-    get_exposure_duration_s,
     workload_point_for_exposure,
 )
 
@@ -392,12 +389,8 @@ class UtilizationBinarySearch:
             for percentage, outcomes in sorted(self._outcomes.items())
         )
         return UtilizationSearchResult(
-            highest_passing_percent=(
-                None if self._lower_pass is None else float(self._lower_pass)
-            ),
-            lowest_failing_percent=(
-                None if self._upper_fail is None else float(self._upper_fail)
-            ),
+            highest_passing_percent=(None if self._lower_pass is None else float(self._lower_pass)),
+            lowest_failing_percent=(None if self._upper_fail is None else float(self._upper_fail)),
             observations=observations,
         )
 
@@ -464,9 +457,7 @@ class UtilizationCeilingSweep:
         confirmation_repeats: int = 1,
         resolution_percent: float = 1.0,
         soak_headroom_fraction: float = 1.0,
-        soak_exposures: tuple[ExposureClass, ...] = (
-            ExposureClass.SOAK_60S,
-        ),
+        soak_exposures: tuple[ExposureClass, ...] = (ExposureClass.SOAK_60S,),
     ) -> None:
         self.config = config
         self.frequency_hz = frequency_hz
@@ -648,7 +639,8 @@ class UtilizationCeilingSweep:
                     if backoff_count < 2 and self._confirmed_ceiling is not None:
                         self._backoff_soak_count = backoff_count + 1
                         lower_candidates = [
-                            p for p in sorted(self._outcomes_by_pct.keys(), reverse=True)
+                            p
+                            for p in sorted(self._outcomes_by_pct.keys(), reverse=True)
                             if p < self._confirmed_ceiling and all(self._outcomes_by_pct[p])
                         ]
                         if lower_candidates:
@@ -721,16 +713,15 @@ class UtilizationCeilingSweep:
         stable_pass: float | None = None
         for pct in sorted(self._outcomes_by_pct.keys(), reverse=True):
             outcomes = self._outcomes_by_pct[pct]
-            if len(outcomes) >= (len(self.confirmation_seeds) * self.confirmation_repeats):
-                if all(outcomes):
-                    stable_pass = pct
-                    break
+            if len(outcomes) >= (len(self.confirmation_seeds) * self.confirmation_repeats) and all(
+                outcomes
+            ):
+                stable_pass = pct
+                break
 
         if stable_pass is None:
             # Fall back to best coarse pass; if not yet confirmed, confirm it (max 2 backoffs)
-            passing_pts = [
-                pct for pct, outcomes in self._outcomes_by_pct.items() if all(outcomes)
-            ]
+            passing_pts = [pct for pct, outcomes in self._outcomes_by_pct.items() if all(outcomes)]
             fallback_pass = max(passing_pts, default=0.0)
             backoff_count = getattr(self, "_backoff_confirm_count", 0)
             if (
@@ -822,9 +813,7 @@ class BurstinessSweep:
         discovery_seeds: tuple[int, ...] = (1,),
         confirmation_seeds: tuple[int, ...] = (1, 2, 3, 4, 5, 6),
         confirmation_repeats: int = 1,
-        soak_exposures: tuple[ExposureClass, ...] = (
-            ExposureClass.SOAK_60S,
-        ),
+        soak_exposures: tuple[ExposureClass, ...] = (ExposureClass.SOAK_60S,),
     ) -> None:
         self.config = config
         self.frequency_hz = frequency_hz
@@ -841,9 +830,7 @@ class BurstinessSweep:
         self._soak_runs: list[SweepRunOutcome] = []
 
         self._discovery_queue: list[tuple[int, int]] = [
-            (interval, seed)
-            for interval in self.burst_intervals
-            for seed in self.discovery_seeds
+            (interval, seed) for interval in self.burst_intervals for seed in self.discovery_seeds
         ]
         self._discovery_idx = 0
         self._refine_lower: int | None = None
@@ -987,12 +974,14 @@ class BurstinessSweep:
                     if self._soak_idx >= len(self._soak_queue):
                         self._soak_passed = True
                 else:
-                    # Soak failed: back off to next lower passing burst interval (max 2 backoff attempts)
+                    # Soak failed: back off to next lower passing burst interval
+                    # (max 2 backoff attempts)
                     backoff_count = getattr(self, "_backoff_soak_count", 0)
                     if backoff_count < 2 and self._confirmed_burst is not None:
                         self._backoff_soak_count = backoff_count + 1
                         lower_candidates = [
-                            iv for iv in sorted(self._outcomes_by_interval.keys(), reverse=True)
+                            iv
+                            for iv in sorted(self._outcomes_by_interval.keys(), reverse=True)
                             if iv < self._confirmed_burst and all(self._outcomes_by_interval[iv])
                         ]
                         if lower_candidates:
@@ -1015,9 +1004,7 @@ class BurstinessSweep:
             and len(self._outcomes_by_interval.get(iv, [])) == len(self.discovery_seeds)
         ]
         failing = [
-            iv
-            for iv in self.burst_intervals
-            if not all(self._outcomes_by_interval.get(iv, [True]))
+            iv for iv in self.burst_intervals if not all(self._outcomes_by_interval.get(iv, [True]))
         ]
 
         lower_pass = max(passing, default=1)
@@ -1059,15 +1046,17 @@ class BurstinessSweep:
         stable_burst: int | None = None
         for iv in sorted(self._outcomes_by_interval.keys(), reverse=True):
             outcomes = self._outcomes_by_interval[iv]
-            if len(outcomes) >= (len(self.confirmation_seeds) * self.confirmation_repeats):
-                if all(outcomes):
-                    stable_burst = iv
-                    break
+            if len(outcomes) >= (len(self.confirmation_seeds) * self.confirmation_repeats) and all(
+                outcomes
+            ):
+                stable_burst = iv
+                break
 
         if stable_burst is None:
             # Fall back to best coarse pass; if not yet confirmed, confirm it (max 2 backoffs)
             passing = [
-                iv for iv in sorted(self._outcomes_by_interval.keys(), reverse=True)
+                iv
+                for iv in sorted(self._outcomes_by_interval.keys(), reverse=True)
                 if all(self._outcomes_by_interval[iv])
             ]
             fallback = max(passing, default=1)
@@ -1201,9 +1190,7 @@ class CampaignReport:
                         else "None"
                     )
                     soak = "Pass Soak" if cell_s2.soak_passed else "Fail Soak"
-                    row_cells.append(
-                        f"{burst} @ {cell_s2.target_utilization_percent:g}% ({soak})"
-                    )
+                    row_cells.append(f"{burst} @ {cell_s2.target_utilization_percent:g}% ({soak})")
             lines.append(f"| {' | '.join(row_cells)} |")
 
         return "\n".join(lines)
@@ -1284,9 +1271,7 @@ class LoopbackSweepCampaign:
         confirmation_repeats: int = 1,
         resolution_percent: float = 1.0,
         soak_headroom_fraction: float = 1.0,
-        soak_exposures: tuple[ExposureClass, ...] = (
-            ExposureClass.SOAK_60S,
-        ),
+        soak_exposures: tuple[ExposureClass, ...] = (ExposureClass.SOAK_60S,),
         burst_intervals: tuple[int, ...] = (1, 2, 5, 10, 20, 50, 100),
         burst_discovery_seeds: tuple[int, ...] = (1,),
     ) -> None:
@@ -1446,11 +1431,12 @@ class LoopbackSweepCampaign:
         [LoopbackConfiguration, LoopbackWorkloadPoint, SweepStage],
         SweepRunOutcome,
     ]:
+        import secrets
         from concurrent.futures import ThreadPoolExecutor
         from contextlib import suppress
         from datetime import UTC, datetime
         from pathlib import Path
-        import secrets
+
         from hilrig.exceptions import ProtocolSessionError
         from hilrig.protocol import (
             FixedIOProtocolConnection,
@@ -1471,7 +1457,9 @@ class LoopbackSweepCampaign:
             factory = connection_factory
         elif port is not None:
             settings = SerialConnectionSettings(device=port)
-            factory = lambda **kwargs: FixedIOProtocolConnection.connect(serial_settings=settings, **kwargs)
+
+            def factory(**kwargs: Any) -> FixedIOProtocolConnection:
+                return FixedIOProtocolConnection.connect(serial_settings=settings, **kwargs)
         else:
             factory = FixedIOProtocolConnection.connect
 
@@ -1493,7 +1481,9 @@ class LoopbackSweepCampaign:
                 return
             _purge_serial(conn)
             deadline = time.monotonic() + 0.5
-            while time.monotonic() < deadline and getattr(conn, "_transport_delivery_pending", False):
+            while time.monotonic() < deadline and getattr(
+                conn, "_transport_delivery_pending", False
+            ):
                 conn.service()
                 time.sleep(0.002)
 
@@ -1502,9 +1492,16 @@ class LoopbackSweepCampaign:
             try:
                 conn.reset_application()
                 reset_wait = time.monotonic() + 2.0
-                while time.monotonic() < reset_wait and conn.workflow_state is ProtocolWorkflowState.RESETTING:
+                while (
+                    time.monotonic() < reset_wait
+                    and conn.workflow_state is ProtocolWorkflowState.RESETTING
+                ):
                     rep = conn.service()
-                    if not (rep.serial_bytes_read or rep.serial_bytes_written or rep.application_message_submitted):
+                    if not (
+                        rep.serial_bytes_read
+                        or rep.serial_bytes_written
+                        or rep.application_message_submitted
+                    ):
                         time.sleep(0.002)
             except Exception:
                 pass
@@ -1512,7 +1509,11 @@ class LoopbackSweepCampaign:
             readiness_wait = time.monotonic() + 2.0
             while time.monotonic() < readiness_wait and not conn.ready_for_upload:
                 rep = conn.service()
-                if not (rep.serial_bytes_read or rep.serial_bytes_written or rep.application_message_submitted):
+                if not (
+                    rep.serial_bytes_read
+                    or rep.serial_bytes_written
+                    or rep.application_message_submitted
+                ):
                     time.sleep(0.002)
 
         def _get_connection():
@@ -1532,7 +1533,7 @@ class LoopbackSweepCampaign:
                     pass
                 with suppress(Exception):
                     conn.close()
-            # Retry connecting up to 3 times in case the MCU is briefly draining/resetting from a previous run
+            # Retry connecting up to 3 times in case MCU is draining/resetting
             for attempt in range(3):
                 time.sleep(0.3 if attempt == 0 else 1.0)
                 try:
@@ -1544,10 +1545,17 @@ class LoopbackSweepCampaign:
                     deadline = time.monotonic() + 5.0
                     while time.monotonic() < deadline and not conn.session_confirmed:
                         rep = conn.service()
-                        if not (rep.serial_bytes_read or rep.serial_bytes_written or rep.application_message_submitted):
+                        if not (
+                            rep.serial_bytes_read
+                            or rep.serial_bytes_written
+                            or rep.application_message_submitted
+                        ):
                             time.sleep(0.002)
                     if conn.session_confirmed:
-                        if not conn.ready_for_upload or getattr(conn, "_pending_operation", None) is not None:
+                        if (
+                            not conn.ready_for_upload
+                            or getattr(conn, "_pending_operation", None) is not None
+                        ):
                             _reset_connection(conn)
                         if conn.ready_for_upload:
                             active_connection[0] = conn
@@ -1633,15 +1641,20 @@ class LoopbackSweepCampaign:
                 host_start_requested = False
                 expected_duration_s = float(point.duration_s)
                 tick_allowance_s = float(point.total_ticks) * 0.002
-                watchdog_deadline = time.monotonic() + max(30.0, tick_allowance_s + expected_duration_s * 3.0 + 15.0)
+                watchdog_deadline = time.monotonic() + max(
+                    30.0, tick_allowance_s + expected_duration_s * 3.0 + 15.0
+                )
                 while not connection.report_received:
                     if time.monotonic() > watchdog_deadline:
                         raise TimeoutError(
-                            f"Execution timed out after {expected_duration_s}s (no run report received from RIG)"
+                            f"Execution timed out after {expected_duration_s}s "
+                            "(no run report received from RIG)"
                         )
                     rep = connection.service()
                     if connection.workflow_state is ProtocolWorkflowState.FAILED:
-                        err_msg = getattr(connection, "last_error", None) or "Protocol workflow failed"
+                        err_msg = (
+                            getattr(connection, "last_error", None) or "Protocol workflow failed"
+                        )
                         raise ProtocolSessionError(err_msg)
                     if (
                         getattr(connection, "workflow_state", None) is not None
@@ -1666,16 +1679,18 @@ class LoopbackSweepCampaign:
                 builder = None
                 verdict = write_run_artifacts(captured_run, out_dir)
                 passed = verdict == "pass" and (
-                    captured_run.report.run_outcome == "SUCCESS"
-                    if captured_run.report
-                    else True
+                    captured_run.report.run_outcome == "SUCCESS" if captured_run.report else True
                 )
 
                 max_isr = None
                 margin_isr = None
                 if captured_run.report and captured_run.report.isr_timing:
                     isr_t = captured_run.report.isr_timing
-                    max_isr = isr_t.get("maximum_cycles") if isinstance(isr_t, dict) else getattr(isr_t, "maximum_cycles", None)
+                    max_isr = (
+                        isr_t.get("maximum_cycles")
+                        if isinstance(isr_t, dict)
+                        else getattr(isr_t, "maximum_cycles", None)
+                    )
                     if max_isr is not None:
                         deadline = 180_000_000 // point.frequency_hz
                         margin_isr = deadline - max_isr

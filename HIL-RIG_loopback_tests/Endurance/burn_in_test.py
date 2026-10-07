@@ -5,37 +5,36 @@ ISR cycle consistency, and zero-loss USB streaming across single or multi-channe
 configurations.
 
 Built-in Presets:
-  --preset standard   : Config 1 (UART+SPI+CAN) @ 1,000 Hz for 5 minutes (300,000 ticks) [RECOMMENDED]
-  --preset 1m-ticks   : Config 0 (UART2 2Mbps)  @ 10,000 Hz for 100s (1,000,000 ticks)
-  --preset endurance  : Config 1 (UART+SPI+CAN) @ 100 Hz for 30 minutes (180,000 ticks)
+  --preset standard   : Config 1 (UART+SPI+CAN) @ 1,000 Hz for 5m (300k ticks) [RECOMMENDED]
+  --preset 1m-ticks   : Config 0 (UART2 2Mbps)  @ 10,000 Hz for 100s (1M ticks)
+  --preset endurance  : Config 1 (UART+SPI+CAN) @ 100 Hz for 1 Hour (360k ticks)
 
 Usage:
-  # Run standard 5-minute qualification
-  .venv\\Scripts\\python HIL-RIG_loopback_tests/burn_in_test.py --live --port COM10 --preset standard
+  # Run standard qualification
+  .venv\Scripts\python HIL-RIG_loopback_tests/burn_in_test.py --live --port COM10 --preset standard
 
-  # Run 1,000,000 ticks stress test
-  .venv\\Scripts\\python HIL-RIG_loopback_tests/burn_in_test.py --live --port COM10 --preset 1m-ticks
+  # Run 1M ticks stress test
+  .venv\Scripts\python HIL-RIG_loopback_tests/burn_in_test.py --live --port COM10 --preset 1m-ticks
 
-  # Custom duration & configuration
-  .venv\\Scripts\\python HIL-RIG_loopback_tests/burn_in_test.py --live --port COM10 --config 1 --frequency 1000 --duration 120 --utilization 85
+  # Custom configuration
+  .venv\Scripts\python HIL-RIG_loopback_tests/burn_in_test.py `
+    --live --port COM10 --config 1 --frequency 1000 --duration 120 --utilization 85
 """
 
 from __future__ import annotations
 
 import argparse
-from contextlib import suppress
-from datetime import UTC, datetime
-from pathlib import Path
 import secrets
 import sys
 import time
+from contextlib import suppress
+from datetime import UTC, datetime
+from pathlib import Path
+
 from hilrig import (
-    ExposureClass,
     LoopbackConfiguration,
     LoopbackWorkloadPoint,
-    Test,
     build_loopback_test,
-    workload_point_for_exposure,
 )
 from hilrig.exceptions import ProtocolSessionError
 from hilrig.protocol import (
@@ -59,7 +58,9 @@ def get_config_by_id(config_id: int) -> LoopbackConfiguration:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="HIL-RIG Long-Duration Burn-In & Qualification Tool")
+    parser = argparse.ArgumentParser(
+        description="HIL-RIG Long-Duration Burn-In & Qualification Tool"
+    )
     parser.add_argument(
         "--live",
         action="store_true",
@@ -77,13 +78,17 @@ def main() -> None:
         type=str,
         choices=["standard", "1m-ticks", "endurance", "custom"],
         default="standard",
-        help="Preset profile: 'standard' (5min @ 1kHz, 80% util), '1m-ticks' (1M ticks @ 10kHz, 75% util), 'endurance' (30min @ 100Hz, 90% util)",
+        help=(
+            "Preset profile: 'standard' (5min @ 1kHz, 10% util), "
+            "'1m-ticks' (1M ticks @ 10kHz, 75% util), "
+            "'endurance' (1 hour @ 100Hz, 2.5% util)"
+        ),
     )
     parser.add_argument(
         "--config",
         type=int,
         default=None,
-        help="Configuration ID: 0 (UART prototype), 1 (Multi-Channel High-Rate), 2, 3, 4 (overrides preset)",
+        help="Configuration ID: 0 (UART prototype), 1 (Multi-Channel), 2, 3, 4 (overrides preset)",
     )
     parser.add_argument(
         "--frequency",
@@ -178,7 +183,9 @@ def main() -> None:
     print(f"Target Utilization: {utilization:.1f}%")
     print(f"Burst Interval: {burst_interval} ticks")
     print(f"Total Target Ticks: {total_ticks:,} ticks")
-    print(f"Stimulus Duration: {actual_duration_s:.1f} seconds ({actual_duration_s / 60:.2f} minutes)")
+    print(
+        f"Stimulus Duration: {actual_duration_s:.1f} seconds ({actual_duration_s / 60:.2f} minutes)"
+    )
     print(f"Mode: {'Live Hardware' if args.live else 'Dry-Run Simulation'}")
     if args.port:
         print(f"Port: {args.port}")
@@ -235,7 +242,9 @@ def main() -> None:
         conn.bind_result_builder(builder, replace=True)
 
         print("Uploading burn-in instructions to MCU...", end="", flush=True)
-        conn.queue_upload(compiled, upload_attempt=attempt, advance_mode=UploadAdvanceMode.AUTOMATIC)
+        conn.queue_upload(
+            compiled, upload_attempt=attempt, advance_mode=UploadAdvanceMode.AUTOMATIC
+        )
         print(" Uploaded.", flush=True)
 
         print("\nStarting Burn-In Execution...")
@@ -244,11 +253,15 @@ def main() -> None:
         start_time = time.monotonic()
         host_start_requested = False
         last_progress_print = 0.0
-        watchdog_deadline = time.monotonic() + max(60.0, float(total_ticks) * 0.002 + actual_duration_s * 3.0 + 30.0)
+        watchdog_deadline = time.monotonic() + max(
+            60.0, float(total_ticks) * 0.002 + actual_duration_s * 3.0 + 30.0
+        )
 
         while not conn.report_received:
             if time.monotonic() > watchdog_deadline:
-                raise TimeoutError(f"Burn-in timed out after {actual_duration_s}s (no run report received)")
+                raise TimeoutError(
+                    f"Burn-in timed out after {actual_duration_s}s (no run report received)"
+                )
 
             rep = conn.service()
             if conn.workflow_state is ProtocolWorkflowState.FAILED:
@@ -305,7 +318,11 @@ def main() -> None:
         isr_max = None
         if captured_run.report and captured_run.report.isr_timing:
             isr_t = captured_run.report.isr_timing
-            isr_max = isr_t.get("maximum_cycles") if isinstance(isr_t, dict) else getattr(isr_t, "maximum_cycles", None)
+            isr_max = (
+                isr_t.get("maximum_cycles")
+                if isinstance(isr_t, dict)
+                else getattr(isr_t, "maximum_cycles", None)
+            )
 
         passed = verdict == "pass" and (
             captured_run.report.run_outcome == "SUCCESS" if captured_run.report else True
@@ -316,8 +333,8 @@ def main() -> None:
 
         # Generate summary report
         md_lines = [
-            f"# HIL-RIG Hardware Burn-In & Qualification Report",
-            f"",
+            "# HIL-RIG Hardware Burn-In & Qualification Report",
+            "",
             f"- **Date / Time**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"- **Configuration**: {config.name} ({config.description})",
             f"- **Frequency**: {freq:,} Hz",
@@ -325,19 +342,25 @@ def main() -> None:
             f"- **Duration**: {actual_duration_s:.1f}s ({actual_duration_s / 60:.2f} mins)",
             f"- **Target Utilization**: {utilization:.1f}%",
             f"- **Final Verdict**: **{verdict.upper()}**",
-            f"- **Peak ISR Duration**: {isr_max:,} cycles ({isr_max / 180.0:.2f} µs)" if isr_max else "- **Peak ISR Duration**: N/A",
-            f"- **ISR Real-Time Margin**: {isr_margin:,} cycles ({isr_margin / 180.0:.2f} µs remaining)" if isr_margin else "",
+            f"- **Peak ISR Duration**: {isr_max:,} cycles ({isr_max / 180.0:.2f} µs)"
+            if isr_max
+            else "- **Peak ISR Duration**: N/A",
+            f"- **ISR Real-Time Margin**: "
+            f"{isr_margin:,} cycles ({isr_margin / 180.0:.2f} µs remaining)"
+            if isr_margin
+            else "",
             f"- **Custody Directory**: `{out_dir.resolve()}`",
-            f"",
-            f"## Outcome Summary",
-            f"",
-            f"| Metric | Value |",
-            f"| :--- | :--- |",
+            "",
+            "## Outcome Summary",
+            "",
+            "| Metric | Value |",
+            "| :--- | :--- |",
             f"| **Test Outcome** | **{'PASS' if passed else 'FAIL'}** |",
             f"| **Ticks Received** | {total_ticks:,} / {total_ticks:,} |",
-            f"| **Loss Rate** | 0.0% (Zero loss) |",
+            "| **Loss Rate** | 0.0% (Zero loss) |",
             f"| **Peak ISR Cycles** | {isr_max if isr_max else '-'} / {deadline_cycles:,} |",
-            f"| **Firmware Status** | {captured_run.report.run_outcome if captured_run.report else 'N/A'} |",
+            f"| **Firmware Status** | "
+            f"{captured_run.report.run_outcome if captured_run.report else 'N/A'} |",
         ]
         md_report = "\n".join(md_lines)
         if args.output_md:

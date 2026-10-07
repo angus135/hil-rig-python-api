@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from decimal import ROUND_FLOOR, Decimal
 from enum import Enum
 from random import Random
+from typing import Any
 
 from hilrig.api import CAN, SPI, UART, Test
 from hilrig.models.configuration import (
@@ -29,7 +30,6 @@ from hilrig.models.configuration import (
     UARTParity,
     UARTStopBits,
 )
-
 
 MAX_STIMULUS_TICKS: int = 900_000
 
@@ -805,13 +805,12 @@ def build_loopback_test(
             spi_handles[ch.channel_index] = handle
         elif ch.peripheral == "can" and ch.channel_index not in can_handles:
             handle = (
-                test.can(channel=ch.channel_index)
-                .named(ch.name)
-                .configure(bitrate=ch.bit_rate_hz)
+                test.can(channel=ch.channel_index).named(ch.name).configure(bitrate=ch.bit_rate_hz)
             )
             can_handles[ch.channel_index] = handle
 
-    # Ensure paired CAN receiver channels are configured even if not explicitly in transmitting channels
+    # Ensure paired CAN receiver channels are configured
+    # even if not explicitly in transmitting channels
     for ch in configuration.channels:
         if ch.peripheral == "can" and ch.rx_peer_channel_index is not None:
             peer_idx = ch.rx_peer_channel_index
@@ -861,7 +860,9 @@ def build_loopback_test(
                 for tr in materialized:
                     uart_h.write(data=tr.data, at_tick=tr.tick)
                 # Assertions on first and last (or all)
-                for tr, until_tick in _filter_assertion_windows(transfer_windows, boundary_only_assertions):
+                for tr, until_tick in _filter_assertion_windows(
+                    transfer_windows, boundary_only_assertions
+                ):
                     test.expect(uart_h).receive(
                         tr.data,
                         allow_stream_match=True,
@@ -876,7 +877,9 @@ def build_loopback_test(
                         rx_length=len(tr.data),
                         at_tick=tr.tick,
                     )
-                for tr, until_tick in _filter_assertion_windows(transfer_windows, boundary_only_assertions):
+                for tr, until_tick in _filter_assertion_windows(
+                    transfer_windows, boundary_only_assertions
+                ):
                     test.expect(spi_h).receive(
                         tr.data,
                         allow_stream_match=True,
@@ -901,7 +904,9 @@ def build_loopback_test(
                 rx_can = can_handles[rx_idx]
                 for tr in materialized:
                     tx_can.transmit(frame_id=can_frame_id, data=tr.data, at_tick=tr.tick)
-                for tr, until_tick in _filter_assertion_windows(transfer_windows, boundary_only_assertions):
+                for tr, until_tick in _filter_assertion_windows(
+                    transfer_windows, boundary_only_assertions
+                ):
                     test.expect(rx_can).receive(
                         frame_id=can_frame_id,
                         data=tr.data,
@@ -1056,9 +1061,7 @@ def analyze_stream_timing(
         max_excess = max(excess_shifts) if excess_shifts else None
 
         sorted_offsets = sorted(offsets)
-        median_off = (
-            sorted_offsets[len(sorted_offsets) // 2] if sorted_offsets else None
-        )
+        median_off = sorted_offsets[len(sorted_offsets) // 2] if sorted_offsets else None
         p95_idx = int(len(sorted_offsets) * 0.95)
         p95_off = sorted_offsets[p95_idx] if sorted_offsets else None
 

@@ -6,7 +6,8 @@ and soak validation for:
   - Sweep 2: Burstiness Sweep across candidate burst intervals at fixed utilization
 
 Run standalone:
-    python HIL-RIG_loopback_tests/loopback_sweep_campaign.py [--configs 1 4] [--frequencies 100 1000 10000]
+    python HIL-RIG_loopback_tests/loopback_sweep_campaign.py `
+      [--configs 1 4] [--frequencies 100 1000 10000]
 
 Or run a single conservative test through the terminal:
     hil-rig run HIL-RIG_loopback_tests/loopback_sweep_campaign.py
@@ -22,7 +23,6 @@ from hilrig import (
     ExposureClass,
     LoopbackConfiguration,
     LoopbackSweepCampaign,
-    LoopbackWorkloadPoint,
     Test,
     build_loopback_test,
     workload_point_for_exposure,

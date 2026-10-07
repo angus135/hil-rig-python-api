@@ -136,8 +136,8 @@ from hilrig.results import (
 )
 from hilrig.sweeps import (
     BurstCellSearchResult,
-    BurstObservation,
     BurstinessSweep,
+    BurstObservation,
     CampaignReport,
     CellSearchResult,
     FailureDomain,

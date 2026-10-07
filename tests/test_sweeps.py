@@ -6,17 +6,11 @@ import pytest
 
 from hilrig import (
     BurstinessSweep,
-    CampaignReport,
     ExposureClass,
-    FailureDomain,
-    FrequencyMode,
     LoopbackConfiguration,
     LoopbackSweepCampaign,
     LoopbackWorkloadPoint,
-    PointClassification,
-    SweepRunOutcome,
     SweepStage,
-    UtilizationBinarySearch,
     UtilizationCeilingSweep,
     build_loopback_test,
     check_workload_admissibility,
@@ -231,10 +225,10 @@ def test_loopback_sweep_campaign_orchestration_and_reporting() -> None:
 
 def test_stream_timing_analysis_bounded_vs_divergent() -> None:
     from types import SimpleNamespace
+
     from hilrig import (
         CommunicationPeripheral,
         analyze_stream_timing,
-        compile_configuration_workload,
     )
 
     cfg = LoopbackConfiguration.config_2_high_speed_sensor()
@@ -275,7 +269,9 @@ def test_stream_timing_analysis_bounded_vs_divergent() -> None:
             )
         )
 
-    metrics_divergent = analyze_stream_timing(divergent_caps, compiled, max_allowed_phase_shift_ticks=2)
+    metrics_divergent = analyze_stream_timing(
+        divergent_caps, compiled, max_allowed_phase_shift_ticks=2
+    )
     spi_div = next(m for m in metrics_divergent if m.peripheral == "spi")
     assert spi_div.is_bounded is False
     assert spi_div.is_creeping_divergent is True

@@ -4,9 +4,8 @@ Executes ONLY Sweep 2 (Burstiness Characterization) across configured frequencie
 for the UART2 loopback channel at 2,000,000 baud.
 
 Usage:
-  .venv\\Scripts\\python HIL-RIG_loopback_tests/uart_prototype_burst_sweep.py --live --port COM10
-  .venv\\Scripts\\python HIL-RIG_loopback_tests/uart_prototype_burst_sweep.py --live --port COM10 --frequencies 10000
-  .venv\\Scripts\\python HIL-RIG_loopback_tests/uart_prototype_burst_sweep.py --live --port COM10 --frequencies 100 1000 10000
+  .venv\Scripts\python HIL-RIG_loopback_tests/uart_prototype_burst_sweep.py `
+    --live --port COM10 --frequencies 10000
 """
 
 from __future__ import annotations
@@ -89,7 +88,10 @@ def main() -> None:
     print("=================================================================")
     print("HIL-RIG Characterization — Isolated UART2 Burstiness Sweep")
     print(f"Configuration: {uart_config.name} ({uart_config.description})")
-    print(f"Baud rate: {args.baud:,} Hz | Max Wire Rate: {uart_config.theoretical_payload_rate_kib} KiB/s")
+    print(
+        f"Baud rate: {args.baud:,} Hz | "
+        f"Max Wire Rate: {uart_config.theoretical_payload_rate_kib} KiB/s"
+    )
     print(f"Target Utilization: {args.utilization:.1f}%")
     print(f"Burst Intervals: {burst_intervals}")
     print(f"Frequencies: {selected_frequencies} Hz")

@@ -8,8 +8,8 @@ Runs:
   2. Burstiness Sweep (Burst intervals [1, 2, 5, 10, 20, 50, 100])
 
 Usage:
-  .venv\\Scripts\\python HIL-RIG_loopback_tests/uart_prototype_sweep.py --live --port COM10
-  .venv\\Scripts\\python HIL-RIG_loopback_tests/uart_prototype_sweep.py --live --port COM10 --frequencies 100
+  .venv\Scripts\python HIL-RIG_loopback_tests/uart_prototype_sweep.py `
+    --live --port COM10 --frequencies 100 1000 10000
 """
 
 from __future__ import annotations
@@ -94,7 +94,10 @@ def main() -> None:
     print("=================================================================")
     print("HIL-RIG Characterization — Isolated UART2 Max-Baud Prototype")
     print(f"Configuration: {uart_config.name} ({uart_config.description})")
-    print(f"Baud rate: {args.baud:,} Hz | Max Wire Rate: {uart_config.theoretical_payload_rate_kib} KiB/s")
+    print(
+        f"Baud rate: {args.baud:,} Hz | "
+        f"Max Wire Rate: {uart_config.theoretical_payload_rate_kib} KiB/s"
+    )
     print(f"Frequencies: {selected_frequencies} Hz")
     print(f"Mode: {'Live Hardware' if args.live else 'Simulated / Dry-Run'}")
     if args.port:
