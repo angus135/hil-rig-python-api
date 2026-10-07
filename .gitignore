@@ -28,5 +28,4 @@ tmp/
 
 # Generated HIL-RIG execution results
 **/runs/
-**/runs_burn_in/
-**/runs_uart*/
+**/runs_*/
