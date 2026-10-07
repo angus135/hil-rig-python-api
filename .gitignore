@@ -25,6 +25,7 @@ Thumbs.db
 
 # Local temporary files
 tmp/
+.deps/
 
 # Generated HIL-RIG execution results
 **/runs/

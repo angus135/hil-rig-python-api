@@ -28,7 +28,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: angus135/hil-rig-protocol
-          path: ../hil-rig-protocol
+          path: .deps/hil-rig-protocol
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -39,7 +39,7 @@ jobs:
 
       - name: Install package and test dependencies
         run: |
-          python -m pip install ../hil-rig-protocol
+          python -m pip install ./.deps/hil-rig-protocol
           python -m pip install -e ".[dev]"
 
       - name: Run unit tests
@@ -57,7 +57,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: angus135/hil-rig-protocol
-          path: ../hil-rig-protocol
+          path: .deps/hil-rig-protocol
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -68,7 +68,7 @@ jobs:
 
       - name: Install package and development dependencies
         run: |
-          python -m pip install ../hil-rig-protocol
+          python -m pip install ./.deps/hil-rig-protocol
           python -m pip install -e ".[dev]"
 
       - name: Lint
