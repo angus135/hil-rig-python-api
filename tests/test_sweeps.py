@@ -216,11 +216,15 @@ def test_loopback_sweep_campaign_orchestration_and_reporting() -> None:
     assert "# HIL-RIG Loopback Characterization — Automated Sweep Campaign Report" in md
     assert "Sweep 1 — Utilization Ceiling Boundaries" in md
     assert "Sweep 2 — Burstiness Limits" in md
+    assert "Cell-by-Cell Boundary Justification & Failure Attribution" in md
+    assert "Verified Operating Point Resource Headroom & Diagnostics" in md
     assert "1 — Automotive Gateway" in md
 
     csv_text = report.to_csv()
     assert "Sweep 1 (Utilization)" in csv_text
     assert "Sweep 2 (Burstiness)" in csv_text
+    assert "verified_boundary" in csv_text
+    assert "limiting_domain" in csv_text
 
 
 def test_stream_timing_analysis_bounded_vs_divergent() -> None:
@@ -275,3 +279,34 @@ def test_stream_timing_analysis_bounded_vs_divergent() -> None:
     spi_div = next(m for m in metrics_divergent if m.peripheral == "spi")
     assert spi_div.is_bounded is False
     assert spi_div.is_creeping_divergent is True
+
+
+def test_extract_run_diagnostics_and_extended_report() -> None:
+    from types import SimpleNamespace
+    from hilrig import extract_run_diagnostics
+
+    # Construct synthetic run report with full extension metrics
+    synthetic_report = SimpleNamespace(
+        isr_timing={"maximum_cycles": 120_000},
+        instruction_buffer={"minimum_unread_bytes": 4096},
+        result_buffer={"peak_pending_bytes": 512, "reservation_failures": 0},
+        flash={
+            "instruction_refill_count": 2,
+            "result_drain_count": 5,
+            "max_service_time_cycles": 800,
+            "contention_count": 0,
+        },
+        extension_data=None,
+    )
+    captured = SimpleNamespace(report=synthetic_report)
+
+    diag = extract_run_diagnostics(captured, frequency_hz=1000)
+    assert "isr" in diag
+    assert diag["isr"]["max_cycles"] == 120_000
+    assert diag["isr"]["deadline_cycles"] == 180_000
+    assert diag["isr"]["margin_percent"] == 33.3
+    assert diag["instruction_buffer"]["min_unread_bytes"] == 4096
+    assert diag["instruction_buffer"]["headroom_percent"] == 50.0
+    assert diag["result_buffer"]["peak_pending_bytes"] == 512
+    assert diag["flash"]["refill_count"] == 2
+

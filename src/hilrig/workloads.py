@@ -718,7 +718,7 @@ def build_loopback_test(
     name: str | None = None,
     start_mode: StartMode = StartMode.IMMEDIATE,
     can_frame_id: int = 0x321,
-    max_allowed_phase_shift_ticks: int = 2,
+    max_allowed_phase_shift_ticks: int = 1,
     observation_allowance_ticks: int | None = None,
     boundary_only_assertions: bool = True,
     enable_mixed_io: bool = True,
@@ -726,7 +726,7 @@ def build_loopback_test(
     """Build a complete, executable Test for a given LoopbackConfiguration and point.
 
     Enforces stable bounded phase shift assertions across all active communication
-    channels (UART, SPI, CAN) relative to the cumulative modeled wire completion tick.
+    channels (UART, SPI, CAN) relative to the cumulative modeled wire completion tick (max 1 tick allowable offset).
 
     If enable_mixed_io is True (the default), Digital Inputs/Outputs, Analogue ADC
     sampling, and PWM capture channels are also configured and sampled on every
@@ -968,7 +968,7 @@ def analyze_stream_timing(
     captured_communications: list[Any],
     compiled_workload: MultiChannelCompiledWorkload,
     *,
-    max_allowed_phase_shift_ticks: int = 2,
+    max_allowed_phase_shift_ticks: int = 1,
 ) -> tuple[ChannelTimingMetrics, ...]:
     """Reconstruct per-byte/per-frame transfer timing and verify bounded phase shift."""
     metrics_list: list[ChannelTimingMetrics] = []

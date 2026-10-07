@@ -151,6 +151,7 @@ from hilrig.sweeps import (
     UtilizationObservation,
     UtilizationSearchResult,
     burst_sweep_points,
+    extract_run_diagnostics,
 )
 from hilrig.workloads import (
     ChannelTimingMetrics,
@@ -338,6 +339,7 @@ __all__ = [
     "decode_spi_record",
     "decode_uart_record",
     "evaluate_assertions",
+    "extract_run_diagnostics",
     "discover_serial_port",
     "get_exposure_duration_s",
     "get_exposure_ticks",
