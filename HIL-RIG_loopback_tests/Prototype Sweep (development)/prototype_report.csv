@@ -1,0 +1,7 @@
+sweep,config_id,config_name,frequency_hz,verified_boundary,lowest_failing_target,failing_stage,limiting_domain,limiting_reason,soak_passed,total_runs,total_ticks,total_requested_s,total_wall_s,avg_upload_kib_s,duty_efficiency_pct,host_overhead_ratio
+Sweep 1 (Utilization),0,0 — Prototype (UART2 + SPI2),100,58.0,59.0,bracket_refinement,4_peripheral_queue_buffer,SPI ch1 peak tick payload (4149 B) exceeds TX buffer (4096 B),True,15,20000,200.0,730.34,,24.2,3.153
+Sweep 1 (Utilization),0,0 — Prototype (UART2 + SPI2),1000,99.0,100.0,coarse_discovery,4_peripheral_queue_buffer,Analog Out rejected: Queue Full at boundary 505,True,16,90000,90.0,598.26,,14.3,6.365
+Sweep 1 (Utilization),0,0 — Prototype (UART2 + SPI2),10000,97.0,98.0,bracket_refinement,6_receive_timing_integrity,Run verification verdict: fail,True,15,850000,85.0,1041.81,,7.6,12.608
+Sweep 2 (Burstiness),0,0 — Prototype (UART2 + SPI2),100,1,2,coarse_discovery,4_peripheral_queue_buffer,SPI ch1 peak tick payload (6118 B) exceeds TX buffer (4096 B),True,9,14000,140.0,456.17,,28.4,2.523
+Sweep 2 (Burstiness),0,0 — Prototype (UART2 + SPI2),1000,7,8,bracket_refinement,4_peripheral_queue_buffer,SPI ch1 peak tick payload (4174 B) exceeds TX buffer (4096 B),True,13,84000,84.0,435.76,,15.0,5.719
+Sweep 2 (Burstiness),0,0 — Prototype (UART2 + SPI2),10000,57,59,soak_validation,2_instruction_upload,Received a TestResult before START completed,False,24,2610000,261.0,577.02,,11.6,8.778

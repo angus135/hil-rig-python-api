@@ -744,6 +744,76 @@ def test_variable_adapter_with_custom_byte_chunking() -> None:
     assert tick_5_instructions[1].operations[1].peripheral_type == PeripheralType.CAN
 
 
+def test_chunk_update_instruction_never_repeats_channel_within_chunk() -> None:
+    test_id = FakeProtocol.TestId(b"\x01" * 16)
+    spi_a = LogicalOperation(peripheral_type=PeripheralType.SPI, channel=1, payload=b"A" * 10)
+    spi_b = LogicalOperation(peripheral_type=PeripheralType.SPI, channel=1, payload=b"B" * 10)
+    uart = LogicalOperation(peripheral_type=PeripheralType.UART, channel=0, payload=b"U" * 10)
+
+    chunks = list(
+        chunk_update_instruction(
+            test_id=test_id,
+            tick_number=3,
+            operations=(uart, spi_a, spi_b),
+            instruction_factory=FakeProtocol.UpdateInstruction,
+        )
+    )
+
+    assert [c.flags for c in chunks] == [FLAG_HAS_MORE_CHUNKS, FLAG_COMPLETE_TICK]
+    assert chunks[0].operations == (uart, spi_a)
+    assert chunks[1].operations == (spi_b,)
+
+
+def test_variable_adapter_splits_large_spi_transfer_across_chunks() -> None:
+    test = HilRigTest(name="Large SPI split test")
+    test.configure(frequency_mode=FrequencyMode.HZ_100, start_mode=StartMode.IMMEDIATE)
+    uart = test.uart(channel=0).configure(
+        mode=UARTMode.TTL_3V3,
+        baud_hz=2_000_000,
+        parity=UARTParity.NONE,
+        length=UARTLengthBits.EIGHT,
+        stop=UARTStopBits.ONE,
+    )
+    spi = test.spi(channel=0).configure(
+        role=SPIRole.MASTER,
+        baud=SPIBaud.BAUD_2M813BIT,
+        data_size=SPISize.SIZE_8BIT,
+        mode=SPIMode.MODE_0,
+        first_bit=SPIFirst.MSB,
+    )
+    spi_data = bytes(i & 0xFF for i in range(3516))
+    uart.write(data=b"U" * 250, at_tick=2)
+    spi.transfer(tx_data=spi_data, rx_length=0, at_tick=2)
+
+    compiled = test.compile()
+    adapter = VariableIOProtocolAdapter(protocol_module=FakeProtocol)
+    upload = adapter.build_upload(compiled)
+
+    tick_2 = [inst for inst in upload.instructions if inst.tick_number == 2]
+    assert len(tick_2) >= 2
+    assert all(c.flags == FLAG_HAS_MORE_CHUNKS for c in tick_2[:-1])
+    assert tick_2[-1].flags == FLAG_COMPLETE_TICK
+
+    reassembled = b""
+    for chunk in tick_2:
+        envelope = 24 + sum(4 + len(op.payload) for op in chunk.operations)
+        assert envelope <= DEFAULT_MAX_BYTES_PER_CHUNK
+        keys = [(op.peripheral_type, op.channel) for op in chunk.operations]
+        assert len(keys) == len(set(keys))
+        for op in chunk.operations:
+            if op.peripheral_type != PeripheralType.SPI:
+                continue
+            assert len(op.payload) <= 1800
+            count = op.payload[0]
+            lengths = op.payload[1 : 1 + count]
+            assert all(0 < n <= 255 for n in lengths)
+            body = op.payload[1 + count :]
+            assert len(body) == sum(lengths)
+            reassembled += body
+
+    assert reassembled == spi_data
+
+
 def test_chunking_default_constants() -> None:
     assert DEFAULT_MAX_OPS_PER_CHUNK == 4
     assert DEFAULT_MAX_BYTES_PER_CHUNK == 2000

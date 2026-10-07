@@ -748,12 +748,20 @@ class FixedIOProtocolConnection:
         self._queue_start()
         return self._attempt_number
 
-    def reset_application(self) -> None:
+    def reset_application(self, *, force: bool = False) -> None:
         """Queue a test-independent Application reset."""
         self._require_open()
         if not self._session_confirmed:
             raise ProtocolSessionError("Application compatibility has not been confirmed")
-        self._require_no_pending_operation()
+        if force:
+            self._pending_operation = None
+            self._transport_delivery_pending = False
+            self._upload_operations.clear()
+            self._gated_operation = None
+            self._pending_output = None
+            self._pending_output_offset = 0
+        else:
+            self._require_no_pending_operation()
         message = self.application.build_reset_application()
         self._activate_operation(
             _ApplicationOperation(
@@ -1011,6 +1019,11 @@ class FixedIOProtocolConnection:
                             stored_results.append(res)
                     if getattr(message, "flags", 0) == 0:
                         self._next_result_tick += 1
+                    if self._report_deadline is not None:
+                        self._report_deadline = max(
+                            self._report_deadline,
+                            time.monotonic() + self.run_report_grace_s,
+                        )
             else:
                 if not self._manual_mode:
                     self._fail_workflow()
@@ -1071,7 +1084,11 @@ class FixedIOProtocolConnection:
         self._status_events.append(status)
         operation = self._pending_operation
         query_origin = getattr(getattr(self.protocol, "StatusOrigin", None), "QUERY_RESPONSE", None)
-        if operation is not None and operation.kind == "status" and message.origin is query_origin:
+        if (
+            operation is not None
+            and operation.kind == "status"
+            and (message.origin == query_origin or message.origin == 1)
+        ):
             operation.response_received = True
             self._finish_pending_operation_if_ready()
             return
@@ -1391,11 +1408,12 @@ class FixedIOProtocolConnection:
             else:
                 self.get_status()
         elif operation.kind == "status":
-            self._workflow_state = (
-                ProtocolWorkflowState.READY
-                if self._status_is_ready(self._latest_rig_status)
-                else ProtocolWorkflowState.WAITING_FOR_READY
-            )
+            if self._report_expected and self._run_report is None:
+                self._workflow_state = ProtocolWorkflowState.RUNNING
+            elif self._status_is_ready(self._latest_rig_status):
+                self._workflow_state = ProtocolWorkflowState.READY
+            else:
+                self._workflow_state = ProtocolWorkflowState.WAITING_FOR_READY
         elif operation.kind in {"configuration", "tick"}:
             if self._upload_operations:
                 self._advance_or_gate(self._upload_operations.popleft())
@@ -1731,6 +1749,9 @@ class FixedIOProtocolConnection:
         remaining = self._pending_output[self._pending_output_offset :]
         try:
             accepted = self.serial_port.write(remaining)
+            if hasattr(self.serial_port, "flush"):
+                with suppress(Exception):
+                    self.serial_port.flush()
         except Exception as error:
             raise ProtocolSessionError("Could not write to the HIL-RIG serial port") from error
         if not isinstance(accepted, int) or isinstance(accepted, bool):

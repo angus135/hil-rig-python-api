@@ -27,6 +27,7 @@ UPDATE_INSTRUCTION_ENVELOPE_BYTES = 24
 LOGICAL_OPERATION_HEADER_BYTES = 4
 DEFAULT_MAX_OPS_PER_CHUNK = 4
 DEFAULT_MAX_BYTES_PER_CHUNK = 2000
+MAX_SPI_OPERATION_PAYLOAD_BYTES = 1800
 
 _UINT32_MAX = (1 << 32) - 1
 _FIXED_OUTPUT_PERIPHERALS = frozenset({"digital_output", "analogue_output", "pwm_output"})
@@ -831,15 +832,21 @@ def chunk_update_instruction(
 
     current_chunk: list[Any] = []
     current_chunk_bytes = UPDATE_INSTRUCTION_ENVELOPE_BYTES
+    current_chunk_channels: set[tuple[Any, Any]] = set()
 
     for op in operations:
         payload = getattr(op, "payload", b"")
         payload_len = len(payload) if payload is not None else 0
         op_bytes = LOGICAL_OPERATION_HEADER_BYTES + payload_len
+        op_channel_key = (
+            getattr(op, "peripheral_type", None),
+            getattr(op, "channel", None),
+        )
 
         if current_chunk and (
             len(current_chunk) >= max_ops_per_chunk
             or current_chunk_bytes + op_bytes > max_bytes_per_chunk
+            or op_channel_key in current_chunk_channels
         ):
             yield instruction_factory(
                 test_id=test_id,
@@ -848,9 +855,11 @@ def chunk_update_instruction(
                 operations=tuple(current_chunk),
             )
             current_chunk = [op]
+            current_chunk_channels = {op_channel_key}
             current_chunk_bytes = UPDATE_INSTRUCTION_ENVELOPE_BYTES + op_bytes
         else:
             current_chunk.append(op)
+            current_chunk_channels.add(op_channel_key)
             current_chunk_bytes += op_bytes
 
     if current_chunk:
@@ -1213,17 +1222,45 @@ class VariableIOProtocolAdapter:
                     tx_data = _extract_bytes(arguments.get("tx_data"))
                     if len(tx_data) <= 255:
                         spi_payload = bytes([1, len(tx_data)]) + tx_data
-                    else:
-                        chunks = [tx_data[i : i + 255] for i in range(0, len(tx_data), 255)]
-                        header = bytes([len(chunks)]) + bytes(len(c) for c in chunks)
-                        spi_payload = header + tx_data
-                    operations.append(
-                        p.LogicalOperation(
-                            peripheral_type=p.PeripheralType.SPI,
-                            channel=instruction.channel,
-                            payload=spi_payload,
+                        operations.append(
+                            p.LogicalOperation(
+                                peripheral_type=p.PeripheralType.SPI,
+                                channel=instruction.channel,
+                                payload=spi_payload,
+                            )
                         )
-                    )
+                    else:
+                        sub_packets = [tx_data[i : i + 255] for i in range(0, len(tx_data), 255)]
+                        groups: list[list[bytes]] = []
+                        current_group: list[bytes] = []
+                        current_group_bytes = 0
+
+                        for packet in sub_packets:
+                            projected_size = (
+                                1 + (len(current_group) + 1) + current_group_bytes + len(packet)
+                                if current_group
+                                else 1 + 1 + len(packet)
+                            )
+                            if current_group and projected_size > MAX_SPI_OPERATION_PAYLOAD_BYTES:
+                                groups.append(current_group)
+                                current_group = [packet]
+                                current_group_bytes = len(packet)
+                            else:
+                                current_group.append(packet)
+                                current_group_bytes += len(packet)
+
+                        if current_group:
+                            groups.append(current_group)
+
+                        for group in groups:
+                            header = bytes([len(group)]) + bytes(len(c) for c in group)
+                            operations.append(
+                                p.LogicalOperation(
+                                    peripheral_type=p.PeripheralType.SPI,
+                                    channel=instruction.channel,
+                                    payload=header + b"".join(group),
+                                )
+                            )
 
                 elif periph == "can":
                     can_data = _extract_bytes(arguments.get("data"))
@@ -1269,7 +1306,7 @@ class VariableIOProtocolAdapter:
                 seen_ops: set[tuple[object, int]] = set()
                 for op in operations:
                     op_key = (op.peripheral_type, op.channel)
-                    if op_key in seen_ops:
+                    if op.peripheral_type != p.PeripheralType.SPI and op_key in seen_ops:
                         raise ProtocolIntegrationError(
                             f"Duplicate logical operation scheduled on tick {tick} for "
                             f"{op.peripheral_type} channel {op.channel}"
@@ -1286,6 +1323,16 @@ class VariableIOProtocolAdapter:
                     )
                 )
 
+        if not messages:
+            messages.append(
+                p.UpdateInstruction(
+                    test_id=test_id,
+                    tick_number=0,
+                    flags=FLAG_COMPLETE_TICK,
+                    operations=(),
+                )
+            )
+
         return tuple(messages)
 
 
@@ -1297,6 +1344,7 @@ __all__ = [
     "FixedIOProtocolAdapter",
     "FixedIOUploadMessages",
     "LOGICAL_OPERATION_HEADER_BYTES",
+    "MAX_SPI_OPERATION_PAYLOAD_BYTES",
     "ProtocolFamily",
     "ResponseCorrelation",
     "UPDATE_INSTRUCTION_ENVELOPE_BYTES",

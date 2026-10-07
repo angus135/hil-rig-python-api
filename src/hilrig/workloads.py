@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from decimal import ROUND_FLOOR, Decimal
 from enum import Enum
 from random import Random
@@ -43,8 +43,8 @@ class ExposureClass(str, Enum):
     SOAK_5MIN = "soak_5min"
 
     @property
-    def duration_s(self) -> int:
-        """Return the standard stimulus duration in seconds."""
+    def nominal_duration_s(self) -> int:
+        """Return the standard nominal stimulus duration in seconds."""
         match self:
             case ExposureClass.DISCOVERY:
                 return 2
@@ -55,16 +55,42 @@ class ExposureClass(str, Enum):
             case ExposureClass.SOAK_5MIN:
                 return 300
 
+    @property
+    def duration_s(self) -> int:
+        """Return the nominal duration in seconds (alias for backwards compatibility)."""
+        return self.nominal_duration_s
+
+    @property
+    def minimum_ticks_floor(self) -> int:
+        """Return the minimum required tick floor to prevent deceptive low-exposure passes."""
+        match self:
+            case ExposureClass.DISCOVERY:
+                return 1_000
+            case ExposureClass.CONFIRMATION:
+                return 3_000
+            case ExposureClass.SOAK_60S:
+                return 6_000
+            case ExposureClass.SOAK_5MIN:
+                return 30_000
+
+    def duration_s_for_frequency(self, frequency_hz: int) -> int:
+        """Return duration in seconds enforcing minimum tick floor."""
+        req_seconds_for_floor = (self.minimum_ticks_floor + frequency_hz - 1) // frequency_hz
+        return max(self.nominal_duration_s, req_seconds_for_floor)
+
     def stimulus_ticks(self, frequency_hz: int, max_ticks: int = MAX_STIMULUS_TICKS) -> int:
-        """Return the authorized stimulus tick count for a frequency, capped by max_ticks."""
-        return min(self.duration_s * frequency_hz, max_ticks)
+        """Return the authorized stimulus tick count for a frequency, with floor and cap."""
+        dur_s = self.duration_s_for_frequency(frequency_hz)
+        return min(dur_s * frequency_hz, max_ticks)
 
 
-def get_exposure_duration_s(exposure: ExposureClass | str) -> int:
-    """Return the duration in seconds for an exposure class."""
+def get_exposure_duration_s(exposure: ExposureClass | str, frequency_hz: int | None = None) -> int:
+    """Return the duration in seconds for an exposure class, optionally applying frequency floor."""
     if isinstance(exposure, str):
         exposure = ExposureClass(exposure.lower())
-    return exposure.duration_s
+    if frequency_hz is not None:
+        return exposure.duration_s_for_frequency(frequency_hz)
+    return exposure.nominal_duration_s
 
 
 def get_exposure_ticks(frequency_hz: int, exposure: ExposureClass | str) -> int:
@@ -326,31 +352,51 @@ class LoopbackConfiguration:
         )
 
     @classmethod
-    def config_0_uart_only_prototype(cls, baud_hz: int = 2_000_000) -> LoopbackConfiguration:
-        """Configuration 0 — UART2 Max-Baud Prototype (195.3 KiB/s theoretical payload)."""
+    def config_0_prototype(
+        cls,
+        uart_baud_hz: int = 2_000_000,
+        spi_baud: SPIBaud = SPIBaud.BAUD_5M625BIT,
+    ) -> LoopbackConfiguration:
+        """Configuration 0 — Prototype (UART2 + SPI2) (881.9 KiB/s theoretical payload)."""
+        spi_baud_hz = spi_baud.value
+        uart_rate = uart_baud_hz / 10.0 / 1024.0
+        spi_rate = spi_baud_hz / 8.0 / 1024.0
         return cls(
             config_id=0,
-            name="0 — UART2 Max-Baud Prototype",
-            description=f"UART 1x {baud_hz / 1_000_000:g} Mbps (UART2 TX -> RX)",
-            purpose="Isolated single-peripheral UART2 loopback verification at max baud",
-            theoretical_payload_rate_kib=round(baud_hz / 10.0 / 1024.0, 1),
+            name="0 — Prototype (UART2 + SPI2)",
+            description=f"UART 1x {uart_baud_hz / 1_000_000:g} Mbps, SPI 1x {spi_baud_hz / 1_000_000:g} Mbps (UART2 TX->RX, SPI2 MOSI->MISO)",
+            purpose="Dual-peripheral UART2 and SPI2 prototype characterization",
+            theoretical_payload_rate_kib=round(uart_rate + spi_rate, 1),
             channels=(
                 LoopbackChannelConfig(
                     peripheral="uart",
                     channel_index=1,
                     name="UART_ch2",
-                    bit_rate_hz=baud_hz,
+                    bit_rate_hz=uart_baud_hz,
                     wire_bits_per_byte=10,
+                ),
+                LoopbackChannelConfig(
+                    peripheral="spi",
+                    channel_index=1,
+                    name="SPI_ch2",
+                    bit_rate_hz=spi_baud_hz,
+                    wire_bits_per_byte=8,
+                    spi_baud=spi_baud,
                 ),
             ),
         )
+
+    @classmethod
+    def config_0_uart_only_prototype(cls, baud_hz: int = 2_000_000) -> LoopbackConfiguration:
+        """Legacy alias for Configuration 0."""
+        return cls.config_0_prototype(uart_baud_hz=baud_hz)
 
     @classmethod
     def from_id(cls, config_id: int) -> LoopbackConfiguration:
         """Lookup configuration by index (0..4)."""
         match config_id:
             case 0:
-                return cls.config_0_uart_only_prototype()
+                return cls.config_0_prototype()
             case 1:
                 return cls.config_1_automotive_gateway()
             case 2:
@@ -416,7 +462,7 @@ def workload_point_for_exposure(
     seed: int = 1,
 ) -> LoopbackWorkloadPoint:
     """Convenience helper to create a workload point for a given exposure class."""
-    duration_s = get_exposure_duration_s(exposure)
+    duration_s = get_exposure_duration_s(exposure, frequency_hz=frequency_hz)
     return LoopbackWorkloadPoint(
         frequency_hz=frequency_hz,
         duration_s=duration_s,
@@ -656,6 +702,91 @@ def compile_configuration_workload(
     )
 
 
+MAX_RIG_INSTRUCTION_STORAGE_BYTES: int = 66_977_792  # 63.875 MiB hardware flash instruction store
+
+
+def estimate_workload_instruction_bytes(
+    configuration: LoopbackConfiguration,
+    point: LoopbackWorkloadPoint,
+) -> int:
+    """Estimate the total serialized instruction bytes for a workload point."""
+    burst_slots = len(_burst_ticks(point))
+    if burst_slots <= 0:
+        return 0
+
+    # Per-tick protocol container overhead (~12 bytes per active tick)
+    total_bytes = burst_slots * 12
+
+    for ch in configuration.channels:
+        if not ch.is_transmitter:
+            continue
+        wire_bit_budget = _wire_bit_budget(ch.bit_rate_hz, point)
+        if ch.peripheral in {"uart", "spi"}:
+            payload_byte_budget = wire_bit_budget // ch.wire_bits_per_byte
+            # LogicalOperation header (~4-6 bytes) per burst slot + data payload
+            total_bytes += payload_byte_budget + (burst_slots * 6)
+        elif ch.peripheral == "can":
+            frame_budget = wire_bit_budget // ch.can_wire_bits_per_frame
+            total_bytes += frame_budget * 12 + (burst_slots * 4)
+
+    return total_bytes
+
+
+def calculate_max_safe_duration_s(
+    configuration: LoopbackConfiguration,
+    frequency_hz: int,
+    target_utilization_percent: float,
+    *,
+    burst_interval_ticks: int = 1,
+    max_storage_bytes: int = MAX_RIG_INSTRUCTION_STORAGE_BYTES,
+    headroom_fraction: float = 0.95,
+) -> int:
+    """Calculate the maximum test duration in seconds that safely fits within RIG flash storage."""
+    test_pt = LoopbackWorkloadPoint(
+        frequency_hz=frequency_hz,
+        duration_s=1,
+        target_utilization_percent=target_utilization_percent,
+        burst_interval_ticks=burst_interval_ticks,
+        seed=1,
+    )
+    bytes_per_second = estimate_workload_instruction_bytes(configuration, test_pt)
+    if bytes_per_second <= 0:
+        return 300
+
+    safe_capacity = int(max_storage_bytes * headroom_fraction)
+    max_duration_s = max(1, safe_capacity // bytes_per_second)
+    return max_duration_s
+
+
+def adapt_workload_point_duration(
+    configuration: LoopbackConfiguration,
+    point: LoopbackWorkloadPoint,
+    *,
+    max_duration_s: int | None = None,
+    headroom_fraction: float = 0.95,
+    max_storage_bytes: int = MAX_RIG_INSTRUCTION_STORAGE_BYTES,
+    minimum_ticks_floor: int | None = None,
+) -> LoopbackWorkloadPoint:
+    """Adapt a workload point's duration so it stays within RIG flash storage capacity."""
+    requested_duration_s = max_duration_s if max_duration_s is not None else point.duration_s
+    safe_max_duration_s = calculate_max_safe_duration_s(
+        configuration,
+        frequency_hz=point.frequency_hz,
+        target_utilization_percent=point.target_utilization_percent,
+        burst_interval_ticks=point.burst_interval_ticks,
+        max_storage_bytes=max_storage_bytes,
+        headroom_fraction=headroom_fraction,
+    )
+    effective_duration_s = min(requested_duration_s, safe_max_duration_s)
+    if minimum_ticks_floor is not None:
+        min_duration_for_floor = (minimum_ticks_floor + point.frequency_hz - 1) // point.frequency_hz
+        effective_duration_s = max(effective_duration_s, min_duration_for_floor)
+
+    if effective_duration_s == point.duration_s:
+        return point
+    return replace(point, duration_s=effective_duration_s)
+
+
 def check_workload_admissibility(
     configuration: LoopbackConfiguration,
     point: LoopbackWorkloadPoint,
@@ -664,6 +795,7 @@ def check_workload_admissibility(
     uart_tx_buffer: int = 2048,
     spi_tx_buffer: int = 4096,
     can_tx_queue: int = 83,
+    max_storage_bytes: int = MAX_RIG_INSTRUCTION_STORAGE_BYTES,
 ) -> tuple[bool, str | None]:
     """Check compile-time representation constraints without running on-rig.
 
@@ -708,6 +840,17 @@ def check_workload_admissibility(
                         f"({max_frames_per_tick}) exceeds TX queue ({can_tx_queue})"
                     ),
                 )
+
+    est_storage = estimate_workload_instruction_bytes(configuration, point)
+    if est_storage > max_storage_bytes:
+        return (
+            False,
+            (
+                f"Estimated total instruction bytes ({est_storage:,} B) "
+                f"exceeds maximum RIG flash instruction storage ({max_storage_bytes:,} B)"
+            ),
+        )
+
     return (True, None)
 
 

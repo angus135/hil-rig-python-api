@@ -116,6 +116,11 @@ class CompiledTestIR:
         return f"{self.test_id:032x}"
 
     @property
+    def instruction_count(self) -> int:
+        """Return the total number of compiled instructions."""
+        return len(self.instructions)
+
+    @property
     def tick_period_ns(self) -> int:
         """Return the duration of one configured execution tick in nanoseconds."""
         return 1_000_000_000 // self.frequency_hz

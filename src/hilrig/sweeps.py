@@ -15,6 +15,7 @@ from hilrig.workloads import (
     ExposureClass,
     LoopbackConfiguration,
     LoopbackWorkloadPoint,
+    adapt_workload_point_duration,
     check_workload_admissibility,
     workload_point_for_exposure,
 )
@@ -257,8 +258,7 @@ class CellSearchResult:
             self.soak_runs
         )
         return sum(
-            run.requested_duration_s or (run.point.duration_s if run.point else 0.0)
-            for run in runs
+            run.requested_duration_s or (run.point.duration_s if run.point else 0.0) for run in runs
         )
 
     @property
@@ -382,8 +382,7 @@ class BurstCellSearchResult:
             self.soak_runs
         )
         return sum(
-            run.requested_duration_s or (run.point.duration_s if run.point else 0.0)
-            for run in runs
+            run.requested_duration_s or (run.point.duration_s if run.point else 0.0) for run in runs
         )
 
     @property
@@ -669,6 +668,8 @@ class UtilizationCeilingSweep:
         self._soak_idx = 0
         self._soak_passed = False
         self._soak_survived_ticks = 0
+        self._soak_time_backoff_factor = 1.0
+        self._soak_time_backoff_count = 0
 
     @property
     def stage(self) -> SweepStage:
@@ -722,13 +723,18 @@ class UtilizationCeilingSweep:
                 if self._soak_idx < len(self._soak_queue) and self._confirmed_ceiling is not None:
                     exposure = self._soak_queue[self._soak_idx]
                     guarded_pct = self._calculate_guarded_point(self._confirmed_ceiling)
-                    return workload_point_for_exposure(
+                    pt = workload_point_for_exposure(
                         frequency_hz=self.frequency_hz,
                         target_utilization_percent=guarded_pct,
                         exposure=exposure,
                         burst_interval_ticks=1,
                         seed=100 + self._soak_idx,
                     )
+                    adapted = adapt_workload_point_duration(self.config, pt)
+                    if self._soak_time_backoff_factor < 1.0:
+                        reduced_dur = max(5, int(adapted.duration_s * self._soak_time_backoff_factor))
+                        adapted = replace(adapted, duration_s=reduced_dur)
+                    return adapted
                 return None
 
     def record(
@@ -771,9 +777,7 @@ class UtilizationCeilingSweep:
                 passed=passed,
             )
 
-        if not passed and (
-            self._lowest_failing_pct is None or pct < self._lowest_failing_pct
-        ):
+        if not passed and (self._lowest_failing_pct is None or pct < self._lowest_failing_pct):
             self._lowest_failing_pct = pct
             self._lowest_failing_stage = self._stage
             if run.failure_domain is not None:
@@ -808,10 +812,25 @@ class UtilizationCeilingSweep:
                 if passed:
                     self._soak_survived_ticks += run.point.total_ticks
                     self._soak_idx += 1
+                    self._soak_time_backoff_factor = 1.0
+                    self._soak_time_backoff_count = 0
                     if self._soak_idx >= len(self._soak_queue):
                         self._soak_passed = True
+                elif run.failure_domain is FailureDomain.UPLOAD:
+                    # Flash storage limit reached during upload: back off duration (time), not utilization %
+                    if self._soak_time_backoff_count < 3 and run.point.duration_s > 5:
+                        self._soak_time_backoff_count += 1
+                        self._soak_time_backoff_factor *= 0.75
+                        print(
+                            f"\n  [STORAGE BACKOFF] Flash capacity limit reached during upload. "
+                            f"Retrying utilization {run.point.target_utilization_percent:g}% with reduced duration "
+                            f"({max(5, int(run.point.duration_s * 0.75))}s).",
+                            flush=True,
+                        )
+                        return
+                    self._soak_idx = len(self._soak_queue)
                 else:
-                    # Soak failed: back off to next lower passing candidate (max 2 backoff attempts)
+                    # Functional / timing / ISR failure: back off utilization %
                     backoff_count = getattr(self, "_backoff_soak_count", 0)
                     if backoff_count < 2 and self._confirmed_ceiling is not None:
                         self._backoff_soak_count = backoff_count + 1
@@ -824,7 +843,7 @@ class UtilizationCeilingSweep:
                             self._confirmed_ceiling = lower_candidates[0]
                             self._soak_idx = 0
                             return
-                    self._soak_idx = len(self._soak_queue)  # Terminate soak on exhausted backoff
+                    self._soak_idx = len(self._soak_queue)
 
     def _current_requested_pct(self) -> float:
         pt = self.next_point()
@@ -963,9 +982,7 @@ class UtilizationCeilingSweep:
 
         verified_diags: dict[str, Any] | None = None
         if self._confirmed_ceiling is not None:
-            matching_runs = [
-                r for r in self._soak_runs if r.passed and r.diagnostics
-            ] + [
+            matching_runs = [r for r in self._soak_runs if r.passed and r.diagnostics] + [
                 r
                 for r in self._runs_by_pct.get(self._confirmed_ceiling, [])
                 if r.passed and r.diagnostics
@@ -1040,6 +1057,8 @@ class BurstinessSweep:
         self._soak_idx = 0
         self._soak_passed = False
         self._soak_survived_ticks = 0
+        self._soak_time_backoff_factor = 1.0
+        self._soak_time_backoff_count = 0
 
     @property
     def stage(self) -> SweepStage:
@@ -1089,13 +1108,18 @@ class BurstinessSweep:
             case SweepStage.SOAK_VALIDATION:
                 if self._soak_idx < len(self._soak_queue) and self._confirmed_burst is not None:
                     exposure = self._soak_queue[self._soak_idx]
-                    return workload_point_for_exposure(
+                    pt = workload_point_for_exposure(
                         frequency_hz=self.frequency_hz,
                         target_utilization_percent=self.target_utilization_percent,
                         exposure=exposure,
                         burst_interval_ticks=self._confirmed_burst,
                         seed=200 + self._soak_idx,
                     )
+                    adapted = adapt_workload_point_duration(self.config, pt)
+                    if self._soak_time_backoff_factor < 1.0:
+                        reduced_dur = max(5, int(adapted.duration_s * self._soak_time_backoff_factor))
+                        adapted = replace(adapted, duration_s=reduced_dur)
+                    return adapted
                 return None
 
     def record(
@@ -1129,8 +1153,7 @@ class BurstinessSweep:
             )
 
         if not passed and (
-            self._lowest_failing_interval is None
-            or interval < self._lowest_failing_interval
+            self._lowest_failing_interval is None or interval < self._lowest_failing_interval
         ):
             self._lowest_failing_interval = interval
             self._lowest_failing_stage = self._stage
@@ -1176,8 +1199,23 @@ class BurstinessSweep:
                 if passed:
                     self._soak_survived_ticks += run.point.total_ticks
                     self._soak_idx += 1
+                    self._soak_time_backoff_factor = 1.0
+                    self._soak_time_backoff_count = 0
                     if self._soak_idx >= len(self._soak_queue):
                         self._soak_passed = True
+                elif run.failure_domain is FailureDomain.UPLOAD:
+                    # Flash storage limit reached during upload: back off duration (time), not burst interval
+                    if self._soak_time_backoff_count < 3 and run.point.duration_s > 5:
+                        self._soak_time_backoff_count += 1
+                        self._soak_time_backoff_factor *= 0.75
+                        print(
+                            f"\n  [STORAGE BACKOFF] Flash capacity limit reached during burst upload. "
+                            f"Retrying burst interval {interval} with reduced duration "
+                            f"({max(5, int(run.point.duration_s * 0.75))}s).",
+                            flush=True,
+                        )
+                        return
+                    self._soak_idx = len(self._soak_queue)
                 else:
                     # Soak failed: back off to next lower passing burst interval
                     # (max 2 backoff attempts)
@@ -1308,9 +1346,7 @@ class BurstinessSweep:
 
         verified_diags: dict[str, Any] | None = None
         if self._confirmed_burst is not None:
-            matching_runs = [
-                r for r in self._soak_runs if r.passed and r.diagnostics
-            ] + [
+            matching_runs = [r for r in self._soak_runs if r.passed and r.diagnostics] + [
                 r
                 for r in self._runs_by_interval.get(self._confirmed_burst, [])
                 if r.passed and r.diagnostics
@@ -1706,7 +1742,9 @@ class CampaignReport:
             can_drops = 0
             if "can" in d:
                 can_drops = sum(c_dat.get("rx_dropped", 0) for c_dat in d["can"].values())
-            health_str = f"0 loss, 0 RX drops (CAN drops: {can_drops})" if r.soak_passed else "Soak failed"
+            health_str = (
+                f"0 loss, 0 RX drops (CAN drops: {can_drops})" if r.soak_passed else "Soak failed"
+            )
 
             lines.append(
                 f"| **{r.config.name}** | {r.frequency_hz} Hz | {ceiling_str} | {isr_str} | {ib_str} | {res_str} | {periph_str} | {health_str} |"
@@ -1794,9 +1832,15 @@ class CampaignReport:
                     r.total_exposure_ticks,
                     round(r.total_requested_duration_s, 2),
                     round(r.total_wall_duration_s, 2),
-                    r.average_upload_throughput_kib_s if r.average_upload_throughput_kib_s is not None else "",
-                    r.average_execution_duty_efficiency_percent if r.average_execution_duty_efficiency_percent is not None else "",
-                    r.average_turnaround_overhead_ratio if r.average_turnaround_overhead_ratio is not None else "",
+                    r.average_upload_throughput_kib_s
+                    if r.average_upload_throughput_kib_s is not None
+                    else "",
+                    r.average_execution_duty_efficiency_percent
+                    if r.average_execution_duty_efficiency_percent is not None
+                    else "",
+                    r.average_turnaround_overhead_ratio
+                    if r.average_turnaround_overhead_ratio is not None
+                    else "",
                 ]
             )
         for r in self.sweep_2_results:
@@ -1816,9 +1860,15 @@ class CampaignReport:
                     r.total_exposure_ticks,
                     round(r.total_requested_duration_s, 2),
                     round(r.total_wall_duration_s, 2),
-                    r.average_upload_throughput_kib_s if r.average_upload_throughput_kib_s is not None else "",
-                    r.average_execution_duty_efficiency_percent if r.average_execution_duty_efficiency_percent is not None else "",
-                    r.average_turnaround_overhead_ratio if r.average_turnaround_overhead_ratio is not None else "",
+                    r.average_upload_throughput_kib_s
+                    if r.average_upload_throughput_kib_s is not None
+                    else "",
+                    r.average_execution_duty_efficiency_percent
+                    if r.average_execution_duty_efficiency_percent is not None
+                    else "",
+                    r.average_turnaround_overhead_ratio
+                    if r.average_turnaround_overhead_ratio is not None
+                    else "",
                 ]
             )
         return out.getvalue()
@@ -1991,7 +2041,9 @@ class LoopbackSweepCampaign:
             base_isr_cycles = {1: 11_100, 2: 7_400, 3: 9_250, 4: 14_800}.get(
                 config.config_id, 8_000
             )
-            sim_isr = int(base_isr_cycles * (0.5 + 0.5 * (point.target_utilization_percent / 100.0)))
+            sim_isr = int(
+                base_isr_cycles * (0.5 + 0.5 * (point.target_utilization_percent / 100.0))
+            )
             sim_margin = max(0, deadline - sim_isr)
             sim_diag = {
                 "isr": {
@@ -2046,7 +2098,9 @@ class LoopbackSweepCampaign:
             }
 
             req_dur = float(point.duration_s)
-            sim_bytes = int(point.total_ticks * 4 * (point.target_utilization_percent / 100.0) + 128)
+            sim_bytes = int(
+                point.total_ticks * 4 * (point.target_utilization_percent / 100.0) + 128
+            )
             sim_upload_dur = round(max(0.005, sim_bytes / (180.0 * 1024.0)), 4)
             sim_exec_dur = req_dur
             sim_total_wall = round(req_dur + sim_upload_dur + 0.02, 4)
@@ -2105,7 +2159,7 @@ class LoopbackSweepCampaign:
         from hilrig.protocol.serial import SerialConnectionSettings
         from hilrig.results import CapturedRunBuilder, CaptureStatus
         from hilrig.runner import write_run_artifacts
-        from hilrig.workloads import build_loopback_test
+        from hilrig.workloads import build_loopback_test, estimate_workload_instruction_bytes
 
         base_dir = Path(runs_directory) if runs_directory else Path("runs")
         base_dir.mkdir(parents=True, exist_ok=True)
@@ -2133,40 +2187,64 @@ class LoopbackSweepCampaign:
                         port_obj.reset_input_buffer()
                     if hasattr(port_obj, "reset_output_buffer"):
                         port_obj.reset_output_buffer()
+            incoming = getattr(conn, "_incoming", None)
+            if incoming is not None:
+                with suppress(Exception):
+                    incoming.clear()
 
         def _reset_connection(conn):
-            if conn is None:
+            if conn is None or getattr(conn, "closed", False):
                 return
-            _purge_serial(conn)
-            deadline = time.monotonic() + 0.5
-            while time.monotonic() < deadline and getattr(
-                conn, "_transport_delivery_pending", False
-            ):
-                conn.service()
-                time.sleep(0.002)
-
-            conn._pending_operation = None
             conn.result_adapter = None
-            try:
-                conn.reset_application()
-                reset_wait = time.monotonic() + 3.0
-                while (
-                    time.monotonic() < reset_wait
-                    and conn.workflow_state is ProtocolWorkflowState.RESETTING
-                ):
-                    rep = conn.service()
-                    if not (
-                        rep.serial_bytes_read
-                        or rep.serial_bytes_written
-                        or rep.application_message_submitted
-                    ):
-                        time.sleep(0.002)
-            except Exception:
-                pass
+            _purge_serial(conn)
 
-            readiness_wait = time.monotonic() + 3.0
+            # Send un-gated raw RESET_APPLICATION frame to immediately halt any ongoing MCU test execution
+            port_obj = getattr(conn, "serial_port", None)
+            if port_obj is not None and hasattr(conn, "application"):
+                with suppress(Exception):
+                    raw_reset = conn.application.encode(conn.application.build_reset_application())
+                    raw_framed = len(raw_reset).to_bytes(2, "little") + raw_reset
+                    port_obj.write(raw_framed)
+                    if hasattr(port_obj, "flush"):
+                        port_obj.flush()
+                time.sleep(0.05)
+
+            _purge_serial(conn)
+
+            # Clean host transaction state
+            conn._retire_active_upload()
+            conn.result_adapter = None
+            conn._run_report = None
+            conn._report_deadline = None
+            conn._report_timed_out = False
+            conn._status_events = []
+            conn._lifecycle_responses = []
+            conn._accumulated_errors = []
+            conn._pending_operation = None
+            conn._gated_operation = None
+            conn._pending_output = None
+            conn._pending_output_offset = 0
+            conn._transport_delivery_pending = False
+            conn._upload_operations.clear()
+
+            # Query RIG status to confirm it transitioned back to ready_for_upload
+            if conn.session_confirmed:
+                with suppress(Exception):
+                    conn.get_status()
+
+            readiness_wait = time.monotonic() + 4.0
+            next_query = time.monotonic() + 0.8
             while time.monotonic() < readiness_wait and not conn.ready_for_upload:
                 rep = conn.service()
+                if (
+                    conn.session_confirmed
+                    and not conn.ready_for_upload
+                    and conn.workflow_state is ProtocolWorkflowState.WAITING_FOR_READY
+                    and time.monotonic() >= next_query
+                ):
+                    with suppress(Exception):
+                        conn.get_status()
+                    next_query = time.monotonic() + 0.8
                 if not (
                     rep.serial_bytes_read
                     or rep.serial_bytes_written
@@ -2174,9 +2252,12 @@ class LoopbackSweepCampaign:
                 ):
                     time.sleep(0.002)
 
+            conn._pending_operation = None
+            conn._transport_delivery_pending = False
+
         def _get_connection():
             conn = active_connection[0]
-            if conn is not None:
+            if conn is not None and not conn.closed:
                 try:
                     if (
                         conn.session_confirmed
@@ -2185,7 +2266,11 @@ class LoopbackSweepCampaign:
                     ):
                         return conn
                     _reset_connection(conn)
-                    if conn.session_confirmed and conn.ready_for_upload:
+                    if (
+                        conn.session_confirmed
+                        and conn.ready_for_upload
+                        and getattr(conn, "_pending_operation", None) is None
+                    ):
                         return conn
                 except Exception:
                     pass
@@ -2193,8 +2278,8 @@ class LoopbackSweepCampaign:
                     conn.close()
                 active_connection[0] = None
 
-            # Retry connecting up to 3 times in case MCU is draining/resetting
-            for attempt in range(3):
+            # Retry connecting up to 4 times
+            for attempt in range(4):
                 time.sleep(0.3 if attempt == 0 else 1.0)
                 try:
                     try:
@@ -2202,24 +2287,46 @@ class LoopbackSweepCampaign:
                     except TypeError:
                         conn = factory()
                     _purge_serial(conn)
-                    deadline = time.monotonic() + 5.0
-                    while time.monotonic() < deadline and not conn.session_confirmed:
+
+                    # If retry attempt, MCU might be executing/faulted; send un-gated RESET_APPLICATION frame
+                    if attempt > 0:
+                        with suppress(Exception):
+                            raw_reset = conn.application.encode(
+                                conn.application.build_reset_application()
+                            )
+                            raw_framed = len(raw_reset).to_bytes(2, "little") + raw_reset
+                            conn.serial_port.write(raw_framed)
+                            if hasattr(conn.serial_port, "flush"):
+                                conn.serial_port.flush()
+                        time.sleep(0.05)
+                        _purge_serial(conn)
+
+                    deadline = time.monotonic() + 6.0
+                    next_query = time.monotonic() + 1.0
+                    while time.monotonic() < deadline and (
+                        not conn.session_confirmed or not conn.ready_for_upload
+                    ):
                         rep = conn.service()
+                        if (
+                            conn.session_confirmed
+                            and not conn.ready_for_upload
+                            and conn.workflow_state is ProtocolWorkflowState.WAITING_FOR_READY
+                            and time.monotonic() >= next_query
+                        ):
+                            with suppress(Exception):
+                                conn.get_status()
+                            next_query = time.monotonic() + 1.0
                         if not (
                             rep.serial_bytes_read
                             or rep.serial_bytes_written
                             or rep.application_message_submitted
                         ):
                             time.sleep(0.002)
-                    if conn.session_confirmed:
-                        if (
-                            not conn.ready_for_upload
-                            or getattr(conn, "_pending_operation", None) is not None
-                        ):
-                            _reset_connection(conn)
-                        if conn.ready_for_upload:
-                            active_connection[0] = conn
-                            return conn
+
+                    if conn.session_confirmed and conn.ready_for_upload:
+                        active_connection[0] = conn
+                        return conn
+
                     with suppress(Exception):
                         conn.close()
                 except Exception:
@@ -2242,7 +2349,7 @@ class LoopbackSweepCampaign:
                 flush=True,
             )
 
-            # Check compile-time admissibility first (e.g. peripheral buffer overflow)
+            # Check compile-time admissibility first (e.g. peripheral buffer overflow or flash storage)
             admissible, reason = check_workload_admissibility(config, point)
             if not admissible:
                 print(f"FAIL (buffer/admissibility: {reason})", flush=True)
@@ -2304,22 +2411,41 @@ class LoopbackSweepCampaign:
 
                 host_start_requested = False
                 expected_duration_s = float(point.duration_s)
-                tick_allowance_s = float(point.total_ticks) * 0.002
-                watchdog_deadline = time.monotonic() + max(
-                    30.0, tick_allowance_s + expected_duration_s * 3.0 + 15.0
-                )
+                est_bytes = estimate_workload_instruction_bytes(config, point)
+                upload_allowance_s = max(60.0, (est_bytes / 50_000.0) + 60.0)
+                watchdog_deadline = time.monotonic() + upload_allowance_s
+                last_traffic_time = time.monotonic()
+                inactivity_timeout_s = 45.0
+
                 while not connection.report_received:
-                    if time.monotonic() > watchdog_deadline:
-                        raise TimeoutError(
-                            f"Execution timed out after {expected_duration_s}s "
-                            "(no run report received from RIG)"
-                        )
+                    now = time.monotonic()
+                    if now > watchdog_deadline:
+                        if now - last_traffic_time > inactivity_timeout_s:
+                            phase = "Execution" if host_start_requested else "Upload"
+                            raise TimeoutError(
+                                f"{phase} timed out after {now - (t_exec_start or t_upload_start):.1f}s "
+                                "(no activity received from RIG)"
+                            )
+                        else:
+                            # Still actively receiving data over USB/serial; extend deadline dynamically
+                            watchdog_deadline = now + inactivity_timeout_s
+
                     rep = connection.service()
+
+                    if (
+                        rep.serial_bytes_read
+                        or rep.serial_bytes_written
+                        or rep.stored_tick_results
+                        or rep.application_message_submitted
+                    ):
+                        last_traffic_time = now
+
                     if connection.workflow_state is ProtocolWorkflowState.FAILED:
                         err_msg = (
                             getattr(connection, "last_error", None) or "Protocol workflow failed"
                         )
                         raise ProtocolSessionError(err_msg)
+
                     if (
                         getattr(connection, "workflow_state", None) is not None
                         and str(connection.workflow_state).endswith("READY_TO_START")
@@ -2329,6 +2455,10 @@ class LoopbackSweepCampaign:
                         t_exec_start = time.monotonic()
                         connection.start()
                         host_start_requested = True
+                        tick_drain_allowance_s = float(point.total_ticks) * 0.005
+                        exec_allowance_s = max(60.0, expected_duration_s * 2.5 + tick_drain_allowance_s + 30.0)
+                        watchdog_deadline = time.monotonic() + exec_allowance_s
+
                     if not (
                         rep.serial_bytes_read
                         or rep.serial_bytes_written
@@ -2361,10 +2491,20 @@ class LoopbackSweepCampaign:
                 # Timing & USB metrics
                 req_dur = float(point.duration_s)
                 tot_wall = round(t_wall_end - t_wall_start, 4)
-                up_dur = round(t_upload_end - t_upload_start, 4) if (t_upload_start and t_upload_end) else None
-                ex_dur = round(t_exec_end - t_exec_start, 4) if (t_exec_start and t_exec_end) else None
+                up_dur = (
+                    round(t_upload_end - t_upload_start, 4)
+                    if (t_upload_start and t_upload_end)
+                    else None
+                )
+                ex_dur = (
+                    round(t_exec_end - t_exec_start, 4) if (t_exec_start and t_exec_end) else None
+                )
                 up_bytes = getattr(attempt, "total_bytes", None) or (compiled.instruction_count * 8)
-                up_kib_s = round((up_bytes / 1024.0) / up_dur, 2) if (up_bytes and up_dur and up_dur > 0) else None
+                up_kib_s = (
+                    round((up_bytes / 1024.0) / up_dur, 2)
+                    if (up_bytes and up_dur and up_dur > 0)
+                    else None
+                )
                 duty_eff = round((req_dur / tot_wall) * 100.0, 2) if tot_wall > 0 else None
                 ovh_ratio = round((tot_wall - req_dur) / req_dur, 3) if req_dur > 0 else None
 
@@ -2391,9 +2531,7 @@ class LoopbackSweepCampaign:
                             if "UNDERRUN" in rep.failure_reason
                             else FailureDomain.BUFFER
                         )
-                        failure_reason = (
-                            f"Firmware {rep.failure_source} failed: {rep.failure_reason} ({rep.failure_stage})"
-                        )
+                        failure_reason = f"Firmware {rep.failure_source} failed: {rep.failure_reason} ({rep.failure_stage})"
                     else:
                         failure_domain = FailureDomain.INTEGRITY
                         failure_reason = f"Run verification verdict: {verdict}"
@@ -2441,12 +2579,28 @@ class LoopbackSweepCampaign:
                 print(f"ERROR ({err})", flush=True)
                 if active_connection[0] is not None:
                     with suppress(Exception):
-                        if active_connection[0].session_confirmed:
-                            active_connection[0].abort()
-                            active_connection[0].service()
-                    with suppress(Exception):
-                        active_connection[0].close()
-                    active_connection[0] = None
+                        _reset_connection(active_connection[0])
+                    # If reset restored session and readiness, keep connection alive!
+                    if not (
+                        active_connection[0].session_confirmed
+                        and active_connection[0].ready_for_upload
+                        and not active_connection[0].closed
+                    ):
+                        with suppress(Exception):
+                            active_connection[0].close()
+                        active_connection[0] = None
+
+                err_str = str(err)
+                fail_domain = FailureDomain.UPLOAD
+                if "26" in err_str:
+                    fail_domain = FailureDomain.BUFFER
+                    fail_reason = (
+                        "Firmware Host Interface Error "
+                        "(detail=26: USB Direct Streaming frame limit exceeded)"
+                    )
+                else:
+                    fail_reason = err_str
+
                 if builder:
                     with suppress(Exception):
                         captured_run = builder.finalize(status=CaptureStatus.FAILED)
@@ -2458,8 +2612,8 @@ class LoopbackSweepCampaign:
                     point=point,
                     stage=stage,
                     passed=False,
-                    failure_domain=FailureDomain.UPLOAD,
-                    failure_reason=str(err),
+                    failure_domain=fail_domain,
+                    failure_reason=fail_reason,
                     requested_duration_s=float(point.duration_s),
                     run_id=run_id_hex,
                 )

@@ -72,14 +72,17 @@ def test_exposure_classes_and_tick_conversions() -> None:
     assert get_exposure_duration_s(ExposureClass.SOAK_60S) == 60
     assert get_exposure_duration_s(ExposureClass.SOAK_5MIN) == 300
 
-    assert get_exposure_ticks(100, ExposureClass.DISCOVERY) == 200
+    # Minimum tick floor enforced at 100 Hz (1,000 ticks discovery floor)
+    assert get_exposure_ticks(100, ExposureClass.DISCOVERY) == 1_000
     assert get_exposure_ticks(1_000, ExposureClass.DISCOVERY) == 2_000
     assert get_exposure_ticks(10_000, ExposureClass.DISCOVERY) == 20_000
 
-    assert get_exposure_ticks(100, ExposureClass.CONFIRMATION) == 1_000
+    # Minimum tick floor enforced at 100 Hz (3,000 ticks confirmation floor)
+    assert get_exposure_ticks(100, ExposureClass.CONFIRMATION) == 3_000
     assert get_exposure_ticks(1_000, ExposureClass.CONFIRMATION) == 10_000
     assert get_exposure_ticks(10_000, ExposureClass.CONFIRMATION) == 100_000
 
+    # Minimum tick floor enforced at 100 Hz (6,000 ticks soak floor -> 60s)
     assert get_exposure_ticks(100, ExposureClass.SOAK_60S) == 6_000
     assert get_exposure_ticks(1_000, ExposureClass.SOAK_60S) == 60_000
     assert get_exposure_ticks(10_000, ExposureClass.SOAK_60S) == 600_000
